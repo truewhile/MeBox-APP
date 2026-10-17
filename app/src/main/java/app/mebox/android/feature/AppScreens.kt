@@ -21,8 +21,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -32,6 +34,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +64,8 @@ import app.mebox.android.core.ui.MeBoxDivider
 import app.mebox.android.core.ui.MeBoxEmptyState
 import app.mebox.android.core.ui.MeBoxOutlinedButton
 import app.mebox.android.core.ui.MeBoxTextField
+import app.mebox.android.feature.diagnostics.LogShareDialog
+import app.mebox.android.feature.diagnostics.rememberLogExport
 import app.mebox.android.feature.media.AccountHost
 
 @Composable
@@ -125,6 +131,15 @@ private fun LoadingScreen() {
 
 @Composable
 private fun ConnectionScreen(state: AppUiState.Connection, viewModel: MainViewModel) {
+    val exportLogs = rememberLogExport()
+    var showLogShare by remember { mutableStateOf(false) }
+    val logShareUrl by viewModel.logShare.url.collectAsStateWithLifecycle()
+    LaunchedEffect(showLogShare) {
+        if (showLogShare) viewModel.logShare.start() else viewModel.logShare.stop()
+    }
+    DisposableEffect(Unit) {
+        onDispose { viewModel.logShare.stop() }
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -193,6 +208,27 @@ private fun ConnectionScreen(state: AppUiState.Connection, viewModel: MainViewMo
             }
         }
 
+        Spacer(Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            TextButton(onClick = exportLogs) {
+                Text(
+                    "导出日志",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = { showLogShare = true }) {
+                Text(
+                    "局域网下载日志",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
         Spacer(Modifier.height(16.dp))
         Text(
             "账号密码只在本次登录中使用，不会写入手机存储。",
@@ -209,6 +245,14 @@ private fun ConnectionScreen(state: AppUiState.Connection, viewModel: MainViewMo
             address = pending,
             onConfirm = viewModel::confirmCleartext,
             onDismiss = viewModel::dismissCleartext,
+        )
+    }
+
+    if (showLogShare) {
+        LogShareDialog(
+            url = logShareUrl,
+            onRefresh = { viewModel.logShare.restart() },
+            onDismiss = { showLogShare = false },
         )
     }
 }
@@ -346,6 +390,15 @@ internal fun ProfileContent(
     onOpenHistory: (() -> Unit)? = null,
 ) {
     val currentEngine by viewModel.playerEngine.collectAsStateWithLifecycle()
+    val exportLogs = rememberLogExport()
+    var showLogShare by remember { mutableStateOf(false) }
+    val logShareUrl by viewModel.logShare.url.collectAsStateWithLifecycle()
+    LaunchedEffect(showLogShare) {
+        if (showLogShare) viewModel.logShare.start() else viewModel.logShare.stop()
+    }
+    DisposableEffect(Unit) {
+        onDispose { viewModel.logShare.stop() }
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -474,6 +527,31 @@ internal fun ProfileContent(
             }
         }
 
+        Spacer(Modifier.height(16.dp))
+        Text(
+            "诊断与日志",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
+        )
+        MeBoxCard {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                ProfileMenuRow(
+                    icon = Icons.Default.Description,
+                    title = "导出日志到文件夹",
+                    subtitle = "生成 ZIP，保存到你选择的文件夹",
+                    onClick = exportLogs,
+                )
+                MeBoxDivider(modifier = Modifier.padding(start = 52.dp))
+                ProfileMenuRow(
+                    icon = Icons.Default.Wifi,
+                    title = "局域网下载日志",
+                    subtitle = "同一网络下用手机或电脑扫码下载",
+                    onClick = { showLogShare = true },
+                )
+            }
+        }
+
         state.notice?.let { notice ->
             Spacer(Modifier.height(16.dp))
             MeBoxCard {
@@ -520,6 +598,14 @@ internal fun ProfileContent(
         }
         Spacer(Modifier.height(28.dp))
     }
+
+    if (showLogShare) {
+        LogShareDialog(
+            url = logShareUrl,
+            onRefresh = { viewModel.logShare.restart() },
+            onDismiss = { showLogShare = false },
+        )
+    }
 }
 
 @Composable
@@ -541,6 +627,7 @@ private fun ProfileBadge(text: String) {
 private fun ProfileMenuRow(
     icon: ImageVector,
     title: String,
+    subtitle: String? = null,
     onClick: () -> Unit,
 ) {
     Row(
@@ -565,7 +652,17 @@ private fun ProfileMenuRow(
             )
         }
         Spacer(Modifier.width(10.dp))
-        Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            if (!subtitle.isNullOrBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         Icon(
             Icons.AutoMirrored.Filled.KeyboardArrowRight,
             contentDescription = null,

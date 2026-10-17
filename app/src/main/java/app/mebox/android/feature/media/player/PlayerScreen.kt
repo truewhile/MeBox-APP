@@ -10,9 +10,11 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.SystemClock
 import android.util.Rational
+import android.view.KeyEvent
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -40,7 +42,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -88,6 +95,7 @@ fun PlayerScreen(
     title: String,
     danmaku: DanmakuUiState,
     engine: PlayerEngineKind = PlayerEngineKind.EXO,
+    isTv: Boolean = false,
     onEngineSelected: (PlayerEngineKind) -> Unit = {},
     onBack: () -> Unit,
     onProgress: (mediaId: String, positionMs: Long, durationMs: Long, force: Boolean) -> Unit,
@@ -106,27 +114,57 @@ fun PlayerScreen(
     val previousOrientation = remember(activity) {
         activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
-    DisposableEffect(activity) {
-        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+    DisposableEffect(activity, isTv) {
+        if (!isTv) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
         onDispose {
-            activity?.requestedOrientation =
-                if (previousOrientation == ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) {
-                    // UNSPECIFIED 在关闭自动旋转的设备上会停留在横屏；USER 会遵循
-                    // 用户自己的旋转锁定，回到竖屏（或用户锁定的方向）。
-                    ActivityInfo.SCREEN_ORIENTATION_USER
-                } else {
-                    previousOrientation
-                }
+            if (!isTv) {
+                activity?.requestedOrientation =
+                    if (previousOrientation == ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) {
+                        // UNSPECIFIED 在关闭自动旋转的设备上会停留在横屏；USER 会遵循
+                        // 用户自己的旋转锁定，回到竖屏（或用户锁定的方向）。
+                        ActivityInfo.SCREEN_ORIENTATION_USER
+                    } else {
+                        previousOrientation
+                    }
+            }
         }
     }
 
     BackHandler { onBack() }
 
     if (request == null) {
+        val retryFocus = remember { FocusRequester() }
+        LaunchedEffect(isTv) {
+            if (isTv) {
+                kotlinx.coroutines.delay(100)
+                runCatching { retryFocus.requestFocus() }
+            }
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black),
+                .background(Color.Black)
+                .then(
+                    if (isTv) {
+                        Modifier
+                            .focusRequester(retryFocus)
+                            .onPreviewKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown &&
+                                    event.nativeKeyEvent.keyCode in TV_CONFIRM_KEYS
+                                ) {
+                                    onRetry()
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            .focusable()
+                    } else {
+                        Modifier
+                    },
+                ),
         ) {
             Column(
                 modifier = Modifier.align(Alignment.Center),
@@ -144,6 +182,14 @@ fun PlayerScreen(
                     Spacer(Modifier.height(8.dp))
                     TextButton(onClick = onRetry) { Text("重试") }
                     TextButton(onClick = onBack) { Text("返回") }
+                    if (isTv && !loading) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "遥控器按 OK 重试，返回键退出",
+                            color = Color(0xCCFFFFFF),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
                 }
             }
             PlayerTopBar(
@@ -162,6 +208,7 @@ fun PlayerScreen(
         title = request.title.ifBlank { title },
         danmaku = danmaku,
         initialEngine = engine,
+        isTv = isTv,
         onEngineSelected = onEngineSelected,
         onBack = onBack,
         onProgress = onProgress,
@@ -183,6 +230,13 @@ private data class SeekFeedbackState(
 
 /** 播放结束后自动接下一集的等待秒数。 */
 private const val AUTO_NEXT_SECONDS = 8
+
+private val TV_CONFIRM_KEYS = setOf(
+    KeyEvent.KEYCODE_DPAD_CENTER,
+    KeyEvent.KEYCODE_ENTER,
+    KeyEvent.KEYCODE_NUMPAD_ENTER,
+    KeyEvent.KEYCODE_BUTTON_A,
+)
 
 private data class TrackChoice(
     val id: String,
@@ -206,6 +260,7 @@ private fun PlayerSurface(
     title: String,
     danmaku: DanmakuUiState,
     initialEngine: PlayerEngineKind,
+    isTv: Boolean,
     onEngineSelected: (PlayerEngineKind) -> Unit,
     onBack: () -> Unit,
     onProgress: (String, Long, Long, Boolean) -> Unit,
@@ -595,6 +650,119 @@ private fun PlayerSurface(
     }
     val audioLabel = trackState.selectedAudioLabel ?: "默认"
 
+    // ── 电视遥控器 ──
+    // 焦点固定在播放器根节点上，方向键直接映射为播放操作；打开设置面板后
+    // 不再拦截方向键，把焦点交给面板里的选项。
+    val tvFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(isTv) {
+        if (isTv) runCatching { tvFocusRequester.requestFocus() }
+    }
+    LaunchedEffect(isTv, moreSheetVisible, settingsSection) {
+        if (isTv && !moreSheetVisible && settingsSection == null) {
+            runCatching { tvFocusRequester.requestFocus() }
+        }
+    }
+
+    fun togglePlayback() {
+        if (playbackEnded) {
+            seekTo(0L)
+            playbackEnded = false
+            engine.play()
+        } else if (isPlaying) {
+            engine.pause()
+        } else {
+            engine.play()
+        }
+        controlsVisible = true
+    }
+
+    fun tvSeek(deltaMs: Long) {
+        val target = PlaybackPlan.seekTarget(absolutePosition(), deltaMs, currentDuration())
+        seekTo(target)
+        seekFeedback = SeekFeedbackState(deltaMs >= 0, deltaMs, target)
+        controlsVisible = true
+    }
+
+    fun handleTvKey(event: androidx.compose.ui.input.key.KeyEvent): Boolean {
+        if (!isTv) return false
+        val code = event.nativeKeyEvent.keyCode
+        // 设置面板打开时把方向键/确认键完全还给面板，否则 KeyUp 被根节点吞掉会导致
+        // 面板里的 clickable 选项无法触发。
+        if (moreSheetVisible || settingsSection != null) return false
+        if (event.type == KeyEventType.KeyUp) {
+            return code in TV_CONFIRM_KEYS
+        }
+
+        // 播放失败时 OK 直接重试，保证遥控器不会卡在没有焦点的错误页。
+        if (failedMessage != null) {
+            if (code in TV_CONFIRM_KEYS) {
+                failedMessage = null
+                errorIsDecode = false
+                engine.retry()
+                return true
+            }
+            return false
+        }
+
+        return when (code) {
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_BUTTON_A,
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+            KeyEvent.KEYCODE_HEADSETHOOK -> {
+                togglePlayback()
+                true
+            }
+
+            KeyEvent.KEYCODE_DPAD_LEFT,
+            KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                tvSeek(-seekStep)
+                true
+            }
+
+            KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                tvSeek(seekStep)
+                true
+            }
+
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                controlsVisible = true
+                true
+            }
+
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                controlsVisible = false
+                true
+            }
+
+            KeyEvent.KEYCODE_MENU,
+            KeyEvent.KEYCODE_INFO -> {
+                moreSheetVisible = true
+                true
+            }
+
+            KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                if (request.nextEpisode != null) {
+                    playbackEnded = false
+                    autoNextCancelled = true
+                    onPlayNext()
+                    true
+                } else {
+                    false
+                }
+            }
+
+            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                tvSeek(-absolutePosition())
+                true
+            }
+
+            else -> false
+        }
+    }
+
     BackHandler(enabled = locked) {
         locked = false
         lockBarVisible = false
@@ -604,7 +772,17 @@ private fun PlayerSurface(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black),
+            .background(Color.Black)
+            .then(
+                if (isTv) {
+                    Modifier
+                        .focusRequester(tvFocusRequester)
+                        .onPreviewKeyEvent { event -> handleTvKey(event) }
+                        .focusable()
+                } else {
+                    Modifier
+                },
+            ),
     ) {
         AndroidView(
             factory = { ctx -> FrameLayout(ctx) },
@@ -678,11 +856,25 @@ private fun PlayerSurface(
             PlayerTopBar(
                 title = title,
                 subtitle = request.subtitle,
-                pictureInPictureAvailable = pipAvailable,
+                pictureInPictureAvailable = pipAvailable && !isTv,
                 onBack = onBack,
                 onPictureInPicture = { enterPictureInPicture() },
                 modifier = Modifier.align(Alignment.TopCenter),
             )
+        }
+
+        if (isTv && controlsVisible && !locked) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 86.dp),
+            ) {
+                Text(
+                    "OK 播放/暂停 · ◀ ▶ 快退/快进 · 菜单键 播放设置 · 返回键 退出",
+                    color = Color(0xCCFFFFFF),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
         }
 
         // 播放中不显示中央按钮，避免遮挡画面；暂停或播放结束时才出现。
@@ -903,6 +1095,7 @@ private fun PlayerSurface(
                     settingsSection = section
                 },
                 onDismiss = { moreSheetVisible = false },
+                autoFocus = isTv,
             )
         }
 
@@ -915,6 +1108,7 @@ private fun PlayerSurface(
                     onRenderChange = onDanmakuRenderChange,
                     onReload = onDanmakuReload,
                     onSelectEpisode = onDanmakuSelectEpisode,
+                    autoFocus = isTv,
                 )
                 return@let
             }
@@ -939,6 +1133,7 @@ private fun PlayerSurface(
                 choices = choices,
                 description = sheetDescription,
                 onDismiss = { settingsSection = null },
+                autoFocus = isTv,
                 onSelect = { choice ->
                     when (section) {
                         PlayerSettingsSection.DANMAKU -> Unit

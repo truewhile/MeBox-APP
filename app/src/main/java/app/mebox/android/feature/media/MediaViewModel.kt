@@ -5,6 +5,7 @@ import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.media.DeviceCodecSupport
 import app.mebox.android.core.media.DanmakuComment
 import app.mebox.android.core.media.DanmakuParser
@@ -773,6 +774,7 @@ class MediaViewModel(
     private fun preparePlayback(media: MediaDto) {
         val requestId = ++playbackRequestId
         lastPlayedMedia = media
+        DiagnosticsLog.i("Play", "准备播放 ${media.id} 《${media.title}》")
         val episodes = _state.value.episodes
         val currentIndex = episodes.indexOfFirst { it.id == media.id }
         val next = if (currentIndex >= 0) episodes.getOrNull(currentIndex + 1) else null
@@ -819,6 +821,15 @@ class MediaViewModel(
 
             val info = result.info
             if (info !is ApiResult.Success) {
+                DiagnosticsLog.w(
+                    "Play",
+                    "获取播放地址失败 ${media.id} " +
+                        when (info) {
+                            is ApiResult.Failure -> "HTTP ${info.status} ${info.code}"
+                            is ApiResult.NetworkError -> "网络错误：${info.message}"
+                            else -> "结果已失效"
+                        },
+                )
                 _state.update {
                     it.copy(
                         playerLoading = false,
@@ -849,6 +860,7 @@ class MediaViewModel(
             val streamUrl = absolute(infoValue.streamUrl)
                 ?.let { PlaybackUrls.withAccessToken(it, accessToken) }
             if (streamUrl == null) {
+                DiagnosticsLog.w("Play", "服务器没有返回直链 ${media.id}")
                 _state.update {
                     it.copy(
                         playerLoading = false,
@@ -871,6 +883,12 @@ class MediaViewModel(
                 .distinctBy { it.key }
                 .toList()
             val imageSubtitles = imageSubtitleLabels(rawTracks)
+
+            DiagnosticsLog.i(
+                "Play",
+                "起播 ${media.id} start=${start}ms duration=${duration}ms " +
+                    "subtitles=${subtitles.size} decoder=$decoderNote",
+            )
 
             _state.update {
                 it.copy(
@@ -1114,6 +1132,7 @@ class MediaViewModel(
     }
 
     fun onPlayerFailed(message: String) {
+        DiagnosticsLog.w("Play", "播放器报错：$message")
         _state.update { it.copy(playerError = message) }
     }
 

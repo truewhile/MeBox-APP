@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import android.widget.FrameLayout
+import app.mebox.android.core.log.DiagnosticsLog
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
@@ -113,6 +114,7 @@ class VlcVideoPlayerEngine(
                 }
 
                 MediaPlayer.Event.EncounteredError -> {
+                    DiagnosticsLog.e("Player", "LibVLC 播放失败")
                     playing = false
                     listener?.onError(
                         message = "LibVLC 无法播放该视频",
@@ -186,6 +188,7 @@ class VlcVideoPlayerEngine(
                 )
             }.onFailure { error ->
                 Log.w(TAG, "add subtitle failed: $source", error)
+                DiagnosticsLog.w("Player", "LibVLC 加载字幕失败", error)
             }
         }
         pendingSeekMs = startPositionMs.coerceAtLeast(0L)

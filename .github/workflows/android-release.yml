@@ -100,19 +100,35 @@ jobs:
           mkdir -p dist
           VERSION="${{ steps.version.outputs.name }}"
           BUILD="${{ github.run_number }}"
-          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            KIND="release-signed"
-            NAME="MeBox-Android-${VERSION}-build.${BUILD}-release.apk"
-            cp app/build/outputs/apk/release/app-release.apk "dist/${NAME}"
-          else
+          shopt -s nullglob
+          APK_DIR="app/build/outputs/apk/release"
+          KIND="release-signed"
+          APKS=("$APK_DIR"/*.apk)
+          if [ ${#APKS[@]} -eq 0 ]; then
+            APK_DIR="app/build/outputs/apk/debug"
             KIND="debug"
-            NAME="MeBox-Android-${VERSION}-build.${BUILD}-debug.apk"
-            cp app/build/outputs/apk/debug/app-debug.apk "dist/${NAME}"
+            APKS=("$APK_DIR"/*.apk)
           fi
-          (cd dist && sha256sum "${NAME}" > "${NAME}.sha256")
+          if [ ${#APKS[@]} -eq 0 ]; then
+            echo "没有找到 APK 产物：$APK_DIR" >&2
+            exit 1
+          fi
+          for apk in "${APKS[@]}"; do
+            base="$(basename "$apk" .apk)"
+            abi="${base#app-}"
+            abi="${abi%-unsigned}"
+            abi="${abi%-release}"
+            abi="${abi%-debug}"
+            if [ -z "$abi" ]; then
+              abi="universal"
+            fi
+            NAME="MeBox-Android-${VERSION}-build.${BUILD}-${KIND}-${abi}.apk"
+            cp "$apk" "dist/${NAME}"
+            (cd dist && sha256sum "$NAME" > "$NAME.sha256")
+            echo "collected: ${NAME}"
+          done
           echo "kind=${KIND}" >> "$GITHUB_OUTPUT"
-          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
-          echo "path=dist/${NAME}" >> "$GITHUB_OUTPUT"
+          echo "count=${#APKS[@]}" >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -143,21 +159,28 @@ jobs:
           name: ${{ steps.meta.outputs.title }}
           fail_on_unmatched_files: true
           files: |
-            ${{ steps.apk.outputs.path }}
-            ${{ steps.apk.outputs.path }}.sha256
+            dist/*.apk
+            dist/*.sha256
           body: |
             ## MeBox Android 自动构建
 
             - 版本：`${{ steps.version.outputs.name }}`（versionCode `${{ github.run_number }}`）
             - 构建类型：`${{ steps.apk.outputs.kind }}`
+            - 同一份 APK 同时支持手机与 Android TV（Leanback）；电视端可用手机扫码输入服务器、账号和搜索词
             - 提交：`${{ github.sha }}`
             - 分支/标签：`${{ github.ref_name }}`
             - 单元测试与 lint：已通过
 
             ### 安装
 
+            APK 已按 CPU 架构拆分（`arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64`），
+            另外附带一个包含全部架构的 `universal` 包。电视盒子通常使用
+            `arm64-v8a`；Android TV 模拟器使用 `x86_64`。
+
             ```bash
-            adb install -r ${{ steps.apk.outputs.name }}
+            adb install -r MeBox-Android-...-arm64-v8a.apk
+            # 或直接使用 universal 包
+            adb install -r MeBox-Android-...-universal.apk
             ```
 
             ### 说明

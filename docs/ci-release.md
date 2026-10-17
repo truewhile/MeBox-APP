@@ -7,13 +7,16 @@
 
 1. 使用 JDK 17 与 Android SDK 36 构建。
 2. 运行 `:app:testDebugUnitTest` 与 `:app:lintDebug`；失败则不发布。
-3. 构建 APK：
-   - 配置了发布签名 Secrets：`assembleRelease`，产物为 `app-release.apk`。
-   - 未配置签名 Secrets：回退到 `assembleDebug`，产物为 `app-debug.apk`。
+3. 构建 APK（按 CPU 架构拆分，同时生成 universal 包）：
+   - 配置了发布签名 Secrets：`assembleRelease`，产物为
+     `app-<abi>-release.apk` 与 `app-universal-release.apk`。
+   - 未配置签名 Secrets：回退到 `assembleDebug`，产物为
+     `app-<abi>-debug.apk` 与 `app-universal-debug.apk`。
+   - ABI 包括 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64`。
 4. 以 `github.run_number` 作为 `versionCode`，避免每次构建版本号相同。
-5. 生成 SHA-256 校验文件。
+5. 为每个 APK 生成 SHA-256 校验文件。
 6. 上传一个临时的 workflow artifact（保留 14 天）。
-7. 创建 GitHub Release 并附加 APK 与 `.sha256`。
+7. 创建 GitHub Release 并附加全部 APK 与 `.sha256`。
 
 Release 标签：
 
@@ -79,7 +82,8 @@ base64 -w 0 mebox-release.jks > keystore.b64
 # 单元测试与静态检查
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug
 
-# 未签名 Release（会生成 app-release-unsigned.apk）
+# 未签名 Release（会生成按 ABI 拆分的 app-<abi>-release-unsigned.apk
+# 和包含全部架构的 app-universal-release-unsigned.apk）
 .\gradlew.bat :app:assembleRelease
 
 # 使用本地 keystore 验证签名构建
@@ -90,11 +94,18 @@ $env:MEBOX_KEY_PASSWORD="..."
 .\gradlew.bat :app:assembleRelease -PmeboxVersionCode=43
 ```
 
+电视盒子安装时选择对应架构；不确定时用 universal 包：
+
+```bash
+adb install -r app-arm64-v8a-release.apk
+adb install -r app-universal-release.apk
+```
+
 验证签名：
 
 ```powershell
 D:\Android\Sdk\build-tools\36.1.0\apksigner.bat verify --print-certs `
-  app\build\outputs\apk\release\app-release.apk
+  app\build\outputs\apk\release\app-arm64-v8a-release.apk
 ```
 
 ## 4. 版本号规则
@@ -105,10 +116,10 @@ D:\Android\Sdk\build-tools\36.1.0\apksigner.bat verify --print-certs `
 
 ## 5. 已知限制
 
-- Release APK 只包含 `arm64-v8a` 与 `armeabi-v7a` 原生库（LibVLC 的 x86/x86_64
-  库会让包体从约 100 MB 涨到 210 MB），因此 Release 包不能安装到 x86 模拟器；
-  调试包保留全部 ABI，可直接在模拟器上运行。
+- 发布包按 ABI 拆分：`arm64-v8a` / `armeabi-v7a` 面向手机与电视盒子，
+  `x86` / `x86_64` 面向模拟器和少数 Intel 设备；另有一个体积较大的
+  `universal` 包。上传到应用商店时，商店会自动选择对应架构。
 - 工作流只跑 JVM 单元测试和 lint，不启动模拟器，不覆盖登录、播放等仪器测试。
 - 未配置签名 Secrets 时的 `debug` 包使用调试签名，不能作为正式发布版本。
 - 工作流不会自动合并或修改代码；失败时先修复测试/lint 再推送。
-- 发布后的 APK 仍需要人工安装验证关键流程（连接、登录、会话恢复、退出）。
+- 发布后的 APK 仍需要人工安装验证关键流程（连接、登录、电视遥控器、播放）。

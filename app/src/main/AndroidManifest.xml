@@ -8,6 +8,21 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
+      同一份 APK 同时支持手机和电视：
+      - leanback 与 touchscreen 都声明为非必需，避免应用商店把电视设备过滤掉；
+      - 电视上通过 LEANBACK_LAUNCHER 出现在电视桌面，手机仍走 LAUNCHER。
+    -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.gamepad"
+        android:required="false" />
+
+    <!--
       cleartext 在这里保持可用只是为了让用户在明确确认后连接局域网 HTTP
       服务器；应用层仍只允许对当前配置的服务器来源使用明文，不会把
       Authorization 发往其它主机。
@@ -19,6 +34,7 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:banner="@drawable/tv_banner"
         android:supportsRtl="true"
         android:theme="@style/Theme.MeBox"
         android:usesCleartextTraffic="true">
@@ -33,6 +49,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
 

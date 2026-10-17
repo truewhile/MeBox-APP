@@ -6,6 +6,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import app.mebox.android.BuildConfig
 import app.mebox.android.core.auth.MobileSessionRepository
+import app.mebox.android.core.input.PhoneInputEvent
+import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.model.AccountScope
 import app.mebox.android.core.network.ApiResult
 import app.mebox.android.core.network.MobileUser
@@ -71,15 +73,61 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
     )
     val playerEngine: StateFlow<PlayerEngineKind> = _playerEngine.asStateFlow()
 
+    /** 电视端手机扫码输入服务；手机端不启动，但保留同一个入口方便共用 ViewModel。 */
+    val phoneInput get() = container.phoneInput
+
+    /** 日志局域网下载服务，由「我的 → 诊断与日志」打开。 */
+    val logShare get() = container.logShare
+
     fun selectPlayerEngine(kind: PlayerEngineKind) {
         container.preferences.playerEngine = kind.key
         _playerEngine.value = kind
+        DiagnosticsLog.i("Play", "切换播放内核为 ${kind.key}")
     }
 
     private var repository: MobileSessionRepository? = null
 
     init {
         viewModelScope.launch { restoreSession() }
+        viewModelScope.launch {
+            container.phoneInput.events.collect { event ->
+                when (event) {
+                    is PhoneInputEvent.Server -> {
+                        when (val current = _state.value) {
+                            is AppUiState.Connection -> {
+                                if (!current.testing) {
+                                    _state.value = current.copy(addressText = event.address, error = null)
+                                    connect()
+                                }
+                            }
+
+                            is AppUiState.Login -> {
+                                // 登录页也允许从手机换服务器：先退回连接状态再测试。
+                                if (!current.submitting) {
+                                    _state.value = AppUiState.Connection(addressText = event.address)
+                                    connect()
+                                }
+                            }
+
+                            is AppUiState.Account, AppUiState.Loading -> Unit
+                        }
+                    }
+
+                    is PhoneInputEvent.Login -> {
+                        val current = _state.value
+                        if (current is AppUiState.Login && !current.submitting) {
+                            if (event.username.isNotBlank()) {
+                                _state.value = current.copy(username = event.username, error = null)
+                            }
+                            login(event.password)
+                        }
+                    }
+
+                    // 搜索由电视界面自己消费，顶层状态机不处理。
+                    is PhoneInputEvent.Search -> Unit
+                }
+            }
+        }
     }
 
     fun onAddressChange(value: String) {
@@ -104,6 +152,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             _state.value = current.copy(pendingCleartext = address, error = null)
             return
         }
+        DiagnosticsLog.i("Session", "测试连接 ${address.origin}")
         testConnection(address)
     }
 
@@ -128,6 +177,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             _state.value = current.copy(error = "请输入用户名和密码")
             return
         }
+        DiagnosticsLog.i("Auth", "登录 ${current.address.origin} user=$username")
         _state.value = current.copy(submitting = true, error = null)
         viewModelScope.launch {
             val result = repo.login(
@@ -139,14 +189,20 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             )
             when (result) {
                 is ApiResult.Success -> {
+                    DiagnosticsLog.i("Auth", "登录成功 user=$username")
                     val scope = AccountScope(repo.serverInfo.serverId, result.value.user.id)
                     container.preferences.saveAccount(scope.serverId, scope.userId)
                     showAccount(current.address, repo, scope, result.value.user, fallbackDevice = Build.MODEL)
                 }
                 is ApiResult.Failure -> {
+                    DiagnosticsLog.w(
+                        "Auth",
+                        "登录失败 HTTP ${result.status} ${result.code} user=$username",
+                    )
                     _state.value = current.copy(submitting = false, error = failureMessage(result))
                 }
                 is ApiResult.NetworkError -> {
+                    DiagnosticsLog.e("Auth", "登录网络错误 user=$username", result.cause)
                     _state.value = current.copy(
                         submitting = false,
                         error = "无法连接服务器，请检查网络后重试",
@@ -162,6 +218,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
     fun logout() {
         val current = _state.value as? AppUiState.Account ?: return
         val repo = repository ?: return
+        DiagnosticsLog.i("Auth", "退出登录 user=${current.user.username}")
         _state.value = current.copy(busy = true, notice = null)
         viewModelScope.launch {
             val remote = repo.logout(current.scope)
@@ -170,6 +227,10 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             container.readerCache.clearAccount(current.scope)
             container.preferences.clearAccount()
             val unconfirmed = remote is ApiResult.Failure || remote is ApiResult.NetworkError
+            DiagnosticsLog.i(
+                "Auth",
+                if (unconfirmed) "本地已退出登录，远端未确认" else "已退出登录",
+            )
             _state.value = AppUiState.Connection(
                 addressText = current.address.origin,
                 notice = if (unconfirmed) "本机已退出，远端未确认" else "已退出登录",
@@ -192,8 +253,10 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     private suspend fun restoreSession() {
+        DiagnosticsLog.i("Session", "恢复上次会话")
         val savedAddress = container.preferences.lastAddress
         if (savedAddress.isNullOrBlank()) {
+            DiagnosticsLog.i("Session", "没有保存的服务器地址")
             _state.value = AppUiState.Connection(addressText = "")
             return
         }
@@ -224,6 +287,10 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         when (val info = api.serverInfo()) {
             is ApiResult.Success -> {
                 if (ServerCompatibility.requiresUpgrade(info.value, BuildConfig.VERSION_CODE)) {
+                    DiagnosticsLog.w(
+                        "Session",
+                        "服务器版本过低 version=${info.value.serverVersion}",
+                    )
                     _state.value = AppUiState.Connection(
                         addressText = address.origin,
                         error = ServerCompatibility.upgradeMessage(
@@ -245,6 +312,10 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                 val scope = AccountScope(serverId, userId)
                 when (val session = repo.loadSession(scope)) {
                     is ApiResult.Success -> {
+                        DiagnosticsLog.i(
+                            "Session",
+                            "会话已恢复 user=${session.value.user.username}",
+                        )
                         _state.value = AppUiState.Account(
                             address = address,
                             serverInfo = info.value,
@@ -255,6 +326,10 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                         )
                     }
                     is ApiResult.Failure -> {
+                        DiagnosticsLog.w(
+                            "Session",
+                            "会话恢复失败 HTTP ${session.status} ${session.code}",
+                        )
                         if (session.status == 401) {
                             repo.coordinator.onAccountChanged()
                             container.credentialStore.clear(scope)
@@ -273,6 +348,11 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                         }
                     }
                     is ApiResult.NetworkError -> {
+                        DiagnosticsLog.e(
+                            "Session",
+                            "会话恢复网络错误 ${address.origin}",
+                            session.cause,
+                        )
                         _state.value = AppUiState.Connection(
                             addressText = address.origin,
                             notice = "暂时无法连接，登录状态已保留，请稍后重试",
@@ -284,12 +364,21 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                 }
             }
             is ApiResult.Failure -> {
+                DiagnosticsLog.w(
+                    "Session",
+                    "读取服务器信息失败 ${address.origin} HTTP ${info.status} ${info.code}",
+                )
                 _state.value = AppUiState.Connection(
                     addressText = address.origin,
                     notice = connectionFailureMessage(info),
                 )
             }
             is ApiResult.NetworkError -> {
+                DiagnosticsLog.e(
+                    "Session",
+                    "读取服务器信息网络错误 ${address.origin}",
+                    info.cause,
+                )
                 _state.value = AppUiState.Connection(
                     addressText = address.origin,
                     notice = "暂时无法连接服务器，登录状态已保留",
@@ -316,7 +405,12 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             when (val result = api.serverInfo()) {
                 is ApiResult.Success -> {
                     val info = result.value
+                    DiagnosticsLog.i(
+                        "Session",
+                        "服务器可用 ${address.origin} name=${info.name} version=${info.serverVersion}",
+                    )
                     if (ServerCompatibility.requiresUpgrade(info, BuildConfig.VERSION_CODE)) {
+                        DiagnosticsLog.w("Session", "服务器版本需要升级 ${info.serverVersion}")
                         _state.value = AppUiState.Connection(
                             addressText = address.origin,
                             error = ServerCompatibility.upgradeMessage(info, BuildConfig.VERSION_CODE),
@@ -330,12 +424,21 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                     }
                 }
                 is ApiResult.Failure -> {
+                    DiagnosticsLog.w(
+                        "Session",
+                        "服务器不可用 ${address.origin} HTTP ${result.status} ${result.code}",
+                    )
                     _state.value = AppUiState.Connection(
                         addressText = address.origin,
                         error = connectionFailureMessage(result),
                     )
                 }
                 is ApiResult.NetworkError -> {
+                    DiagnosticsLog.e(
+                        "Session",
+                        "无法连接 ${address.origin}",
+                        result.cause,
+                    )
                     _state.value = AppUiState.Connection(
                         addressText = address.origin,
                         error = "无法连接服务器，请检查地址、证书和网络",

@@ -3,6 +3,7 @@ package app.mebox.android.feature.reader
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.model.AccountScope
 import app.mebox.android.core.network.ApiResult
 import app.mebox.android.core.network.ReaderBookDto
@@ -231,6 +232,16 @@ class ReaderViewModel(
                 booksResult is ApiResult.NetworkError -> "网络不可用，请稍后重试"
                 else -> null
             }
+            if (error != null) {
+                DiagnosticsLog.w(
+                    "Reader",
+                    "书架加载失败：" + when (booksResult) {
+                        is ApiResult.Failure -> "HTTP ${booksResult.status} ${booksResult.code}"
+                        is ApiResult.NetworkError -> "网络错误：${booksResult.message}"
+                        else -> error
+                    },
+                )
+            }
             _state.update { current ->
                 val groups = (groupsResult as? ApiResult.Success)?.value ?: current.groups
                 val selectedGroup = current.selectedGroup
@@ -374,9 +385,14 @@ class ReaderViewModel(
                     )
                 }
                 is ApiResult.Failure -> _state.update {
+                    DiagnosticsLog.w(
+                        "Reader",
+                        "书源搜索失败 query=$query HTTP ${result.status} ${result.code}",
+                    )
                     it.copy(searchLoading = false, searchError = readerError(result))
                 }
                 is ApiResult.NetworkError -> _state.update {
+                    DiagnosticsLog.w("Reader", "书源搜索网络错误 query=$query", result.cause)
                     it.copy(searchLoading = false, searchError = "网络不可用，请稍后重试")
                 }
                 ApiResult.Stale -> _state.update { it.copy(searchLoading = false) }
@@ -505,6 +521,10 @@ class ReaderViewModel(
         val loaded = loadChapters(book)
         if (token != loadToken) return
         if (loaded.chapters.isEmpty()) {
+            DiagnosticsLog.w(
+                "Reader",
+                "打开书籍失败 book=${book.id} title=${book.name} 原因=${loaded.error ?: "目录为空"}",
+            )
             _state.update {
                 it.copy(
                     chapterLoading = false,
@@ -628,6 +648,11 @@ class ReaderViewModel(
                     if (cached != null) {
                         applyChapterContent(book, index, cached, offline = true)
                     } else {
+                        DiagnosticsLog.w(
+                            "Reader",
+                            "章节加载失败 book=${book.id} index=$index " +
+                                "HTTP ${result.status} ${result.code}",
+                        )
                         _state.update {
                             it.copy(chapterLoading = false, chapterError = readerError(result))
                         }
@@ -641,6 +666,11 @@ class ReaderViewModel(
                     if (cached != null) {
                         applyChapterContent(book, index, cached, offline = true)
                     } else {
+                        DiagnosticsLog.w(
+                            "Reader",
+                            "章节加载网络错误 book=${book.id} index=$index ${result.message}",
+                            result.cause,
+                        )
                         _state.update {
                             it.copy(
                                 chapterLoading = false,

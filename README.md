@@ -65,6 +65,21 @@ MeBox 的原生 Android 客户端（Kotlin + Jetpack Compose）。
 - 离线缓存：按账号/书籍保存目录、文本章节与图片/音频资源；支持缓存本章、
   后续 20 章、清除缓存，网络失败时自动回退离线内容
 
+## 电视与遥控器
+
+同一份 APK 同时支持手机与 Android TV（Leanback），启动时自动判断设备类型：
+
+- 电视桌面通过 `LEANBACK_LAUNCHER` 显示；手机仍使用普通桌面入口。
+- 电视界面为 10-foot 布局：左侧导航栏，方向键移动焦点，OK/Enter 确认，
+  返回键回到上一级；卡片获得焦点会放大并显示强调色描边。
+- 播放页遥控器映射：OK 播放/暂停，左右键快退/快进 10 秒，上下键显示/隐藏
+  控制栏，菜单键打开播放设置，返回键退出；媒体键（播放/暂停、快进、快退、
+  下一集）同样可用。
+- 阅读页：上下键滚动，左右键切换章节，OK 隐藏/显示栏，菜单键打开目录。
+- 电视上的文字输入统一走「手机扫码」：电视显示二维码，手机扫码后在同一
+  局域网网页填写服务器地址、账号密码或搜索关键词，提交后立即推送到电视。
+  页面地址带随机 token，关闭电视界面后服务立即停止，密码不会落盘。
+
 ## 构建与测试
 
 ```powershell
@@ -73,7 +88,17 @@ MeBox 的原生 Android 客户端（Kotlin + Jetpack Compose）。
 .\gradlew.bat :app:assembleDebug
 ```
 
-调试 APK：`app/build/outputs/apk/debug/app-debug.apk`。
+`assembleDebug` / `assembleRelease` 会按 ABI 拆分，同时生成 universal 包：
+
+| 产物 | 适用设备 |
+| --- | --- |
+| `app-arm64-v8a-*.apk` | 主流手机、大多数电视盒子 |
+| `app-armeabi-v7a-*.apk` | 老款设备 |
+| `app-x86_64-*.apk` | Android TV 模拟器、Intel 设备 |
+| `app-x86-*.apk` | 少数 32 位 x86 设备 |
+| `app-universal-*.apk` | 不确定架构时使用，体积最大 |
+
+调试 APK 位于 `app/build/outputs/apk/debug/`。
 
 ## 自动发布
 
@@ -82,4 +107,5 @@ MeBox 的原生 Android 客户端（Kotlin + Jetpack Compose）。
 [docs/ci-release.md](docs/ci-release.md)。
 
 后端契约与分阶段计划见 `plan/` 目录。播放内核（ExoPlayer / LibVLC）的架构与扩展方式见
-[docs/player-engines.md](docs/player-engines.md)。
+[docs/player-engines.md](docs/player-engines.md)。电视适配、遥控器按键与手机扫码输入的实现细节见
+[docs/tv-remote.md](docs/tv-remote.md)。

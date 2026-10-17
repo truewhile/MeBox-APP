@@ -43,12 +43,23 @@ android {
                 "proguard-rules.pro",
             )
             signingConfigs.findByName("release")?.let { signingConfig = it }
-            ndk {
-                // LibVLC 自带四个 ABI 的原生库（约 88 MB）；发布包只保留手机
-                // 主流的 ARM 架构，避免 APK 膨胀到 200 MB 以上。调试包不限制，
-                // 以便在 x86_64 模拟器上运行。
-                abiFilters += listOf("arm64-v8a", "armeabi-v7a")
-            }
+        }
+    }
+
+    /*
+     * 电视盒子、手机和模拟器的 CPU 架构并不统一：
+     * - arm64-v8a / armeabi-v7a：绝大多数手机与电视盒子；
+     * - x86 / x86_64：Android TV 模拟器与少数 Intel 盒子。
+     *
+     * LibVLC 的 AAR 自带这四套原生库，因此按 ABI 拆分，避免每个用户都下载
+     * 四个架构的 so。同时保留 universal APK，方便侧载和排查问题。
+     */
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            isUniversalApk = true
         }
     }
 
@@ -111,6 +122,9 @@ dependencies {
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.session)
     implementation(libs.media3.ui)
+
+    // 电视端扫码输入：只引入纯 Java 的二维码编码器，不包含相机/扫码 UI。
+    implementation(libs.zxing.core)
 
     // 第三方播放内核：LibVLC 自带 FFmpeg，用于安卓系统解码器不支持的编码/容器。
     implementation(libs.libvlc)

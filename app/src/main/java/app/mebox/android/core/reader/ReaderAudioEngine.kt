@@ -9,6 +9,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.model.AccountScope
 import app.mebox.android.core.network.ApiResult
 import app.mebox.android.core.network.ReaderBookDto
@@ -114,6 +115,11 @@ class ReaderAudioEngine(
         }
 
         override fun onPlayerError(error: PlaybackException) {
+            DiagnosticsLog.e(
+                "ReaderAudio",
+                "音频播放失败 ${error.errorCodeName} (${error.errorCode})",
+                error,
+            )
             _state.update {
                 it.copy(
                     loading = false,
@@ -391,6 +397,11 @@ class ReaderAudioEngine(
                             _state.update { it.copy(notice = "已加载离线缓存") }
                             cached
                         } else {
+                            DiagnosticsLog.w(
+                                "ReaderAudio",
+                                "加载音轨失败 book=${currentBook.id} index=$index " +
+                                    "HTTP ${result.status} ${result.code}",
+                            )
                             _state.update {
                                 it.copy(
                                     loading = false,
