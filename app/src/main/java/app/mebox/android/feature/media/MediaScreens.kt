@@ -322,6 +322,7 @@ private fun TabsScaffold(
                     onOpenLibrary = mediaViewModel::openLibrary,
                     onOpenHistory = mediaViewModel::openHistory,
                     onOpenMediaTab = { mediaViewModel.selectTab(MainTab.MEDIA) },
+                    onLoadMoreSections = mediaViewModel::loadMoreHomeSections,
                     onRefresh = mediaViewModel::refreshHome,
                 )
                 MainTab.MEDIA -> MediaTabScreen(
@@ -360,6 +361,7 @@ private fun HomeScreen(
     onOpenLibrary: (LibraryDto) -> Unit,
     onOpenHistory: () -> Unit,
     onOpenMediaTab: () -> Unit,
+    onLoadMoreSections: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     val hasContent = state.continueItems.isNotEmpty() ||
@@ -457,6 +459,16 @@ private fun HomeScreen(
                     onAction = { onOpenLibrary(section.library) },
                 ) {
                     HomeCardRail(section.cards, origin, onOpenCard)
+                }
+            }
+            if (state.homeSectionsRemaining > 0) {
+                // 只在滑到底部、这个尾部条目真正被组合时才请求下一批，
+                // 首屏不必为几十个库一次拉完预览。
+                item(key = "home-sections-more") {
+                    LaunchedEffect(state.librarySections.size) {
+                        onLoadMoreSections()
+                    }
+                    MediaGridSkeleton(columns = 2, rows = 1, landscape = true)
                 }
             }
         } else if (state.recentItems.isNotEmpty()) {
@@ -714,11 +726,9 @@ private fun CarouselHero(
     modifier: Modifier = Modifier,
 ) {
     val media = card.rep
-    val backdrop = MediaImageUrls.backdrop(
+    val backdrop = MediaImageUrls.backdropHero(
         origin = origin,
         remote = media.backdropUrl.ifBlank { media.posterUrl },
-        width = 1280,
-        height = 720,
     )
     val library = media.libraryName
     val genres = media.genres
@@ -1812,11 +1822,9 @@ private fun DetailHero(
     onBack: () -> Unit,
     onToggleFavorite: () -> Unit,
 ) {
-    val backdrop = MediaImageUrls.backdrop(
+    val backdrop = MediaImageUrls.backdropHero(
         origin = origin,
         remote = media.backdropUrl.ifBlank { media.posterUrl },
-        width = 1280,
-        height = 800,
     )
     val background = MaterialTheme.colorScheme.background
     Box(

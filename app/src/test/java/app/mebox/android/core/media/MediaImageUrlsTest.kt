@@ -23,7 +23,16 @@ class MediaImageUrlsTest {
         val url = MediaImageUrls.backdrop(origin, "https://image.tmdb.org/t/p/original/a b.jpg")
         assertTrue(url!!.contains("url=https%3A%2F%2Fimage.tmdb.org"))
         assertTrue(url.contains("%20a%20b.jpg") || url.contains("a%20b.jpg"))
-        assertTrue(url.contains("maxWidth=1280"))
+        // 列表剧照与网页端 ARTWORK.backdropStrip 对齐（480x320）。
+        assertTrue(url.contains("maxWidth=480"))
+        assertTrue(url.contains("maxHeight=320"))
+    }
+
+    @Test
+    fun `hero backdrop keeps a wide size`() {
+        val url = MediaImageUrls.backdropHero(origin, "https://image.tmdb.org/t/p/original/hero.jpg")
+        assertTrue(url!!.contains("maxWidth=1280"))
+        assertTrue(url.contains("maxHeight=720"))
     }
 
     @Test

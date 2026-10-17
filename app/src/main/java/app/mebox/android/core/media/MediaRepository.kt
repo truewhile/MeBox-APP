@@ -35,12 +35,14 @@ class MediaRepository(
         ids: List<String>? = null,
         withPreview: Boolean = false,
         previewLimit: Int? = null,
+        includeTotal: Boolean = true,
     ): ApiResult<List<LibraryDto>> = authorized {
         api.libraries(
             accessToken = it,
             ids = ids?.takeIf { list -> list.isNotEmpty() }?.joinToString(","),
             withPreview = withPreview,
             previewLimit = previewLimit,
+            includeTotal = includeTotal,
         )
     }
 

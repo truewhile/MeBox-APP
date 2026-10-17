@@ -24,7 +24,6 @@ import app.mebox.android.core.network.DanmakuSettingsPatchDto
 import app.mebox.android.core.network.LibraryDto
 import app.mebox.android.core.network.LibraryFacetsDto
 import app.mebox.android.core.network.MediaDto
-import app.mebox.android.core.network.PlaybackInfoDto
 import app.mebox.android.core.network.SeriesCardDto
 import app.mebox.android.core.network.SubtitleTrackDto
 import app.mebox.android.core.network.WatchHistoryDto
@@ -33,17 +32,16 @@ import app.mebox.android.feature.ErrorMessages
 import coil.ImageLoader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
 enum class MainTab { HOME, MEDIA, READER, PROFILE }
@@ -159,6 +157,8 @@ data class MediaUiState(
     val historyError: String? = null,
     val homeLoading: Boolean = false,
     val homeError: String? = null,
+    /** 首页滑轨还有多少个媒体库没有取到预览（0 表示已全部加载）。 */
+    val homeSectionsRemaining: Int = 0,
     val libraryCards: List<SeriesCardDto> = emptyList(),
     val libraryTotal: Int = 0,
     val libraryPage: Int = 0,
@@ -205,6 +205,7 @@ class MediaViewModel(
     private val credentialStore: CredentialStore,
     private val progressStore: WatchProgressStore,
     private val codecSupport: DeviceCodecSupport,
+    private val httpClient: OkHttpClient,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(MediaUiState())
@@ -212,6 +213,10 @@ class MediaViewModel(
 
     private var searchJob: Job? = null
     private var libraryLoadJob: Job? = null
+    private var libraryCoverJob: Job? = null
+    private var homeSectionsJob: Job? = null
+    private var homeSectionLibraries: List<LibraryDto> = emptyList()
+    private var homeSectionLoadedCount = 0
     private var danmakuRequestId = 0L
     private var danmakuSaveJob: Job? = null
     private var lastPlayedMedia: MediaDto? = null
@@ -232,8 +237,13 @@ class MediaViewModel(
         ) {
             refreshHome()
         }
-        if (tab == MainTab.MEDIA && _state.value.libraries.isEmpty() && !_state.value.homeLoading) {
-            refreshHome()
+        if (tab == MainTab.MEDIA) {
+            if (_state.value.libraries.isEmpty() && !_state.value.homeLoading) {
+                refreshHome()
+            }
+            // 媒体库索引的封面兜底只在用户真正打开这个 Tab 时才需要，
+            // 不必放在启动路径上和首页抢带宽。
+            loadLibraryCovers()
         }
     }
 
@@ -241,61 +251,175 @@ class MediaViewModel(
         val requestId = ++homeRequestId
         _state.update { it.copy(homeLoading = true, homeError = null) }
         viewModelScope.launch {
-            val (libs, cont, rec) = coroutineScope {
-                val libraries = async { repo.libraries() }
-                val continueWatching = async { repo.continueWatching(12) }
-                val recent = async { repo.recent(18) }
-                Triple(libraries.await(), continueWatching.await(), recent.await())
+            // 三个来源各自到达就各自渲染。以前要等最慢的那个（服务端的
+            // /api/media/recent 在 7k 行库上要 1.6s+），首页会一直空白。
+            val jobs = listOf(
+                launch { loadHomeLibraries(requestId) },
+                launch { loadHomeContinueWatching(requestId) },
+                launch { loadHomeRecent(requestId) },
+            )
+            jobs.joinAll()
+            if (requestId == homeRequestId) {
+                _state.update { it.copy(homeLoading = false) }
             }
+        }
+    }
+
+    private suspend fun loadHomeLibraries(requestId: Long) {
+        when (val result = repo.libraries()) {
+            is ApiResult.Success -> {
+                if (requestId != homeRequestId) return
+                _state.update { it.copy(libraries = result.value) }
+                loadHomeSections(requestId, result.value)
+            }
+            is ApiResult.Failure -> reportHomeError(requestId, ErrorMessages.action(result))
+            is ApiResult.NetworkError -> reportHomeError(requestId, "网络不可用，请稍后重试")
+            ApiResult.Stale -> Unit
+        }
+    }
+
+    private suspend fun loadHomeContinueWatching(requestId: Long) {
+        when (val result = repo.continueWatching(12)) {
+            is ApiResult.Success -> {
+                if (requestId != homeRequestId) return
+                _state.update { it.copy(continueItems = result.value) }
+            }
+            is ApiResult.Failure -> reportHomeError(requestId, ErrorMessages.action(result))
+            is ApiResult.NetworkError -> reportHomeError(requestId, "网络不可用，请稍后重试")
+            ApiResult.Stale -> Unit
+        }
+    }
+
+    private suspend fun loadHomeRecent(requestId: Long) {
+        when (val result = repo.recent(18)) {
+            is ApiResult.Success -> {
+                if (requestId != homeRequestId) return
+                _state.update { it.copy(recentItems = result.value) }
+            }
+            is ApiResult.Failure -> reportHomeError(requestId, ErrorMessages.action(result))
+            is ApiResult.NetworkError -> reportHomeError(requestId, "网络不可用，请稍后重试")
+            ApiResult.Stale -> Unit
+        }
+    }
+
+    /** 已经有内容时不要把首页整页换成错误页，只在空白时提示。 */
+    private fun reportHomeError(requestId: Long, message: String) {
+        if (requestId != homeRequestId) return
+        _state.update { current ->
+            val hasContent = current.continueItems.isNotEmpty() ||
+                current.recentItems.isNotEmpty() ||
+                current.librarySections.isNotEmpty() ||
+                current.libraries.isNotEmpty()
+            current.copy(homeError = if (hasContent) current.homeError else message)
+        }
+    }
+
+    /**
+     * 首页滑轨渐进加载（与网页端 HomePage 的 `INITIAL_ROWS` 一致）。
+     *
+     * 首屏只取前 [HOME_SECTION_BATCH] 个库：以前把全部 70+ 个库塞进一个请求
+     * （preview_limit=12），响应接近 2MB，比整个首屏其它请求加起来还大。
+     * 其余库在用户滚到底部时按批补齐，也可以从「影视」Tab 直接进入。
+     */
+    private fun loadHomeSections(requestId: Long, libraries: List<LibraryDto>) {
+        homeSectionsJob?.cancel()
+        homeSectionLibraries = libraries.filter { it.enabled }
+        homeSectionLoadedCount = 0
+        _state.update { it.copy(homeSectionsRemaining = homeSectionLibraries.size) }
+        if (homeSectionLibraries.isEmpty()) return
+        loadNextHomeSections(requestId, initial = true)
+    }
+
+    /** 滚动到首页底部时加载下一批滑轨。 */
+    fun loadMoreHomeSections() {
+        val requestId = homeRequestId
+        loadNextHomeSections(requestId, initial = false)
+    }
+
+    private fun loadNextHomeSections(requestId: Long, initial: Boolean) {
+        if (homeSectionsJob?.isActive == true) return
+        val batch = homeSectionLibraries
+            .drop(homeSectionLoadedCount)
+            .take(HOME_SECTION_BATCH)
+        if (batch.isEmpty()) return
+        homeSectionsJob = viewModelScope.launch {
+            val previews = repo.libraries(
+                ids = batch.map { it.id },
+                withPreview = true,
+                previewLimit = HOME_PREVIEW_LIMIT,
+                // 媒体库总数在第一批列表里已经返回过，预览不需要再 COUNT 一遍。
+                includeTotal = false,
+            )
             if (requestId != homeRequestId) return@launch
-
-            val error = firstError(libs, cont, rec)
-            val libraries = (libs as? ApiResult.Success)?.value ?: _state.value.libraries
-            val recent = (rec as? ApiResult.Success)?.value ?: _state.value.recentItems
-            _state.update {
-                it.copy(
-                    homeLoading = false,
-                    homeError = error,
-                    libraries = libraries,
-                    continueItems = (cont as? ApiResult.Success)?.value ?: it.continueItems,
-                    recentItems = recent,
-                )
+            if (previews !is ApiResult.Success) return@launch
+            val previewsById = previews.value.associateBy { it.id }
+            homeSectionLoadedCount += batch.size
+            val loadedSections = batch.mapNotNull { library ->
+                val cards = previewCards(previewsById[library.id]?.cards.orEmpty())
+                cards.takeIf { it.isNotEmpty() }?.let { LibrarySection(library, it) }
             }
-
-            // 一次预览请求同时服务于「焦点轮播」和「按媒体库分区」。
-            // 失败时保留上一次的分区，轮播退回「最近添加」。
-            val previewLibraries = libraries.filter { it.enabled }
-            var carousel = emptyList<SeriesCardDto>()
-            var sections = emptyList<LibrarySection>()
-            if (previewLibraries.isNotEmpty()) {
-                val previews = repo.libraries(
-                    ids = previewLibraries.map { it.id },
-                    withPreview = true,
-                    previewLimit = HOME_PREVIEW_LIMIT,
-                )
-                if (previews is ApiResult.Success) {
-                    val byId = previews.value.associateBy { it.id }
-                    sections = previewLibraries.mapNotNull { library ->
-                        val cards = previewCards(byId[library.id]?.cards.orEmpty())
-                        cards.takeIf { it.isNotEmpty() }?.let { LibrarySection(library, it) }
-                    }
-                    carousel = previewCards(
+            _state.update { current ->
+                // 同一批可能因为重入被重复追加：按库 id 去重并保持顺序。
+                val merged = LinkedHashMap<String, LibrarySection>()
+                (current.librarySections + loadedSections).forEach { section ->
+                    merged[section.library.id] = section
+                }
+                val carousel = if (initial) {
+                    previewCards(
                         previews.value
                             .filter { it.carouselEnabled }
                             .flatMap { it.cards },
                         limit = CAROUSEL_MAX_ITEMS,
                     )
+                } else {
+                    emptyList()
                 }
-            }
-            if (carousel.isEmpty()) {
-                carousel = previewCards(recent, limit = CAROUSEL_MAX_ITEMS)
-            }
-            if (requestId != homeRequestId) return@launch
-            _state.update {
-                it.copy(
-                    carouselItems = carousel,
-                    librarySections = sections.ifEmpty { it.librarySections },
+                val fallbackCarousel = previewCards(current.recentItems, limit = CAROUSEL_MAX_ITEMS)
+                current.copy(
+                    carouselItems = carousel.ifEmpty { fallbackCarousel }.ifEmpty { current.carouselItems },
+                    librarySections = merged.values.toList(),
+                    homeSectionsRemaining = (homeSectionLibraries.size - homeSectionLoadedCount)
+                        .coerceAtLeast(0),
+                    // 预览卡片同时用于媒体库封面：服务端没有自定义 cover_url 时，
+                    // 用库内作品的剧照/海报兜底，避免媒体库卡片只剩纯色占位。
+                    libraries = current.libraries.map { library ->
+                        val cards = previewsById[library.id]?.cards.orEmpty()
+                        if (cards.isEmpty()) library else library.copy(cards = cards)
+                    },
                 )
+            }
+        }
+    }
+
+    /**
+     * 为缺少封面的媒体库分批补齐预览卡片（只用于封面兜底，因此每库取更少的
+     * 卡片）。分批而不是一次拉全部：单个响应小、失败影响面小，也不会在首页
+     * 已经可用之后再阻塞 1-2 秒。
+     */
+    private fun loadLibraryCovers() {
+        if (libraryCoverJob?.isActive == true) return
+        val pending = _state.value.libraries.filter { library ->
+            library.enabled && library.coverUrl.isBlank() && library.cards.isEmpty()
+        }
+        if (pending.isEmpty()) return
+        libraryCoverJob = viewModelScope.launch {
+            pending.chunked(LIBRARY_COVER_BATCH).forEach { batch ->
+                val result = repo.libraries(
+                    ids = batch.map { it.id },
+                    withPreview = true,
+                    previewLimit = LIBRARY_COVER_PREVIEW_LIMIT,
+                    includeTotal = false,
+                )
+                if (result !is ApiResult.Success) return@launch
+                val byId = result.value.associateBy { it.id }
+                _state.update { current ->
+                    current.copy(
+                        libraries = current.libraries.map { library ->
+                            val cards = byId[library.id]?.cards.orEmpty()
+                            if (cards.isEmpty()) library else library.copy(cards = cards)
+                        },
+                    )
+                }
             }
         }
     }
@@ -730,28 +854,59 @@ class MediaViewModel(
                 }
                 return@launch
             }
+            // 详情行一到就渲染页面；选集、收藏、续播各自回来再补。
+            // 以前要等四个请求全部完成，详情接口偶发 5 秒时整页空白 5 秒。
+            _state.update {
+                it.copy(
+                    detailLoading = false,
+                    detail = detail.value,
+                )
+            }
+            val resolvedDetail = detail.value
             coroutineScope {
-                val episodesDeferred = async {
-                    if (seriesKey != null && libraryId != null) {
+                launch {
+                    val episodes = if (seriesKey != null && libraryId != null) {
                         repo.seriesEpisodes(libraryId, seriesKey)
                     } else {
                         repo.mediaEpisodes(mediaId)
                     }
+                    if (requestId != detailRequestId) return@launch
+                    if (episodes is ApiResult.Success) {
+                        _state.update { current ->
+                            // 用户可能已经切到别的详情页：只更新同一个条目。
+                            if (current.detail?.id == resolvedDetail.id) {
+                                current.copy(episodes = episodes.value.items)
+                            } else {
+                                current
+                            }
+                        }
+                    }
                 }
-                val favoriteDeferred = async { repo.favoriteStatus(mediaId) }
-                val resumeDeferred = async { repo.resume(mediaId) }
-                val episodes = episodesDeferred.await()
-                val favorite = favoriteDeferred.await()
-                val resume = resumeDeferred.await()
-                if (requestId != detailRequestId) return@coroutineScope
-                _state.update {
-                    it.copy(
-                        detailLoading = false,
-                        detail = detail.value,
-                        episodes = (episodes as? ApiResult.Success)?.value?.items ?: emptyList(),
-                        favorite = (favorite as? ApiResult.Success)?.value?.favourite ?: false,
-                        detailResumeMs = (resume as? ApiResult.Success)?.value?.positionMs ?: 0L,
-                    )
+                launch {
+                    val favorite = repo.favoriteStatus(mediaId)
+                    if (requestId != detailRequestId) return@launch
+                    if (favorite is ApiResult.Success) {
+                        _state.update { current ->
+                            if (current.detail?.id == resolvedDetail.id) {
+                                current.copy(favorite = favorite.value.favourite)
+                            } else {
+                                current
+                            }
+                        }
+                    }
+                }
+                launch {
+                    val resume = repo.resume(mediaId)
+                    if (requestId != detailRequestId) return@launch
+                    if (resume is ApiResult.Success) {
+                        _state.update { current ->
+                            if (current.detail?.id == resolvedDetail.id) {
+                                current.copy(detailResumeMs = resume.value.positionMs)
+                            } else {
+                                current
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -805,21 +960,14 @@ class MediaViewModel(
                 ),
             )
         }
+        // 弹幕识别最慢（服务端要串行访问上游，冷启动 6-12 秒），与播放地址
+        // 并行发起：以前是起播之后才请求，等于把这段延迟整个串在播放后面。
+        loadDanmaku(media.id)
         viewModelScope.launch {
             val accessToken = credentialStore.read(scope)?.accessToken
-            val result = coroutineScope {
-                val info = async { repo.playbackInfo(media.id) }
-                val resume = async { repo.resume(media.id) }
-                // 直连模式只查询外挂字幕文件；内嵌文本字幕由 ExoPlayer 直接从
-                // 视频容器里解出并渲染，不再让服务端跑 ffprobe/字幕转换。
-                val subtitles = async {
-                    repo.subtitles(media.id, includeEmbedded = false)
-                }
-                PlaybackBundle(info.await(), resume.await(), subtitles.await())
-            }
+            val info = repo.playbackInfo(media.id)
             if (requestId != playbackRequestId) return@launch
 
-            val info = result.info
             if (info !is ApiResult.Success) {
                 DiagnosticsLog.w(
                     "Play",
@@ -843,7 +991,12 @@ class MediaViewModel(
                 return@launch
             }
 
-            val resumeValue = (result.resume as? ApiResult.Success)?.value
+            val infoValue = info.value
+            // 新服务端在 /playback/{id}/info 里直接带续播进度和外挂字幕，
+            // 起播路径从 3 个请求降到 1 个；老服务端没有这两个字段时再按
+            // 原路径补拉，保证兼容。
+            val resumeValue = infoValue.resume
+                ?: (repo.resume(media.id) as? ApiResult.Success)?.value
             val cached = progressStore.read(scope, media.id)
             val duration = resumeValue?.durationMs
                 ?.takeIf { it > 0 }
@@ -855,7 +1008,6 @@ class MediaViewModel(
                 completed = resumeValue?.completed == true,
             )
 
-            val infoValue = info.value
             // App 只使用直链：不请求 HLS/转码地址，解码全部交给本机。
             val streamUrl = absolute(infoValue.streamUrl)
                 ?.let { PlaybackUrls.withAccessToken(it, accessToken) }
@@ -876,7 +1028,11 @@ class MediaViewModel(
             }
             val decoderNote = decodeAssessment.note
 
-            val rawTracks = (result.subtitles as? ApiResult.Success)?.value?.tracks.orEmpty()
+            val rawTracks = infoValue.subtitles
+                ?: (repo.subtitles(media.id, includeEmbedded = false) as? ApiResult.Success)
+                    ?.value
+                    ?.tracks
+                ?: emptyList()
             val subtitles = rawTracks
                 .asSequence()
                 .mapNotNull { track -> toPlaybackSubtitle(media.id, track, accessToken) }
@@ -912,9 +1068,6 @@ class MediaViewModel(
                     ),
                 )
             }
-
-            // 弹幕与字幕互不阻塞：先起播，再在后台请求识别与匹配。
-            loadDanmaku(media.id)
         }
     }
 
@@ -1246,9 +1399,10 @@ class MediaViewModel(
     }
 
     fun createImageLoader(context: Context): ImageLoader {
-        val client = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
+        // 派生自共享客户端：复用同一个连接池 / Dispatcher / 缓存，图片请求
+        // 不必再单独做一次 DNS + TLS。以前每个页面都会建一个全新客户端，
+        // 海报墙第一屏等于多开五六条 TLS 连接。
+        val client = httpClient.newBuilder()
             .addInterceptor { chain ->
                 val request = chain.request()
                 val token = if (request.url.toString().startsWith(origin)) {
@@ -1283,23 +1437,6 @@ class MediaViewModel(
         }
     }
 
-    private fun firstError(vararg results: ApiResult<*>): String? {
-        for (result in results) {
-            when (result) {
-                is ApiResult.Failure -> return ErrorMessages.action(result)
-                is ApiResult.NetworkError -> return "网络不可用，请稍后重试"
-                else -> Unit
-            }
-        }
-        return null
-    }
-
-    private data class PlaybackBundle(
-        val info: ApiResult<PlaybackInfoDto>,
-        val resume: ApiResult<app.mebox.android.core.network.ResumeDto>,
-        val subtitles: ApiResult<app.mebox.android.core.network.SubtitleTracksDto>?,
-    )
-
     class Factory(
         private val repository: MediaRepository,
         private val origin: String,
@@ -1307,6 +1444,7 @@ class MediaViewModel(
         private val credentialStore: CredentialStore,
         private val progressStore: WatchProgressStore,
         private val codecSupport: DeviceCodecSupport,
+        private val httpClient: OkHttpClient,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1318,6 +1456,7 @@ class MediaViewModel(
                 credentialStore,
                 progressStore,
                 codecSupport,
+                httpClient,
             ) as T
         }
     }
@@ -1331,6 +1470,19 @@ class MediaViewModel(
 
         /** 首页每个媒体库滑轨的预览条数。 */
         const val HOME_PREVIEW_LIMIT = 12
+
+        /**
+         * 首页滑轨每批加载多少个媒体库。
+         *
+         * 这个数字决定单次预览请求的体积：库越多，一次拉回的卡片越多
+         * （70 个库 × 12 张 ≈ 2MB）。网页端首页同样是先检视 3 个库、随滚动
+         * 逐步加载（HomePage.tsx 的 INITIAL_ROWS）。
+         */
+        const val HOME_SECTION_BATCH = 8
+
+        /** 媒体库索引封面兜底：每批请求几个库，以及每库取几张卡片。 */
+        const val LIBRARY_COVER_BATCH = 10
+        const val LIBRARY_COVER_PREVIEW_LIMIT = 4
 
         /** 观看历史一次加载的条数；服务端上限为 500。 */
         const val HISTORY_LIMIT = 200

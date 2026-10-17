@@ -32,8 +32,17 @@ class MeBoxApiClient(
         ids: String? = null,
         withPreview: Boolean = false,
         previewLimit: Int? = null,
+        includeTotal: Boolean = true,
     ): ApiResult<List<LibraryDto>> =
-        call { api.libraries(bearer(accessToken), ids, withPreview, previewLimit) }
+        call {
+            api.libraries(
+                bearer(accessToken),
+                ids,
+                withPreview,
+                previewLimit,
+                includeTotal.takeIf { !it },
+            )
+        }
 
     suspend fun librarySeries(
         accessToken: String,

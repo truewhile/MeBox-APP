@@ -49,6 +49,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import app.mebox.android.core.media.LibraryArtwork
 import app.mebox.android.core.media.MediaBrowseFormat
 import app.mebox.android.core.media.MediaImageUrls
 import app.mebox.android.core.network.ContinueWatchingDto
@@ -265,8 +266,6 @@ fun ContinueWatchingCard(
     val image = MediaImageUrls.backdrop(
         origin = origin,
         remote = media.backdropUrl.ifBlank { media.posterUrl },
-        width = 720,
-        height = 405,
     )
     Column(
         modifier = Modifier
@@ -350,7 +349,7 @@ fun LibrarySpotlightCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
-    val cover = MediaImageUrls.backdrop(origin, library.coverUrl, 720, 405)
+    val cover = LibraryArtwork.cover(origin, library)
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -567,16 +566,12 @@ internal fun seriesCardImage(origin: String, card: SeriesCardDto): String? =
     MediaImageUrls.backdrop(
         origin = origin,
         remote = card.rep.backdropUrl.ifBlank { card.rep.posterUrl },
-        width = 640,
-        height = 400,
     )
 
 internal fun mediaArtworkImage(origin: String, media: MediaDto): String? =
     MediaImageUrls.backdrop(
         origin = origin,
         remote = media.backdropUrl.ifBlank { media.posterUrl },
-        width = 720,
-        height = 405,
     )
 
 /**
@@ -594,8 +589,6 @@ internal fun episodeArtworkImage(
             .ifBlank { episode.posterUrl }
             .ifBlank { fallback?.backdropUrl.orEmpty() }
             .ifBlank { fallback?.posterUrl.orEmpty() },
-        width = 480,
-        height = 270,
     )
 
 /**

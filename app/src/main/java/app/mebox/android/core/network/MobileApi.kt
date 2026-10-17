@@ -39,6 +39,8 @@ interface MobileApi {
         @Query("ids") ids: String?,
         @Query("with_preview") withPreview: Boolean,
         @Query("preview_limit") previewLimit: Int?,
+        /** `false` 时服务端跳过每库 COUNT(*)；首页预览只需要卡片。 */
+        @Query("include_total") includeTotal: Boolean?,
     ): Response<List<LibraryDto>>
 
     @GET("api/libraries/{id}/series")

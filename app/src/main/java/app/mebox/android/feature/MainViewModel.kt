@@ -10,6 +10,7 @@ import app.mebox.android.core.input.PhoneInputEvent
 import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.model.AccountScope
 import app.mebox.android.core.network.ApiResult
+import app.mebox.android.core.network.MeBoxApiClient
 import app.mebox.android.core.network.MobileUser
 import app.mebox.android.core.network.ServerAddress
 import app.mebox.android.core.network.ServerAddressError
@@ -226,6 +227,8 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             container.readerAudio.stop()
             container.readerCache.clearAccount(current.scope)
             container.preferences.clearAccount()
+            // 缓存里可能还有上一个账号的媒体列表与详情。
+            container.clearHttpCache()
             val unconfirmed = remote is ApiResult.Failure || remote is ApiResult.NetworkError
             DiagnosticsLog.i(
                 "Auth",
@@ -284,107 +287,193 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         }
 
         val api = container.apiFor(address)
-        when (val info = api.serverInfo()) {
+        // 冷启动的关键路径只应该有一次网络往返。`server-info` 的作用是
+        // 「确认地址还指向同一台实例 + 版本够新」，在跨境链路上这一步经常
+        // 要 5 秒以上（实测 5.6s，而接口本身只要 0.15s）。有上次确认过的
+        // 快照时先用快照进入界面，把这步校验放到后台。
+        val snapshot = cachedServerInfo(address)?.takeIf { it.serverId == serverId }
+        val info: ServerInfo = snapshot ?: when (val result = api.serverInfo()) {
             is ApiResult.Success -> {
-                if (ServerCompatibility.requiresUpgrade(info.value, BuildConfig.VERSION_CODE)) {
-                    DiagnosticsLog.w(
-                        "Session",
-                        "服务器版本过低 version=${info.value.serverVersion}",
-                    )
-                    _state.value = AppUiState.Connection(
-                        addressText = address.origin,
-                        error = ServerCompatibility.upgradeMessage(
-                            info.value,
-                            BuildConfig.VERSION_CODE,
-                        ),
-                    )
-                    return
-                }
-                val repo = MobileSessionRepository(info.value, api, container.credentialStore)
-                repository = repo
-                if (info.value.serverId != serverId) {
-                    // 地址指向了另一台实例：旧凭证不属于它，必须重新登录。
-                    container.credentialStore.clear(AccountScope(serverId, userId))
-                    container.preferences.clearAccount()
-                    _state.value = AppUiState.Login(address, info.value, error = "服务器实例已变化，请重新登录")
-                    return
-                }
-                val scope = AccountScope(serverId, userId)
-                when (val session = repo.loadSession(scope)) {
-                    is ApiResult.Success -> {
-                        DiagnosticsLog.i(
-                            "Session",
-                            "会话已恢复 user=${session.value.user.username}",
-                        )
-                        _state.value = AppUiState.Account(
-                            address = address,
-                            serverInfo = info.value,
-                            scope = scope,
-                            user = session.value.user,
-                            deviceLabel = session.value.session?.deviceName
-                                ?.takeIf { it.isNotBlank() } ?: "Android",
-                        )
-                    }
-                    is ApiResult.Failure -> {
-                        DiagnosticsLog.w(
-                            "Session",
-                            "会话恢复失败 HTTP ${session.status} ${session.code}",
-                        )
-                        if (session.status == 401) {
-                            repo.coordinator.onAccountChanged()
-                            container.credentialStore.clear(scope)
-                            container.watchProgress.clear(scope)
-                            container.preferences.clearAccount()
-                            _state.value = AppUiState.Login(
-                                address = address,
-                                serverInfo = info.value,
-                                error = "登录已失效，请重新登录",
-                            )
-                        } else {
-                            _state.value = AppUiState.Connection(
-                                addressText = address.origin,
-                                notice = failureMessage(session),
-                            )
-                        }
-                    }
-                    is ApiResult.NetworkError -> {
-                        DiagnosticsLog.e(
-                            "Session",
-                            "会话恢复网络错误 ${address.origin}",
-                            session.cause,
-                        )
-                        _state.value = AppUiState.Connection(
-                            addressText = address.origin,
-                            notice = "暂时无法连接，登录状态已保留，请稍后重试",
-                        )
-                    }
-                    ApiResult.Stale -> {
-                        _state.value = AppUiState.Connection(addressText = address.origin)
-                    }
-                }
+                saveServerInfoSnapshot(address, result.value)
+                result.value
             }
             is ApiResult.Failure -> {
                 DiagnosticsLog.w(
                     "Session",
-                    "读取服务器信息失败 ${address.origin} HTTP ${info.status} ${info.code}",
+                    "读取服务器信息失败 ${address.origin} HTTP ${result.status} ${result.code}",
                 )
                 _state.value = AppUiState.Connection(
                     addressText = address.origin,
-                    notice = connectionFailureMessage(info),
+                    notice = connectionFailureMessage(result),
                 )
+                return
             }
             is ApiResult.NetworkError -> {
                 DiagnosticsLog.e(
                     "Session",
                     "读取服务器信息网络错误 ${address.origin}",
-                    info.cause,
+                    result.cause,
                 )
                 _state.value = AppUiState.Connection(
                     addressText = address.origin,
                     notice = "暂时无法连接服务器，登录状态已保留",
                 )
+                return
             }
-            ApiResult.Stale -> _state.value = AppUiState.Connection(addressText = address.origin)
+            ApiResult.Stale -> {
+                _state.value = AppUiState.Connection(addressText = address.origin)
+                return
+            }
+        }
+
+        if (ServerCompatibility.requiresUpgrade(info, BuildConfig.VERSION_CODE)) {
+            DiagnosticsLog.w(
+                "Session",
+                "服务器版本过低 version=${info.serverVersion}",
+            )
+            _state.value = AppUiState.Connection(
+                addressText = address.origin,
+                error = ServerCompatibility.upgradeMessage(
+                    info,
+                    BuildConfig.VERSION_CODE,
+                ),
+            )
+            return
+        }
+
+        val repo = MobileSessionRepository(info, api, container.credentialStore)
+        repository = repo
+        if (info.serverId != serverId) {
+            // 地址指向了另一台实例：旧凭证不属于它，必须重新登录。
+            container.credentialStore.clear(AccountScope(serverId, userId))
+            container.preferences.clearAccount()
+            container.clearHttpCache()
+            _state.value = AppUiState.Login(address, info, error = "服务器实例已变化，请重新登录")
+            return
+        }
+        val scope = AccountScope(serverId, userId)
+        when (val session = repo.loadSession(scope)) {
+            is ApiResult.Success -> {
+                DiagnosticsLog.i(
+                    "Session",
+                    "会话已恢复 user=${session.value.user.username}",
+                )
+                _state.value = AppUiState.Account(
+                    address = address,
+                    serverInfo = info,
+                    scope = scope,
+                    user = session.value.user,
+                    deviceLabel = session.value.session?.deviceName
+                        ?.takeIf { it.isNotBlank() } ?: "Android",
+                )
+                if (snapshot != null) {
+                    verifyServerInfoInBackground(address, api, serverId, userId)
+                }
+            }
+            is ApiResult.Failure -> {
+                DiagnosticsLog.w(
+                    "Session",
+                    "会话恢复失败 HTTP ${session.status} ${session.code}",
+                )
+                if (session.status == 401) {
+                    repo.coordinator.onAccountChanged()
+                    container.credentialStore.clear(scope)
+                    container.watchProgress.clear(scope)
+                    container.preferences.clearAccount()
+                    container.clearHttpCache()
+                    _state.value = AppUiState.Login(
+                        address = address,
+                        serverInfo = info,
+                        error = "登录已失效，请重新登录",
+                    )
+                } else {
+                    _state.value = AppUiState.Connection(
+                        addressText = address.origin,
+                        notice = failureMessage(session),
+                    )
+                }
+            }
+            is ApiResult.NetworkError -> {
+                DiagnosticsLog.e(
+                    "Session",
+                    "会话恢复网络错误 ${address.origin}",
+                    session.cause,
+                )
+                _state.value = AppUiState.Connection(
+                    addressText = address.origin,
+                    notice = "暂时无法连接，登录状态已保留，请稍后重试",
+                )
+            }
+            ApiResult.Stale -> {
+                _state.value = AppUiState.Connection(addressText = address.origin)
+            }
+        }
+    }
+
+    /** 上次确认过的服务器身份快照；按地址隔离，换地址后自动失效。 */
+    private fun cachedServerInfo(address: ServerAddress): ServerInfo? {
+        val raw = container.preferences.serverInfoSnapshot(address.origin) ?: return null
+        return runCatching {
+            container.json.decodeFromString(ServerInfo.serializer(), raw)
+        }.getOrNull()
+    }
+
+    private fun saveServerInfoSnapshot(address: ServerAddress, info: ServerInfo) {
+        runCatching {
+            container.preferences.saveServerInfoSnapshot(
+                address.origin,
+                container.json.encodeToString(ServerInfo.serializer(), info),
+            )
+        }
+    }
+
+    /**
+     * 后台确认服务器身份：正常情况只是刷新快照；地址被指到另一台实例时
+     * 立即退回登录页，避免继续用旧凭证访问别的服务器。
+     */
+    private fun verifyServerInfoInBackground(
+        address: ServerAddress,
+        api: MeBoxApiClient,
+        serverId: String,
+        userId: String,
+    ) {
+        viewModelScope.launch {
+            when (val result = api.serverInfo()) {
+                is ApiResult.Success -> {
+                    saveServerInfoSnapshot(address, result.value)
+                    val current = _state.value
+                    if (result.value.serverId != serverId) {
+                        DiagnosticsLog.w(
+                            "Session",
+                            "服务器实例已变化 ${address.origin}",
+                        )
+                        container.credentialStore.clear(AccountScope(serverId, userId))
+                        container.preferences.clearAccount()
+                        container.clearHttpCache()
+                        _state.value = AppUiState.Login(
+                            address,
+                            result.value,
+                            error = "服务器实例已变化，请重新登录",
+                        )
+                        return@launch
+                    }
+                    if (ServerCompatibility.requiresUpgrade(result.value, BuildConfig.VERSION_CODE)) {
+                        _state.value = AppUiState.Connection(
+                            addressText = address.origin,
+                            error = ServerCompatibility.upgradeMessage(
+                                result.value,
+                                BuildConfig.VERSION_CODE,
+                            ),
+                        )
+                        return@launch
+                    }
+                    if (current is AppUiState.Account && current.address == address) {
+                        _state.value = current.copy(serverInfo = result.value)
+                    }
+                }
+                // 网络错误不影响已经恢复的界面，下次启动继续用快照。
+                else -> Unit
+            }
         }
     }
 
@@ -509,6 +598,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             credentialStore = container.credentialStore,
             progressStore = container.watchProgress,
             codecSupport = container.deviceCodecSupport,
+            httpClient = container.httpClient,
         )
     }
 

@@ -1,12 +1,14 @@
 package app.mebox.android.di
 
 import android.content.Context
-import android.os.SystemClock
 import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.log.LogShareServer
+import app.mebox.android.core.network.HttpCachePolicyInterceptor
 import app.mebox.android.core.network.MeBoxApiClient
+import app.mebox.android.core.network.NetTimingListener
 import app.mebox.android.core.network.ServerAddress
 import app.mebox.android.core.network.createMobileApi
+import app.mebox.android.core.network.forNetLog
 import app.mebox.android.core.media.WatchProgressStore
 import app.mebox.android.core.reader.ReaderAudioEngine
 import app.mebox.android.core.reader.ReaderCacheStore
@@ -18,12 +20,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.Json
-import okhttp3.HttpUrl
+import okhttp3.Cache
 import okhttp3.OkHttpClient
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /** 手动依赖组装；页面不直接创建网络或存储对象。 */
 class AppContainer(context: Context) {
+
+    private val appContext = context.applicationContext
 
     val json: Json = Json {
         ignoreUnknownKeys = true
@@ -31,31 +36,37 @@ class AppContainer(context: Context) {
         encodeDefaults = true
     }
 
+    /**
+     * 统一的网络客户端。
+     *
+     * - 带磁盘缓存：JSON 接口按路径给定 TTL（见 [HttpCachePolicy]），
+     *   所以切回首页/详情页可以先出内容再后台刷新，而不是每次等网络；
+     * - [NetTimingListener] 把耗时拆成 DNS / 建连 / TLS / 服务端四段，
+     *   日志里能直接看出慢在链路还是服务端；
+     * - Coil 的图片加载复用同一个连接池（见 createImageLoader），避免为
+     *   图片再建一套 TLS 连接。
+     */
     val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
-        // 所有请求都经过这里：排查「连不上 / 401 / 超时 / 某个接口慢」时，
-        // 导出的日志里能直接看到方法、路径、状态码和耗时。
-        // 只记录查询参数名，不记录参数值，避免把 token 写进日志。
+        .cache(Cache(File(appContext.cacheDir, "http-cache"), HTTP_CACHE_BYTES))
+        .eventListener(NetTimingListener())
+        // 网络拦截器：在写缓存之前补齐 Cache-Control，应用拦截器做不到
+        // 这一点（CacheInterceptor 在网络链更内层）。
+        .addNetworkInterceptor(HttpCachePolicyInterceptor())
         .addInterceptor { chain ->
+            // 命中磁盘缓存时不会产生网络事件，单独记一行便于确认「这次没
+            // 走网络」。查询参数只记参数名，不把 token 写进日志。
             val request = chain.request()
-            val summary = "${request.method} ${request.url.forLog()}"
-            val started = SystemClock.elapsedRealtime()
-            try {
-                val response = chain.proceed(request)
-                val cost = SystemClock.elapsedRealtime() - started
-                if (response.code >= 400) {
-                    DiagnosticsLog.w("Net", "${response.code} ${cost}ms $summary")
-                } else {
-                    DiagnosticsLog.d("Net", "${response.code} ${cost}ms $summary")
-                }
-                response
-            } catch (error: Throwable) {
-                val cost = SystemClock.elapsedRealtime() - started
-                DiagnosticsLog.e("Net", "请求失败 ${cost}ms $summary", error)
-                throw error
+            val response = chain.proceed(request)
+            if (response.networkResponse == null && response.cacheResponse != null) {
+                DiagnosticsLog.d(
+                    "Net",
+                    "${response.code} CACHE ${request.method} ${request.url.forNetLog()}",
+                )
             }
+            response
         }
         .addInterceptor { chain ->
             // 书源搜索/抓目录/正文由服务端同步访问上游，慢源可能远超普通接口。
@@ -81,6 +92,11 @@ class AppContainer(context: Context) {
             }
         }
         .build()
+
+    /** 退出登录/切换服务器时清掉 HTTP 缓存，避免读到上一个账号的数据。 */
+    fun clearHttpCache() {
+        runCatching { httpClient.cache?.evictAll() }
+    }
 
     val credentialStore: CredentialStore = KeystoreCredentialStore(context, json)
 
@@ -109,16 +125,4 @@ class AppContainer(context: Context) {
         MeBoxApiClient(createMobileApi(address, httpClient, json), json)
 }
 
-/**
- * 日志里只保留协议、主机、端口和路径：
- * 查询参数值可能包含访问令牌或用户搜索词，只保留参数名。
- */
-private fun HttpUrl.forLog(): String = buildString {
-    append(scheme).append("://").append(host)
-    if (port != HttpUrl.defaultPort(scheme)) append(':').append(port)
-    append(encodedPath)
-    if (querySize > 0) {
-        append('?')
-        append(queryParameterNames.joinToString("&") { "$it=…" })
-    }
-}
+private const val HTTP_CACHE_BYTES = 48L * 1024L * 1024L

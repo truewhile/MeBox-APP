@@ -56,6 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.mebox.android.core.media.LibraryArtwork
 import app.mebox.android.core.media.MediaBrowseFormat
 import app.mebox.android.core.media.PlaybackPlan
 import app.mebox.android.core.network.ContinueWatchingDto
@@ -503,7 +504,7 @@ private fun TvLibraryTile(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
             ) {
                 MediaArtwork(
-                    url = tvBackdrop(origin, library.coverUrl),
+                    url = LibraryArtwork.cover(origin, library, width = 1280, height = 720),
                     title = library.name,
                     modifier = Modifier.fillMaxSize(),
                 )

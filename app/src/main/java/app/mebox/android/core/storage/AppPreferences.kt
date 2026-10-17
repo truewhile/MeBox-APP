@@ -24,6 +24,32 @@ class AppPreferences(context: Context) {
         get() = prefs.getBoolean(KEY_CLEARTEXT, false)
         set(value) = prefs.edit().putBoolean(KEY_CLEARTEXT, value).apply()
 
+    /**
+     * 上次确认过的服务器身份（`/api/v1/server-info` 的原始 JSON）。
+     *
+     * 冷启动时先用它恢复界面，把「确认还是同一台实例」的校验放到后台：
+     * 跨境链路上这个请求经常要 5 秒以上，而它只用于版本检查与实例识别。
+     * 快照按地址隔离，地址变了就自然失效。
+     */
+    fun serverInfoSnapshot(address: String): String? {
+        if (prefs.getString(KEY_SERVER_SNAPSHOT_ADDRESS, null) != address) return null
+        return prefs.getString(KEY_SERVER_SNAPSHOT_INFO, null)
+    }
+
+    fun saveServerInfoSnapshot(address: String, infoJson: String) {
+        prefs.edit()
+            .putString(KEY_SERVER_SNAPSHOT_ADDRESS, address)
+            .putString(KEY_SERVER_SNAPSHOT_INFO, infoJson)
+            .apply()
+    }
+
+    fun clearServerInfoSnapshot() {
+        prefs.edit()
+            .remove(KEY_SERVER_SNAPSHOT_ADDRESS)
+            .remove(KEY_SERVER_SNAPSHOT_INFO)
+            .apply()
+    }
+
     /** 播放内核的持久化键；具体取值见 PlayerEngineKind.key。 */
     var playerEngine: String?
         get() = prefs.getString(KEY_PLAYER_ENGINE, null)
@@ -61,5 +87,7 @@ class AppPreferences(context: Context) {
         const val KEY_CLEARTEXT = "cleartext_risk_accepted"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_PLAYER_ENGINE = "player_engine"
+        const val KEY_SERVER_SNAPSHOT_ADDRESS = "server_snapshot_address"
+        const val KEY_SERVER_SNAPSHOT_INFO = "server_snapshot_info"
     }
 }

@@ -111,6 +111,16 @@ data class PlaybackInfoDto(
     @SerialName("stream_url") val streamUrl: String = "",
     /** 服务端仍会返回 HLS 地址供网页/第三方客户端使用；App 忽略它，只走直链。 */
     @SerialName("hls_url") val hlsUrl: String = "",
+    /**
+     * 续播进度。新服务端直接在播放地址响应里带回，App 起播只需一个请求；
+     * 老服务端没有该字段，客户端会退回 `/api/playback/{id}/resume`。
+     */
+    val resume: ResumeDto? = null,
+    /**
+     * 外挂字幕轨（不含内嵌字幕）。同样用于把起播路径的三个请求合并成一个；
+     * 缺省时客户端退回 `/api/media/{id}/subtitles?include_embedded=false`。
+     */
+    val subtitles: List<SubtitleTrackDto>? = null,
 )
 
 @Serializable
