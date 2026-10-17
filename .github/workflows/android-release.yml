@@ -1,0 +1,162 @@
+name: Android APK Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - 'plan/**'
+      - '**.md'
+  workflow_dispatch:
+
+# 发布 Release 需要写权限；不要把该权限暴露给 pull_request 触发。
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    name: Build APK and publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # 四个签名 secret 全部存在时才构建正式签名包；否则回退到调试 APK。
+      HAS_SIGNING_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_PASSWORD != '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Run unit tests and lint
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug --stacktrace
+
+      - name: Read app version
+        id: version
+        run: |
+          VERSION="$(./gradlew -q :app:printVersionName | tail -n 1 | tr -d '\r')"
+          if [ -z "$VERSION" ]; then
+            echo "无法读取 versionName" >&2
+            exit 1
+          fi
+          echo "name=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Decode release keystore
+        if: env.HAS_SIGNING_KEY == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/mebox-release.jks"
+          test -s "$RUNNER_TEMP/mebox-release.jks"
+
+      - name: Build signed release APK
+        if: env.HAS_SIGNING_KEY == 'true'
+        env:
+          MEBOX_KEYSTORE_FILE: ${{ runner.temp }}/mebox-release.jks
+          MEBOX_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          MEBOX_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          MEBOX_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease -PmeboxVersionCode=${{ github.run_number }} --stacktrace
+
+      - name: Build debug APK (signing secrets not configured)
+        if: env.HAS_SIGNING_KEY != 'true'
+        run: ./gradlew :app:assembleDebug -PmeboxVersionCode=${{ github.run_number }} --stacktrace
+
+      - name: Collect APK and checksum
+        id: apk
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          VERSION="${{ steps.version.outputs.name }}"
+          BUILD="${{ github.run_number }}"
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            KIND="release-signed"
+            NAME="MeBox-Android-${VERSION}-build.${BUILD}-release.apk"
+            cp app/build/outputs/apk/release/app-release.apk "dist/${NAME}"
+          else
+            KIND="debug"
+            NAME="MeBox-Android-${VERSION}-build.${BUILD}-debug.apk"
+            cp app/build/outputs/apk/debug/app-debug.apk "dist/${NAME}"
+          fi
+          (cd dist && sha256sum "${NAME}" > "${NAME}.sha256")
+          echo "kind=${KIND}" >> "$GITHUB_OUTPUT"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "path=dist/${NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mebox-android-build-${{ github.run_number }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Compute release metadata
+        id: meta
+        run: |
+          VERSION="${{ steps.version.outputs.name }}"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+            TITLE="MeBox Android ${TAG}"
+          else
+            TAG="v${VERSION}-build.${{ github.run_number }}"
+            TITLE="MeBox Android v${VERSION} (build ${{ github.run_number }})"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.title }}
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.apk.outputs.path }}
+            ${{ steps.apk.outputs.path }}.sha256
+          body: |
+            ## MeBox Android 自动构建
+
+            - 版本：`${{ steps.version.outputs.name }}`（versionCode `${{ github.run_number }}`）
+            - 构建类型：`${{ steps.apk.outputs.kind }}`
+            - 提交：`${{ github.sha }}`
+            - 分支/标签：`${{ github.ref_name }}`
+            - 单元测试与 lint：已通过
+
+            ### 安装
+
+            ```bash
+            adb install -r ${{ steps.apk.outputs.name }}
+            ```
+
+            ### 说明
+
+            - `release-signed` 使用仓库 Secrets 中的发布密钥签名，可用于覆盖升级。
+            - `debug` 表示尚未配置签名 Secrets，使用调试签名，仅用于测试。
+            - APK 旁边的 `.sha256` 文件可用于校验下载完整性。
+            - 本工作流不运行真机/模拟器仪器测试，发布前仍需人工验证关键流程。

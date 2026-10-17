@@ -1,0 +1,401 @@
+package app.mebox.android.core.player
+
+import android.content.Context
+import android.graphics.Color
+import android.net.Uri
+import androidx.annotation.OptIn
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.Format
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
+import androidx.media3.ui.PlayerView
+import app.mebox.android.BuildConfig
+import android.widget.FrameLayout
+
+/**
+ * 系统解码内核：AndroidX Media3 ExoPlayer。
+ *
+ * 优先使用设备硬件解码器，初始化失败时允许回退到系统软件解码器；
+ * 解码全部在本机完成，App 不请求服务端转码。
+ */
+@OptIn(UnstableApi::class)
+class ExoVideoPlayerEngine(
+    private val context: Context,
+) : VideoPlayerEngine {
+
+    override val kind: PlayerEngineKind = PlayerEngineKind.EXO
+
+    override var listener: VideoPlayerEngineListener? = null
+
+    private var host: FrameLayout? = null
+    private var playerView: PlayerView? = null
+    private var resizeMode: EngineResizeMode = EngineResizeMode.FIT
+    private var pendingMedia: EngineMedia? = null
+    private var pendingStartMs: Long = 0L
+    private var pendingAutoPlay: Boolean = true
+    private var released: Boolean = false
+    private var mediaLoaded: Boolean = false
+
+    /** 轨道 id -> ExoPlayer 的覆盖规则；`onTracksChanged` 时重建。 */
+    private var overrides: Map<String, TrackSelectionOverride> = emptyMap()
+
+    private val player: ExoPlayer = run {
+        // 播放器本身只持有 Application Context；PlayerView 仍用 Activity Context，
+        // 保证 ExoPlayer 的默认样式能解析主题属性。
+        val appContext = context.applicationContext
+        val httpFactory = DefaultHttpDataSource.Factory()
+            // MeBox 会把网盘/远程 Emby 的播放重定向到 HTTPS 上游；默认
+            // 不允许跨协议跳转，会表现为 302 播放失败。
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(30_000)
+            .setUserAgent("MeBox-Android/${BuildConfig.VERSION_NAME}")
+        val dataSourceFactory = DefaultDataSource.Factory(appContext, httpFactory)
+        val renderersFactory = DefaultRenderersFactory(appContext)
+            .setEnableDecoderFallback(true)
+        ExoPlayer.Builder(appContext, renderersFactory)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            .setSeekBackIncrementMs(10_000)
+            .setSeekForwardIncrementMs(10_000)
+            .build()
+            .apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .setUsage(C.USAGE_MEDIA)
+                        .build(),
+                    true,
+                )
+                setHandleAudioBecomingNoisy(true)
+                addListener(playerListener)
+            }
+    }
+
+    private val playerListener = object : Player.Listener {
+        override fun onPlayerError(error: PlaybackException) {
+            val message = when {
+                isDecodeError(error.errorCode) -> "本机解码失败：${error.errorCodeName}"
+                isParsingError(error.errorCode) -> "格式无法解析：${error.errorCodeName}"
+                isIoError(error.errorCode) -> "网络或文件访问失败：${error.errorCodeName}"
+                else -> "播放失败：${error.errorCodeName}"
+            }
+            listener?.onError(
+                message = message,
+                decodeRelated = isDecodeError(error.errorCode) || isParsingError(error.errorCode),
+            )
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            val state = when (playbackState) {
+                Player.STATE_BUFFERING -> EnginePlaybackState.BUFFERING
+                Player.STATE_READY -> EnginePlaybackState.READY
+                Player.STATE_ENDED -> EnginePlaybackState.ENDED
+                else -> EnginePlaybackState.IDLE
+            }
+            listener?.onBufferingChanged(state == EnginePlaybackState.BUFFERING)
+            listener?.onPlaybackStateChanged(state)
+            if (state == EnginePlaybackState.ENDED) listener?.onEnded()
+        }
+
+        override fun onIsPlayingChanged(playing: Boolean) {
+            listener?.onPlayingChanged(playing)
+        }
+
+        override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
+            listener?.onSpeedChanged(playbackParameters.speed)
+        }
+
+        override fun onTracksChanged(tracks: Tracks) {
+            publishTracks(tracks)
+        }
+    }
+
+    override fun attach(host: FrameLayout) {
+        if (released) return
+        this.host = host
+        val view = playerView ?: PlayerView(context).apply {
+            useController = false
+            keepScreenOn = true
+            setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+            subtitleView?.setStyle(
+                CaptionStyleCompat(
+                    Color.WHITE,
+                    Color.TRANSPARENT,
+                    Color.TRANSPARENT,
+                    CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                    Color.BLACK,
+                    null,
+                ),
+            )
+            playerView = this
+        }
+        view.player = player
+        view.resizeMode = resizeMode.toExoValue()
+        host.attachPlayerView(view)
+        startIfReady()
+    }
+
+    override fun setMedia(media: EngineMedia, startPositionMs: Long, autoPlay: Boolean) {
+        pendingMedia = media
+        pendingStartMs = startPositionMs.coerceAtLeast(0L)
+        pendingAutoPlay = autoPlay
+        mediaLoaded = false
+        // 换成新集时旧轨道覆盖不再有效。
+        overrides = emptyMap()
+        startIfReady()
+    }
+
+    private fun startIfReady() {
+        val media = pendingMedia ?: return
+        // 画面视图还没挂上时先等待 attach，避免起播后又被重新 prepare。
+        if (released || playerView == null || mediaLoaded) return
+        mediaLoaded = true
+        player.setMediaItem(media.toMediaItem(), pendingStartMs)
+        player.prepare()
+        player.playWhenReady = pendingAutoPlay
+    }
+
+    override fun play() {
+        if (released) return
+        player.play()
+    }
+
+    override fun pause() {
+        if (released) return
+        player.pause()
+    }
+
+    override fun seekTo(positionMs: Long) {
+        if (released) return
+        player.seekTo(positionMs.coerceAtLeast(0L))
+    }
+
+    override fun retry() {
+        if (released) return
+        player.prepare()
+        player.play()
+    }
+
+    override fun setSpeed(speed: Float) {
+        if (released) return
+        player.setPlaybackSpeed(speed)
+    }
+
+    override fun setResizeMode(mode: EngineResizeMode) {
+        resizeMode = mode
+        playerView?.resizeMode = mode.toExoValue()
+    }
+
+    override fun selectVideoTrack(trackId: String?) {
+        if (released) return
+        val parameters = player.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+        val override = trackId?.let { overrides[it] }
+        if (override != null) parameters.setOverrideForType(override)
+        player.trackSelectionParameters = parameters.build()
+    }
+
+    override fun selectAudioTrack(trackId: String?) {
+        if (released) return
+        val parameters = player.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+        val override = trackId?.let { overrides[it] }
+        if (override != null) parameters.setOverrideForType(override)
+        player.trackSelectionParameters = parameters.build()
+    }
+
+    override fun selectTextTrack(trackId: String?) {
+        if (released) return
+        val parameters = player.trackSelectionParameters.buildUpon()
+        if (trackId == null) {
+            parameters.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+        } else {
+            parameters.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            overrides[trackId]?.let { parameters.setOverrideForType(it) }
+        }
+        player.trackSelectionParameters = parameters.build()
+    }
+
+    override fun playbackState(): EnginePlaybackState = when (player.playbackState) {
+        Player.STATE_BUFFERING -> EnginePlaybackState.BUFFERING
+        Player.STATE_READY -> EnginePlaybackState.READY
+        Player.STATE_ENDED -> EnginePlaybackState.ENDED
+        else -> EnginePlaybackState.IDLE
+    }
+
+    override fun positionMs(): Long = player.currentPosition.coerceAtLeast(0L)
+
+    override fun durationMs(): Long {
+        val duration = player.duration
+        return if (duration > 0L && duration != C.TIME_UNSET) duration else 0L
+    }
+
+    override fun bufferedMs(): Long = player.bufferedPosition.coerceAtLeast(0L)
+
+    override fun isPlaying(): Boolean = player.isPlaying
+
+    override fun release() {
+        if (released) return
+        released = true
+        player.removeListener(playerListener)
+        playerView?.player = null
+        (playerView?.parent as? android.view.ViewGroup)?.removeView(playerView)
+        playerView = null
+        host = null
+        player.release()
+        listener = null
+    }
+
+    private fun publishTracks(tracks: Tracks) {
+        val video = mutableListOf<EngineTrack>()
+        val audio = mutableListOf<EngineTrack>()
+        val text = mutableListOf<EngineTrack>()
+        val newOverrides = mutableMapOf<String, TrackSelectionOverride>()
+
+        tracks.groups.forEach { group ->
+            for (index in 0 until group.length) {
+                if (!group.isTrackSupported(index)) continue
+                val format = group.getTrackFormat(index)
+                val id = "${group.mediaTrackGroup.id}:$index"
+                newOverrides[id] = TrackSelectionOverride(group.mediaTrackGroup, index)
+                val choice = EngineTrack(
+                    id = id,
+                    label = when (group.type) {
+                        C.TRACK_TYPE_VIDEO -> videoLabel(format, index)
+                        C.TRACK_TYPE_AUDIO -> audioLabel(format, index)
+                        else -> textLabel(format, index)
+                    },
+                    type = when (group.type) {
+                        C.TRACK_TYPE_VIDEO -> EngineTrackType.VIDEO
+                        C.TRACK_TYPE_AUDIO -> EngineTrackType.AUDIO
+                        else -> EngineTrackType.TEXT
+                    },
+                    selected = group.isTrackSelected(index),
+                    language = format.language,
+                )
+                when (group.type) {
+                    C.TRACK_TYPE_VIDEO -> video += choice
+                    C.TRACK_TYPE_AUDIO -> audio += choice
+                    C.TRACK_TYPE_TEXT -> text += choice
+                }
+            }
+        }
+
+        overrides = newOverrides
+        listener?.onTracksChanged(
+            EngineTracks(video = video, audio = audio, text = text),
+        )
+    }
+
+    private fun EngineResizeMode.toExoValue(): Int = when (this) {
+        EngineResizeMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        EngineResizeMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+        EngineResizeMode.ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+    }
+}
+
+private fun EngineMedia.toMediaItem(): MediaItem {
+    val subtitleConfigurations = subtitles
+        .filter { it.url.isNotBlank() || it.assUrl != null }
+        .map { subtitle ->
+            // ASS/SSA 直接交给 Media3 的 SsaParser：它能还原行内颜色、粗体、
+            // 斜体、下划线、删除线和位置；服务端压平的 WebVTT 只剩纯文本。
+            val assUrl = subtitle.assUrl
+            val source = assUrl ?: subtitle.url
+            MediaItem.SubtitleConfiguration.Builder(Uri.parse(source))
+                .setMimeType(if (assUrl != null) MimeTypes.TEXT_SSA else MimeTypes.TEXT_VTT)
+                .setLanguage(subtitle.language?.takeIf { it.isNotBlank() })
+                .setLabel(subtitle.label)
+                .build()
+        }
+    return MediaItem.Builder()
+        .setUri(url)
+        .apply {
+            // 网盘直链的播放地址常量可能没有 .m3u8 后缀；显式标注类型，
+            // 避免 DefaultMediaSourceFactory 把 HLS 当作普通渐进式文件解析。
+            if (url.contains(".m3u8", ignoreCase = true)) {
+                setMimeType(MimeTypes.APPLICATION_M3U8)
+            }
+        }
+        .setMediaId(mediaId)
+        .setMediaMetadata(MediaMetadata.Builder().setTitle(title).build())
+        .setSubtitleConfigurations(subtitleConfigurations)
+        .build()
+}
+
+private fun videoLabel(format: Format, index: Int): String {
+    val height = format.height
+    return if (height > 0) "${height}p" else "画面 ${index + 1}"
+}
+
+private fun audioLabel(format: Format, index: Int): String {
+    val channels = when (format.channelCount) {
+        1 -> "单声道"
+        2 -> "立体声"
+        6 -> "5.1 声道"
+        8 -> "7.1 声道"
+        else -> null
+    }
+    val base = format.label?.takeIf { it.isNotBlank() }
+        ?: format.language?.takeIf { it.isNotBlank() }
+    return listOfNotNull(base, channels).joinToString(" · ").ifBlank { "音轨 ${index + 1}" }
+}
+
+private fun textLabel(format: Format, index: Int): String =
+    format.label?.takeIf { it.isNotBlank() }
+        ?: format.language?.takeIf { it.isNotBlank() }
+        ?: "字幕 ${index + 1}"
+
+private fun isDecodeError(errorCode: Int): Boolean = when (errorCode) {
+    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+    PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+    PlaybackException.ERROR_CODE_DECODING_FAILED,
+    PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+    -> true
+
+    else -> false
+}
+
+private fun isParsingError(errorCode: Int): Boolean = when (errorCode) {
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+    PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+    -> true
+
+    else -> false
+}
+
+private fun isIoError(errorCode: Int): Boolean = when (errorCode) {
+    PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+    PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE,
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+    PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+    PlaybackException.ERROR_CODE_IO_NO_PERMISSION,
+    PlaybackException.ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED,
+    PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE,
+    -> true
+
+    else -> false
+}

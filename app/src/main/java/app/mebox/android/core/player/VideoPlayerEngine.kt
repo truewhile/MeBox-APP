@@ -1,0 +1,121 @@
+package app.mebox.android.core.player
+
+import android.view.ViewGroup
+import android.widget.FrameLayout
+
+/** 播放器内部统一的轨道类型，避免界面层直接依赖某个内核的常量。 */
+enum class EngineTrackType { VIDEO, AUDIO, TEXT }
+
+/** 一条可选轨道；[id] 只在同一内核实例内有效。 */
+data class EngineTrack(
+    val id: String,
+    val label: String,
+    val type: EngineTrackType,
+    val selected: Boolean,
+    val language: String? = null,
+)
+
+data class EngineTracks(
+    val video: List<EngineTrack> = emptyList(),
+    val audio: List<EngineTrack> = emptyList(),
+    val text: List<EngineTrack> = emptyList(),
+)
+
+data class EngineSubtitle(
+    val url: String,
+    val label: String,
+    val language: String? = null,
+    /**
+     * ASS/SSA 原文件地址。支持 libass 的内核（LibVLC）优先使用它渲染原始样式；
+     * 不支持的内核忽略该字段，退回 [url]（WebVTT）。
+     */
+    val assUrl: String? = null,
+)
+
+data class EngineMedia(
+    val mediaId: String,
+    val title: String,
+    val url: String,
+    val subtitles: List<EngineSubtitle> = emptyList(),
+)
+
+/** 画面缩放策略，两个内核各自映射到自己的实现。 */
+enum class EngineResizeMode { FIT, FILL, ZOOM }
+
+enum class EnginePlaybackState { IDLE, BUFFERING, READY, ENDED }
+
+/**
+ * 播放内核需要向界面汇报的状态。
+ *
+ * 全部回调都在主线程，界面可以直接写入 Compose 状态。
+ */
+interface VideoPlayerEngineListener {
+    fun onPlaybackStateChanged(state: EnginePlaybackState) = Unit
+    fun onPlayingChanged(playing: Boolean) = Unit
+    fun onBufferingChanged(buffering: Boolean) = Unit
+    fun onTracksChanged(tracks: EngineTracks) = Unit
+    fun onSpeedChanged(speed: Float) = Unit
+    fun onEnded() = Unit
+
+    /**
+     * @param decodeRelated 是否更像“解码器不支持”而不是网络/地址问题；
+     *   界面据此提示用户切换播放内核。
+     */
+    fun onError(message: String, decodeRelated: Boolean) = Unit
+}
+
+/**
+ * 播放内核的统一门面。
+ *
+ * 界面只依赖这里的能力：挂载画面、装载媒体、控制播放、切换轨道和阅读进度。
+ * 新增内核（例如 MPV）时实现这个接口并在 [createVideoPlayerEngine] 注册即可，
+ * 播放页不需要再改。
+ */
+interface VideoPlayerEngine {
+    val kind: PlayerEngineKind
+
+    var listener: VideoPlayerEngineListener?
+
+    /** 把画面挂到 [host]；重复调用必须幂等，便于 Compose 重组。 */
+    fun attach(host: FrameLayout)
+
+    /** 解绑画面并释放底层资源；调用后该实例不可再用。 */
+    fun release()
+
+    /** 装载媒体。引擎尚未挂载画面时先缓存，挂载后自动起播。 */
+    fun setMedia(media: EngineMedia, startPositionMs: Long, autoPlay: Boolean)
+
+    fun play()
+    fun pause()
+    fun seekTo(positionMs: Long)
+
+    /** 出错后的原地重试，不重建内核实例。 */
+    fun retry()
+
+    fun setSpeed(speed: Float)
+    fun setResizeMode(mode: EngineResizeMode)
+
+    /** null 表示交给内核自动选择（清晰度）/[selectTextTrack] 中表示关闭字幕。 */
+    fun selectVideoTrack(trackId: String?)
+    fun selectAudioTrack(trackId: String?)
+    fun selectTextTrack(trackId: String?)
+
+    fun playbackState(): EnginePlaybackState
+    fun positionMs(): Long
+    fun durationMs(): Long
+    fun bufferedMs(): Long
+    fun isPlaying(): Boolean
+}
+
+/** 把内核自绘的画面视图塞进容器；已经挂载过就直接复用。 */
+internal fun ViewGroup.attachPlayerView(view: android.view.View) {
+    if (view.parent === this) return
+    (view.parent as? ViewGroup)?.removeView(view)
+    addView(
+        view,
+        FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+        ),
+    )
+}

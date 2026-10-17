@@ -1,0 +1,35 @@
+# ---- Gradle / Android 构建产物 ----
+.gradle/
+build/
+**/build/
+.kotlin/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.hprof
+
+# ---- IDE / 编辑器 ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.fleet/
+
+# ---- 本地工具与临时目录 ----
+.tools/
+dist/
+.tmp-*/
+*.log
+
+# ---- 签名与系统文件 ----
+*.jks
+*.keystore
+*.p12
+.DS_Store
+Thumbs.db

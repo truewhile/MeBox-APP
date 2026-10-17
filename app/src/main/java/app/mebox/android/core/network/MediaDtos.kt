@@ -1,0 +1,151 @@
+package app.mebox.android.core.network
+
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class LibraryDto(
+    val id: String,
+    val name: String = "",
+    val type: String = "movie",
+    @SerialName("cover_url") val coverUrl: String = "",
+    val enabled: Boolean = true,
+    @SerialName("sort_order") val sortOrder: Int = 0,
+    val total: Int = 0,
+    /** 是否参与首页海报轮播。 */
+    @SerialName("carousel_enabled") val carouselEnabled: Boolean = false,
+    /** `with_preview=1` 时返回的预览卡片。 */
+    val cards: List<SeriesCardDto> = emptyList(),
+)
+
+@Serializable
+data class MediaDto(
+    val id: String,
+    @SerialName("library_id") val libraryId: String = "",
+    @SerialName("series_id") val seriesId: String = "",
+    val title: String = "",
+    @SerialName("original_name") val originalName: String = "",
+    @SerialName("episode_title") val episodeTitle: String = "",
+    @SerialName("library_name") val libraryName: String = "",
+    @SerialName("duration_sec") val durationSec: Int = 0,
+    @SerialName("poster_url") val posterUrl: String = "",
+    @SerialName("backdrop_url") val backdropUrl: String = "",
+    val overview: String = "",
+    val rating: Float = 0f,
+    val year: Int = 0,
+    @SerialName("release_date") val releaseDate: String = "",
+    @SerialName("season_num") val seasonNum: Int = 0,
+    @SerialName("episode_num") val episodeNum: Int = 0,
+    @SerialName("episode_fraction") val episodeFraction: Double = 0.0,
+    val genres: String = "",
+    val container: String = "",
+    val width: Int = 0,
+    val height: Int = 0,
+    @SerialName("video_codec") val videoCodec: String = "",
+    @SerialName("audio_codec") val audioCodec: String = "",
+    val path: String = "",
+    val versions: List<MediaDto> = emptyList(),
+) {
+    val displayEpisode: String
+        get() = when {
+            seasonNum > 0 && episodeNum > 0 -> "S${seasonNum.toString().padStart(2, '0')}E${episodeNum.toString().padStart(2, '0')}"
+            episodeNum > 0 -> "第 ${episodeNum} 集"
+            else -> ""
+        }
+}
+
+@Serializable
+data class SeriesCardDto(
+    val key: String = "",
+    val rep: MediaDto,
+    val linkMedia: MediaDto? = null,
+    val linkLibraryId: String? = null,
+    val count: Int = 1,
+    @SerialName("is_series") val isSeries: Boolean = false,
+    @SerialName("last_added_at") val lastAddedAt: String? = null,
+) {
+    val libraryId: String
+        get() = linkLibraryId
+            ?: linkMedia?.libraryId?.takeIf { it.isNotBlank() }
+            ?: rep.libraryId
+}
+
+@Serializable
+data class SeriesPageDto(
+    val items: List<SeriesCardDto> = emptyList(),
+    val total: Int = 0,
+    val page: Int = 1,
+    @SerialName("page_size") val pageSize: Int = 100,
+)
+
+@Serializable
+data class MediaPageDto(
+    val items: List<MediaDto> = emptyList(),
+    val total: Int = 0,
+    val page: Int = 1,
+    @SerialName("page_size") val pageSize: Int = 50,
+)
+
+@Serializable
+data class MediaListDto(
+    val items: List<MediaDto> = emptyList(),
+    val total: Int = 0,
+)
+
+@Serializable
+data class HistoryDto(
+    @SerialName("position_ms") val positionMs: Long = 0,
+    @SerialName("duration_ms") val durationMs: Long = 0,
+    val completed: Boolean = false,
+)
+
+@Serializable
+data class ContinueWatchingDto(
+    val history: HistoryDto = HistoryDto(),
+    val media: MediaDto,
+)
+
+@Serializable
+data class PlaybackInfoDto(
+    val media: MediaDto? = null,
+    @SerialName("stream_url") val streamUrl: String = "",
+    /** 服务端仍会返回 HLS 地址供网页/第三方客户端使用；App 忽略它，只走直链。 */
+    @SerialName("hls_url") val hlsUrl: String = "",
+)
+
+@Serializable
+data class ResumeDto(
+    @SerialName("position_ms") val positionMs: Long = 0,
+    @SerialName("duration_ms") val durationMs: Long = 0,
+    val completed: Boolean = false,
+)
+
+@Serializable
+data class FavoriteDto(val favourite: Boolean = false)
+
+@Serializable
+data class FavoriteListDto(
+    val items: List<MediaDto> = emptyList(),
+)
+
+/**
+ * `/api/watch-history` 的单条记录：历史字段与媒体信息平铺在同一个对象里。
+ * `media` 可能为空（条目已被删除或当前账号不可见）。
+ */
+@Serializable
+data class WatchHistoryDto(
+    val id: String = "",
+    @SerialName("media_id") val mediaId: String = "",
+    @SerialName("position_ms") val positionMs: Long = 0,
+    @SerialName("duration_ms") val durationMs: Long = 0,
+    @SerialName("watched_at") val watchedAt: String = "",
+    val completed: Boolean = false,
+    val media: MediaDto? = null,
+)
+
+@Serializable
+data class ProgressRequest(
+    @SerialName("media_id") val mediaId: String,
+    @SerialName("position_ms") val positionMs: Long,
+    @SerialName("duration_ms") val durationMs: Long,
+)
