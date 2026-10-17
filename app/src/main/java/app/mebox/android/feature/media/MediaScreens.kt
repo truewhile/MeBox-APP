@@ -1793,6 +1793,7 @@ private fun DetailScreen(
             items(visibleEpisodes, key = { it.id }) { episode ->
                 EpisodeRow(
                     episode = episode,
+                    imageUrl = episodeArtworkImage(origin, episode, media),
                     selected = episode.id == media.id,
                     onClick = { onPlayEpisode(episode) },
                 )
@@ -1976,8 +1977,14 @@ private fun MediaTechInfo(media: MediaDto) {
 }
 
 @Composable
-private fun EpisodeRow(episode: MediaDto, selected: Boolean, onClick: () -> Unit) {
+private fun EpisodeRow(
+    episode: MediaDto,
+    imageUrl: String?,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
     val shape = RoundedCornerShape(12.dp)
+    val episodeLabel = episode.episodeNum.takeIf { it > 0 }?.toString() ?: "正片"
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1991,33 +1998,15 @@ private fun EpisodeRow(episode: MediaDto, selected: Boolean, onClick: () -> Unit
                 },
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .size(width = 40.dp, height = 30.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(
-                    if (selected) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    },
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                episode.episodeNum.takeIf { it > 0 }?.toString() ?: "正片",
-                style = MaterialTheme.typography.labelMedium,
-                color = if (selected) {
-                    MaterialTheme.colorScheme.onPrimary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                maxLines = 1,
-            )
-        }
+        EpisodeThumbnail(
+            url = imageUrl,
+            episodeLabel = episodeLabel,
+            selected = selected,
+            modifier = Modifier.size(width = 96.dp, height = 54.dp),
+        )
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -2031,27 +2020,28 @@ private fun EpisodeRow(episode: MediaDto, selected: Boolean, onClick: () -> Unit
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (episode.durationSec > 0) {
+            Spacer(Modifier.height(3.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    formatDuration(episode.durationSec),
+                    if (episode.durationSec > 0) formatDuration(episode.durationSec) else "时长未知",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (selected) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "正在看",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
-        }
-        if (selected) {
-            Text(
-                "正在看",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Spacer(Modifier.width(6.dp))
         }
         Icon(
             Icons.Default.PlayArrow,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(18.dp),
         )
     }
 }

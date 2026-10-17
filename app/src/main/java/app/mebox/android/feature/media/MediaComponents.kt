@@ -7,6 +7,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -577,3 +578,114 @@ internal fun mediaArtworkImage(origin: String, media: MediaDto): String? =
         width = 720,
         height = 405,
     )
+
+/**
+ * 单集封面：优先本集剧照（backdrop），其次本集海报，最后回落到整部剧的主图，
+ * 保证没有刮削到分集剧照的剧集也有稳定的缩略图。
+ */
+internal fun episodeArtworkImage(
+    origin: String,
+    episode: MediaDto,
+    fallback: MediaDto? = null,
+): String? =
+    MediaImageUrls.backdrop(
+        origin = origin,
+        remote = episode.backdropUrl
+            .ifBlank { episode.posterUrl }
+            .ifBlank { fallback?.backdropUrl.orEmpty() }
+            .ifBlank { fallback?.posterUrl.orEmpty() },
+        width = 480,
+        height = 270,
+    )
+
+/**
+ * 选集缩略图：16:9 剧照 + 集数角标。
+ *
+ * 选集列表里单集封面是主要视觉线索，集数角标只作为辅助信息压在图左下角；
+ * 当前正在播放的集用主题色描边区分。
+ */
+@Composable
+internal fun EpisodeThumbnail(
+    url: String?,
+    episodeLabel: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(8.dp)
+    Box(
+        modifier = modifier
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        if (url != null) {
+            AsyncImage(
+                model = url,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.linearGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.primaryContainer,
+                                MaterialTheme.colorScheme.surfaceVariant,
+                            ),
+                        ),
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Default.PlayArrow,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        }
+        // 底部压暗，保证集数角标在亮色剧照上依然可读。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0.55f to Color.Transparent,
+                        1f to Color(0x99000000),
+                    ),
+                ),
+        )
+        Surface(
+            color = if (selected) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                Color(0xCC000000)
+            },
+            contentColor = Color.White,
+            shape = RoundedCornerShape(5.dp),
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(5.dp),
+        ) {
+            Text(
+                episodeLabel,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+            )
+        }
+        if (selected) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .border(
+                        width = 1.5.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = shape,
+                    ),
+            )
+        }
+    }
+}

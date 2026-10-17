@@ -57,6 +57,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -66,6 +67,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -591,8 +595,17 @@ fun PlayerMoreSheet(
     entries: List<PlayerMenuEntry>,
     onSelect: (PlayerSettingsSection) -> Unit,
     onDismiss: () -> Unit,
+    autoFocus: Boolean = false,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val firstFocus = remember { FocusRequester() }
+    LaunchedEffect(autoFocus) {
+        if (!autoFocus) return@LaunchedEffect
+        repeat(4) {
+            kotlinx.coroutines.delay(160)
+            if (runCatching { firstFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+        }
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -602,6 +615,7 @@ fun PlayerMoreSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp)
                 .padding(bottom = 20.dp),
         ) {
@@ -612,11 +626,21 @@ fun PlayerMoreSheet(
                 color = Color.White,
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             )
-            entries.forEach { entry ->
+            entries.forEachIndexed { index, entry ->
+                var focused by remember(entry.section) { mutableStateOf(false) }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .then(
+                            if (autoFocus && index == 0) {
+                                Modifier.focusRequester(firstFocus)
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .onFocusChanged { focused = it.isFocused }
                         .clip(RoundedCornerShape(12.dp))
+                        .background(if (focused) Color(0xFF2A2F38) else Color.Transparent)
                         .clickable { onSelect(entry.section) }
                         .padding(horizontal = 8.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -662,8 +686,17 @@ fun PlayerSettingsSheet(
     description: String? = null,
     onDismiss: () -> Unit,
     onSelect: (PlayerChoice) -> Unit,
+    autoFocus: Boolean = false,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val firstFocus = remember { FocusRequester() }
+    LaunchedEffect(autoFocus) {
+        if (!autoFocus) return@LaunchedEffect
+        repeat(4) {
+            kotlinx.coroutines.delay(160)
+            if (runCatching { firstFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+        }
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -673,6 +706,7 @@ fun PlayerSettingsSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 24.dp),
         ) {
@@ -699,11 +733,21 @@ fun PlayerSettingsSheet(
                     modifier = Modifier.padding(vertical = 16.dp),
                 )
             } else {
-                choices.forEach { choice ->
+                choices.forEachIndexed { index, choice ->
+                    var focused by remember(choice.id) { mutableStateOf(false) }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .then(
+                                if (autoFocus && index == 0) {
+                                    Modifier.focusRequester(firstFocus)
+                                } else {
+                                    Modifier
+                                },
+                            )
+                            .onFocusChanged { focused = it.isFocused }
                             .clip(RoundedCornerShape(10.dp))
+                            .background(if (focused) Color(0xFF2A2F38) else Color.Transparent)
                             .clickable { onSelect(choice) }
                             .padding(horizontal = 8.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -737,8 +781,17 @@ fun DanmakuSettingsSheet(
     onRenderChange: (opacity: Float, fontScale: Float, area: Float) -> Unit,
     onReload: () -> Unit,
     onSelectEpisode: (Long) -> Unit,
+    autoFocus: Boolean = false,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val firstFocus = remember { FocusRequester() }
+    LaunchedEffect(autoFocus) {
+        if (!autoFocus) return@LaunchedEffect
+        repeat(4) {
+            kotlinx.coroutines.delay(160)
+            if (runCatching { firstFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+        }
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -767,6 +820,7 @@ fun DanmakuSettingsSheet(
                 Switch(
                     checked = state.enabled,
                     onCheckedChange = onEnabledChange,
+                    modifier = if (autoFocus) Modifier.focusRequester(firstFocus) else Modifier,
                 )
             }
 

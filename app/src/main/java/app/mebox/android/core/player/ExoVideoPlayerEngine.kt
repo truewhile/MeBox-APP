@@ -25,6 +25,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import app.mebox.android.BuildConfig
+import app.mebox.android.core.log.DiagnosticsLog
 import android.widget.FrameLayout
 
 /**
@@ -54,7 +55,10 @@ class ExoVideoPlayerEngine(
     /** 轨道 id -> ExoPlayer 的覆盖规则；`onTracksChanged` 时重建。 */
     private var overrides: Map<String, TrackSelectionOverride> = emptyMap()
 
-    private val player: ExoPlayer = run {
+    // 用 lazy 延迟到构造完成后再创建 ExoPlayer：playerListener 在下方声明，
+    // 若在属性初始化阶段直接 addListener(playerListener)，此时它仍是 null，
+    // Media3 的 addListener 会立刻抛 NullPointerException。
+    private val player: ExoPlayer by lazy(LazyThreadSafetyMode.NONE) {
         // 播放器本身只持有 Application Context；PlayerView 仍用 Activity Context，
         // 保证 ExoPlayer 的默认样式能解析主题属性。
         val appContext = context.applicationContext
@@ -88,6 +92,11 @@ class ExoVideoPlayerEngine(
 
     private val playerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
+            DiagnosticsLog.e(
+                "Player",
+                "ExoPlayer 播放失败 ${error.errorCodeName} (${error.errorCode})",
+                error,
+            )
             val message = when {
                 isDecodeError(error.errorCode) -> "本机解码失败：${error.errorCodeName}"
                 isParsingError(error.errorCode) -> "格式无法解析：${error.errorCodeName}"
