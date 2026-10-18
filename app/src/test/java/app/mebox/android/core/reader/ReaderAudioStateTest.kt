@@ -50,4 +50,11 @@ class ReaderAudioStateTest {
         assertEquals(20, copy.closeCreditsSec)
         assertTrue(copy.stopAtChapterEnd)
     }
+
+    @Test
+    fun `audio mixing preference survives state copies`() {
+        val state = ReaderAudioState(mixWithOtherApps = false)
+        assertFalse(state.copy(playing = true).mixWithOtherApps)
+        assertTrue(ReaderAudioState().mixWithOtherApps)
+    }
 }

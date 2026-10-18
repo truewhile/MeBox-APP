@@ -93,6 +93,16 @@ class AppPreferences(context: Context) {
         set(value) = prefs.edit().putString(KEY_SUBTITLE_PRIORITY, value).apply()
 
     /**
+     * 听书时是否与其他应用同时出声。
+     *
+     * 默认开启：不申请音频焦点，切到微信/视频等应用时本应用不会被暂停。
+     * 关闭后恢复系统的焦点抢占与通话自动暂停。
+     */
+    var audioMixWithOtherApps: Boolean
+        get() = prefs.getBoolean(KEY_AUDIO_MIX, true)
+        set(value) = prefs.edit().putBoolean(KEY_AUDIO_MIX, value).apply()
+
+    /**
      * 设备 ID 由安装随机生成，不使用 IMEI/MAC 等硬件标识。
      */
     fun deviceId(): String {
@@ -130,6 +140,7 @@ class AppPreferences(context: Context) {
         const val KEY_DECODER_MODE = "decoder_mode"
         const val KEY_SUBTITLES_AUTO_LOAD = "subtitles_auto_load"
         const val KEY_SUBTITLE_PRIORITY = "subtitle_priority"
+        const val KEY_AUDIO_MIX = "reader_audio_mix_other_apps"
         const val KEY_SERVER_SNAPSHOT_ADDRESS = "server_snapshot_address"
         const val KEY_SERVER_SNAPSHOT_INFO = "server_snapshot_info"
     }

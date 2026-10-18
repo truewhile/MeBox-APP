@@ -2,6 +2,8 @@ package app.mebox.android.core.reader
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -15,6 +17,7 @@ import app.mebox.android.core.network.ApiResult
 import app.mebox.android.core.network.ReaderBookDto
 import app.mebox.android.core.network.ReaderChapterContentDto
 import app.mebox.android.core.network.ReaderChapterDto
+import app.mebox.android.core.storage.AppPreferences
 import app.mebox.android.service.ReaderAudioService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -50,6 +53,8 @@ data class ReaderAudioState(
     val timerEndsAtMs: Long = 0,
     /** 定时模式二：播完当前章后暂停（与分钟定时互斥）。 */
     val stopAtChapterEnd: Boolean = false,
+    /** 与其他应用同时出声：不抢占音频焦点。 */
+    val mixWithOtherApps: Boolean = true,
     /** 本书的片头/片尾跳过秒数，来自服务端书籍配置。 */
     val openCreditsSec: Int = 0,
     val closeCreditsSec: Int = 0,
@@ -76,8 +81,12 @@ class ReaderAudioEngine(
     private val context: Context,
     private val scope: CoroutineScope,
     private val cache: ReaderCacheStore,
+    private val preferences: AppPreferences,
+    private val checkpoints: ReaderAudioCheckpointStore,
 ) {
-    private val _state = MutableStateFlow(ReaderAudioState())
+    private val _state = MutableStateFlow(
+        ReaderAudioState(mixWithOtherApps = preferences.audioMixWithOtherApps),
+    )
     val state: StateFlow<ReaderAudioState> = _state.asStateFlow()
 
     private var controller: MediaController? = null
@@ -112,6 +121,7 @@ class ReaderAudioEngine(
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             syncPlaybackState()
             if (!isPlaying && startedPlayback && !playback.preparing) {
+                persistCheckpoint(synchronous = true)
                 scope.launch { reportProgress() }
             }
         }
@@ -153,9 +163,44 @@ class ReaderAudioEngine(
         }
     }
 
+    /**
+     * 后台服务被系统回收或主动释放时，MediaController 会断开。
+     * 保留当前书籍/章节信息，下一次播放时重新连接并按最后位置重新装载，
+     * 不能因为控制器失效就把用户丢回章节开头。
+     */
+    private val controllerListener = object : MediaController.Listener {
+        override fun onDisconnected(controller: MediaController) {
+            if (this@ReaderAudioEngine.controller !== controller) return
+            persistCheckpoint(synchronous = true)
+            runCatching { controller.removeListener(listener) }
+            this@ReaderAudioEngine.controller = null
+            connecting = false
+            loadJob?.cancel()
+            tickerJob?.cancel()
+            playback.reset()
+            advanceGuard.reset()
+            connectWaiters.clear()
+            startedPlayback = false
+            seekGuardUntilMs = 0L
+            _state.update {
+                it.copy(
+                    connected = false,
+                    preparing = false,
+                    loading = false,
+                    playing = false,
+                    playWhenReady = false,
+                )
+            }
+        }
+    }
+
     fun updateChapters(chapters: List<ReaderChapterDto>) {
         this.chapters = chapters
     }
+
+    /** 只返回仍连接会话的控制器；服务被回收后旧控制器不能再发命令。 */
+    private fun liveController(): MediaController? =
+        controller?.takeIf { it.isConnected }
 
     /**
      * 打开某一章的音频。若引擎已经在播放本书，则保持继续播放；
@@ -191,7 +236,7 @@ class ReaderAudioEngine(
                 notice = null,
             )
         }
-        controller?.setPlaybackSpeed(ReaderAudioTuning.snapSpeed(speed))
+        liveController()?.setPlaybackSpeed(ReaderAudioTuning.snapSpeed(speed))
         loadChapter(chapterIndex, startPositionSec, autoPlay, content)
     }
 
@@ -201,7 +246,7 @@ class ReaderAudioEngine(
         val close = ReaderAudioTuning.clampCreditsSeconds(closeCreditsSeconds)
         book = book?.copy(openCredits = open, closeCredits = close)
         _state.update { it.copy(openCreditsSec = open, closeCreditsSec = close) }
-        val player = controller ?: return
+        val player = liveController() ?: return
         val duration = player.duration.takeIf { it > 0 } ?: 0L
         val target = ReaderAudioTuning.startPositionMs(open, player.currentPosition, duration)
         if (target > player.currentPosition) seekTo(target)
@@ -210,22 +255,27 @@ class ReaderAudioEngine(
     fun play() {
         if (playback.failed) {
             // 解析失败、过期签名或播放器错误都重新获取音轨，不播放残留的旧章。
-            loadChapter(
-                _state.value.chapterIndex,
-                (_state.value.positionMs / 1_000).toInt().coerceAtLeast(0),
-                autoPlay = true,
-            )
+            reloadCurrent(autoPlay = true)
             return
         }
         playback.setPlayWhenReady(true)
         publishPlaybackState()
         // 服务连接/章节加载完成后使用最新意图，不另外排队一个过早的 play()。
         if (playback.preparing) return
+        if (controller?.isConnected != true) {
+            // 后台服务被系统回收后控制器会断开；保留的书籍信息仍可用于重新装载。
+            reloadCurrent(autoPlay = true)
+            return
+        }
         val request = playback.requestId
         ensureController { controller ->
             if (!playback.isCurrent(request)) return@ensureController
             if (controller.mediaItemCount == 0) {
-                failChapterLoad(request, _state.value.chapterIndex, "还没有可播放的章节")
+                if (book != null) {
+                    reloadCurrent(autoPlay = true)
+                } else {
+                    failChapterLoad(request, _state.value.chapterIndex, "还没有可播放的章节")
+                }
                 return@ensureController
             }
             startedPlayback = true
@@ -239,16 +289,31 @@ class ReaderAudioEngine(
         }
     }
 
+    /** 控制器断连或音轨丢失后，按最后位置重新连接并装载当前章节。 */
+    private fun reloadCurrent(autoPlay: Boolean) {
+        if (book == null || chapters.isEmpty()) {
+            _state.update { it.copy(error = "还没有可播放的章节") }
+            return
+        }
+        val index = _state.value.chapterIndex.takeIf { it >= 0 } ?: 0
+        loadChapter(
+            index = index,
+            startSec = (currentPositionMs() / 1_000L).toInt().coerceAtLeast(0),
+            autoPlay = autoPlay,
+        )
+    }
+
     fun pause() {
         playback.setPlayWhenReady(false)
         publishPlaybackState()
-        controller?.pause()
+        liveController()?.pause()
+        persistCheckpoint(synchronous = true)
         if (startedPlayback && !playback.preparing) scope.launch { reportProgress() }
     }
 
     fun toggle() {
         // 缓冲时 isPlaying=false，仍然应该允许用户暂停待播请求。
-        if (playback.playWhenReady || controller?.isPlaying == true) pause() else play()
+        if (playback.playWhenReady || liveController()?.isPlaying == true) pause() else play()
     }
 
     /**
@@ -268,13 +333,14 @@ class ReaderAudioEngine(
     fun seekTo(positionMs: Long) {
         if (playback.preparing || playback.failed) return
         val target = positionMs.coerceAtLeast(0)
-        controller?.seekTo(target)
+        liveController()?.seekTo(target)
         _state.update { it.copy(positionMs = target) }
+        persistCheckpoint()
         if (startedPlayback) scope.launch { reportProgress(target) }
     }
 
     fun seekBy(deltaMs: Long) {
-        val current = controller ?: return
+        val current = liveController() ?: return
         val target = (current.currentPosition + deltaMs).coerceAtLeast(0)
         seekTo(target)
     }
@@ -287,8 +353,22 @@ class ReaderAudioEngine(
             return
         }
         if (startedPlayback) scope.launch { reportProgress() }
+        persistCheckpoint(synchronous = true)
         loadChapter(nextIndex, 0, autoPlay = true)
     }
+
+    /**
+     * 是否存在可跳转的下一章。
+     *
+     * 系统媒体卡片只能用播放器的命令判断按钮是否显示，而播放器里只有当前章的
+     * 音轨，所以由声音引擎把「本书还有下一章」这个事实告诉服务层的播放器包装。
+     */
+    fun hasNextChapter(): Boolean =
+        nextReadable(chapters, _state.value.chapterIndex) != null
+
+    /** 是否存在可跳转的上一章，供系统媒体卡片显示「上一章」。 */
+    fun hasPreviousChapter(): Boolean =
+        previousReadable(chapters, _state.value.chapterIndex) != null
 
     fun previous() {
         val currentIndex = _state.value.chapterIndex
@@ -298,19 +378,21 @@ class ReaderAudioEngine(
             return
         }
         if (startedPlayback) scope.launch { reportProgress() }
+        persistCheckpoint(synchronous = true)
         loadChapter(previousIndex, 0, autoPlay = true)
     }
 
     fun jumpToChapter(index: Int) {
         if (chapters.getOrNull(index)?.isVolume != false) return
         if (startedPlayback) scope.launch { reportProgress() }
+        persistCheckpoint(synchronous = true)
         loadChapter(index, 0, autoPlay = true)
     }
 
     fun setSpeed(speed: Float) {
         val safe = ReaderAudioTuning.snapSpeed(speed)
         _state.update { it.copy(speed = safe) }
-        controller?.setPlaybackSpeed(safe)
+        liveController()?.setPlaybackSpeed(safe)
     }
 
     fun setTimer(minutes: Int) {
@@ -352,8 +434,66 @@ class ReaderAudioEngine(
         _state.update { it.copy(error = null, notice = null) }
     }
 
+    /**
+     * 切换「与其他应用同时播放」。
+     *
+     * 开启后播放器不申请音频焦点，其它应用的语音/音乐不会被本应用打断；
+     * 关闭后恢复 Media3 默认的焦点抢占与来电暂停行为。
+     */
+    fun setMixWithOtherApps(enabled: Boolean) {
+        if (preferences.audioMixWithOtherApps == enabled) {
+            _state.update { it.copy(mixWithOtherApps = enabled) }
+            return
+        }
+        preferences.audioMixWithOtherApps = enabled
+        _state.update {
+            it.copy(
+                mixWithOtherApps = enabled,
+                notice = if (enabled) {
+                    "已开启与其他应用同时播放"
+                } else {
+                    "已关闭与其他应用同时播放"
+                },
+            )
+        }
+        // 服务没在运行时不为了一个设置项把它拉起来；下次创建播放器会读偏好。
+        if (controller != null) {
+            runCatching {
+                context.startService(
+                    Intent(context, ReaderAudioService::class.java)
+                        .setAction(ReaderAudioService.ACTION_APPLY_AUDIO_MIX),
+                )
+            }
+        }
+    }
+
+    /** 把当前章节与位置写入本地检查点；退后台/服务销毁前用同步写入。 */
+    fun persistCheckpoint(synchronous: Boolean = false) {
+        val currentBook = book ?: return
+        val currentScope = accountScope ?: return
+        val index = _state.value.chapterIndex
+        if (index < 0) return
+        val title = _state.value.chapterTitle.ifBlank {
+            chapters.getOrNull(index)?.title.orEmpty()
+        }
+        checkpoints.save(
+            scope = currentScope,
+            checkpoint = ReaderAudioCheckpoint(
+                bookId = currentBook.id,
+                chapterIndex = index,
+                chapterTitle = title,
+                positionMs = currentPositionMs().coerceAtLeast(0L),
+                durationMs = _state.value.durationMs.coerceAtLeast(0L),
+                updatedAtMs = System.currentTimeMillis(),
+                playing = _state.value.playing,
+            ),
+            synchronous = synchronous,
+        )
+    }
+
     /** 停止播放并清空当前书籍（退出账号、移出书架或用户主动停止时调用）。 */
     fun stop() {
+        persistCheckpoint(synchronous = true)
         loadJob?.cancel()
         playback.reset()
         connectWaiters.clear()
@@ -364,25 +504,31 @@ class ReaderAudioEngine(
         startedPlayback = false
         stopAtChapterEnd = false
         seekGuardUntilMs = 0L
-        controller?.stop()
-        controller?.clearMediaItems()
+        runCatching { controller?.stop() }
+        runCatching { controller?.clearMediaItems() }
         book = null
         chapters = emptyList()
-        _state.value = ReaderAudioState(connected = controller != null)
+        _state.value = ReaderAudioState(
+            connected = controller != null,
+            mixWithOtherApps = preferences.audioMixWithOtherApps,
+        )
     }
 
     fun shutdown() {
         stop()
         connectionVersion += 1
         connecting = false
-        controller?.release()
+        val current = controller
         controller = null
+        current?.release()
         _state.update { it.copy(connected = false) }
     }
 
-    fun currentPositionMs(): Long =
-        if (playback.preparing || playback.failed) _state.value.positionMs
-        else controller?.currentPosition ?: _state.value.positionMs
+    fun currentPositionMs(): Long {
+        if (playback.preparing || playback.failed) return _state.value.positionMs
+        val player = controller?.takeIf { it.isConnected } ?: return _state.value.positionMs
+        return runCatching { player.currentPosition }.getOrDefault(_state.value.positionMs)
+    }
 
     // ── 内部实现 ──
 
@@ -416,8 +562,10 @@ class ReaderAudioEngine(
                 durationMs = 0,
             )
         }
+        // 章节切换后先把「新章起点」落盘：即使随后进程被回收，也不会回到上一章。
+        persistCheckpoint()
         // 新章准备期间停止旧音轨，避免旧位置和结束事件污染新章。
-        controller?.pause()
+        liveController()?.pause()
         DiagnosticsLog.i("ReaderAudio", "准备音轨 book=${currentBook.id} index=$index")
         loadJob = scope.launch {
             try {
@@ -470,6 +618,8 @@ class ReaderAudioEngine(
                     val metadata = MediaMetadata.Builder()
                         .setTitle(currentBook.name)
                         .setArtist(title.ifBlank { currentBook.name })
+                        // 系统媒体卡片与锁屏的封面；没有可读地址时保持占位图。
+                        .setArtworkUri(artworkUri(currentOrigin, currentBook.coverUrl))
                         .build()
                     val items = urls.mapIndexed { trackIndex, url ->
                         MediaItem.Builder()
@@ -508,7 +658,7 @@ class ReaderAudioEngine(
         advanceGuard.loadFailed(index)
         tickerJob?.cancel()
         startupStartedAtNs = 0L
-        controller?.pause()
+        liveController()?.pause()
         _state.update {
             it.copy(
                 loading = false,
@@ -532,7 +682,7 @@ class ReaderAudioEngine(
     }
 
     private fun syncPlaybackState() {
-        val player = controller
+        val player = controller?.takeIf { it.isConnected }
         if (player != null) {
             playback.playerChanged(
                 buffering = player.playbackState == Player.STATE_BUFFERING ||
@@ -566,6 +716,7 @@ class ReaderAudioEngine(
         // 加载下一章期间或同一章重复触发时直接忽略。
         if (!advanceGuard.tryFinish(finishedIndex)) return
         DiagnosticsLog.i("ReaderAudio", "本章结束 index=$finishedIndex")
+        persistCheckpoint(synchronous = true)
         if (startedPlayback) {
             val title = chapters.getOrNull(finishedIndex)?.title.orEmpty()
             val position = currentPositionMs()
@@ -573,7 +724,7 @@ class ReaderAudioEngine(
         }
         if (stopAtChapterEnd) {
             stopAtChapterEnd = false
-            controller?.pause()
+            liveController()?.pause()
             tickerJob?.cancel()
             _state.update {
                 it.copy(
@@ -614,6 +765,8 @@ class ReaderAudioEngine(
                 }
                 ticks += 1
                 if (ticks % 5 == 0 && player.isPlaying) {
+                    // 先落本地再上报服务端：网络失败时本地位置仍然可用。
+                    persistCheckpoint()
                     reportProgress(position)
                 }
                 val openCredits = book?.openCredits ?: 0
@@ -655,8 +808,13 @@ class ReaderAudioEngine(
 
     private fun ensureController(onReady: (MediaController) -> Unit) {
         controller?.let {
-            onReady(it)
-            return
+            if (it.isConnected) {
+                onReady(it)
+                return
+            }
+            // 断连的控制器不能继续接收命令，释放后重建。
+            controller = null
+            runCatching { it.release() }
         }
         connectWaiters += onReady
         if (connecting) return
@@ -666,7 +824,9 @@ class ReaderAudioEngine(
             context,
             ComponentName(context, ReaderAudioService::class.java),
         )
-        val future = MediaController.Builder(context, token).buildAsync()
+        val future = MediaController.Builder(context, token)
+            .setListener(controllerListener)
+            .buildAsync()
         future.addListener({
             val connected = runCatching { future.get() }.getOrNull()
             if (version != connectionVersion) {
@@ -693,6 +853,21 @@ class ReaderAudioEngine(
                 }
             }
         }, ContextCompat.getMainExecutor(context))
+    }
+
+    /** 相对封面路径先补上服务器来源；只取媒体库位图加载器能读取的协议。 */
+    private fun artworkUri(origin: String, coverUrl: String?): Uri? {
+        val resolved = ReaderUrls.resolve(origin, coverUrl) ?: return null
+        val lower = resolved.lowercase()
+        return if (lower.startsWith("http://") ||
+            lower.startsWith("https://") ||
+            lower.startsWith("file://") ||
+            lower.startsWith("content://")
+        ) {
+            Uri.parse(resolved)
+        } else {
+            null
+        }
     }
 
     private fun nextReadable(chapters: List<ReaderChapterDto>, from: Int): Int? {

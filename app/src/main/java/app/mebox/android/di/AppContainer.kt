@@ -11,6 +11,7 @@ import app.mebox.android.core.network.ServerAddress
 import app.mebox.android.core.network.createMobileApi
 import app.mebox.android.core.network.forNetLog
 import app.mebox.android.core.media.WatchProgressStore
+import app.mebox.android.core.reader.ReaderAudioCheckpointStore
 import app.mebox.android.core.reader.ReaderAudioEngine
 import app.mebox.android.core.reader.ReaderCacheStore
 import app.mebox.android.core.reader.ReaderPreferences
@@ -125,7 +126,16 @@ class AppContainer(context: Context) {
 
     val readerCache = ReaderCacheStore(context.applicationContext, httpClient, json)
 
-    val readerAudio = ReaderAudioEngine(context.applicationContext, appScope, readerCache)
+    /** 听书进度本地检查点：服务端上报失败或进程被回收时用于恢复位置。 */
+    val readerAudioCheckpoints = ReaderAudioCheckpointStore(appContext, json)
+
+    val readerAudio = ReaderAudioEngine(
+        context = appContext,
+        scope = appScope,
+        cache = readerCache,
+        preferences = preferences,
+        checkpoints = readerAudioCheckpoints,
+    )
 
     val deviceCodecSupport = app.mebox.android.core.media.DeviceCodecSupport()
 

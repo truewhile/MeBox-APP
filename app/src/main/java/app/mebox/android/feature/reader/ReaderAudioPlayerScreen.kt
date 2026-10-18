@@ -1,5 +1,11 @@
 package app.mebox.android.feature.reader
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -70,6 +76,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -147,6 +154,7 @@ internal fun AudiobookPlayerScreen(
                         onOrigin = viewModel::openOriginPicker,
                         onLogin = viewModel::openSourceLogin,
                         onCredits = viewModel::openAudioCredits,
+                        onMixChanged = viewModel::setAudioMixWithOtherApps,
                     )
                     Row(
                         modifier = Modifier
@@ -211,6 +219,7 @@ internal fun AudiobookPlayerScreen(
                         onOrigin = viewModel::openOriginPicker,
                         onLogin = viewModel::openSourceLogin,
                         onCredits = viewModel::openAudioCredits,
+                        onMixChanged = viewModel::setAudioMixWithOtherApps,
                     )
                     PlayerStatusChips(
                         audio = audio,
@@ -317,7 +326,14 @@ private fun PlayerTopBar(
     onOrigin: () -> Unit,
     onLogin: () -> Unit,
     onCredits: () -> Unit,
+    onMixChanged: (Boolean) -> Unit,
 ) {
+    val context = LocalContext.current
+    // 每次打开菜单时重新查询系统设置，用户从授权页返回后状态不会停留在旧值。
+    val batteryProtected = remember(menuOpen) {
+        menuOpen && context.getSystemService(PowerManager::class.java)
+            ?.isIgnoringBatteryOptimizations(context.packageName) == true
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -381,6 +397,35 @@ private fun PlayerTopBar(
                     },
                 )
                 DropdownMenuItem(
+                    text = {
+                        Text(
+                            if (state.audio.mixWithOtherApps) {
+                                "与其他应用同时播放：开"
+                            } else {
+                                "与其他应用同时播放：关"
+                            },
+                            color = PlayerText,
+                        )
+                    },
+                    onClick = { onMixChanged(!state.audio.mixWithOtherApps) },
+                )
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            if (batteryProtected) {
+                                "后台播放保护：已开启"
+                            } else {
+                                "后台播放保护"
+                            },
+                            color = PlayerText,
+                        )
+                    },
+                    onClick = {
+                        onMenuOpenChange(false)
+                        requestBackgroundPlaybackProtection(context, batteryProtected)
+                    },
+                )
+                DropdownMenuItem(
                     text = { Text("换源", color = PlayerText) },
                     onClick = {
                         onMenuOpenChange(false)
@@ -397,6 +442,30 @@ private fun PlayerTopBar(
             }
         }
     }
+}
+
+/**
+ * 打开系统的电池优化豁免授权页。
+ *
+ * 直接请求页在部分厂商 ROM 上不可用，失败时退回电池优化列表，并提示用户
+ * 手动把本应用设为「不优化」；不承诺系统一定不会回收后台服务。
+ */
+private fun requestBackgroundPlaybackProtection(context: Context, alreadyProtected: Boolean) {
+    if (alreadyProtected) {
+        Toast.makeText(context, "后台播放保护已开启", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val request = Intent(
+        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+        Uri.parse("package:${context.packageName}"),
+    )
+    val opened = runCatching { context.startActivity(request) }.isSuccess
+    if (!opened) {
+        runCatching {
+            context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
+    }
+    Toast.makeText(context, "请允许本应用在后台运行", Toast.LENGTH_LONG).show()
 }
 
 @Composable

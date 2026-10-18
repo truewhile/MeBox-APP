@@ -23,7 +23,9 @@ import app.mebox.android.core.network.ReaderSearchSkippedDto
 import app.mebox.android.core.network.ReaderSourceDto
 import app.mebox.android.core.network.ReaderSourceLoginDto
 import app.mebox.android.core.network.ReaderTocChapterDto
+import app.mebox.android.core.reader.ReaderAudioCheckpointStore
 import app.mebox.android.core.reader.ReaderAudioEngine
+import app.mebox.android.core.reader.ReaderAudioResume
 import app.mebox.android.core.reader.ReaderAudioState
 import app.mebox.android.core.reader.ReaderAudioTuning
 import app.mebox.android.core.reader.ReaderCacheStore
@@ -233,6 +235,7 @@ class ReaderViewModel(
     private val preferences: ReaderPreferences,
     private val cache: ReaderCacheStore,
     private val audio: ReaderAudioEngine,
+    private val checkpoints: ReaderAudioCheckpointStore,
     private val origin: String,
 ) : ViewModel() {
 
@@ -324,11 +327,14 @@ class ReaderViewModel(
         viewModelScope.launch {
             val booksResult = repo.shelf()
             val groupsResult = if (_state.value.groupsLoaded) null else repo.bookGroups()
-            val cachedShelf = if (booksResult is ApiResult.Success) {
-                withContext(Dispatchers.IO) { cache.saveShelf(scope, booksResult.value) }
+            val mergedShelf = (booksResult as? ApiResult.Success)?.value
+                ?.let(::mergeLocalAudioProgress)
+            val cachedShelf = if (mergedShelf != null) {
+                withContext(Dispatchers.IO) { cache.saveShelf(scope, mergedShelf) }
                 null
             } else {
                 withContext(Dispatchers.IO) { cache.readShelf(scope) }
+                    ?.let(::mergeLocalAudioProgress)
             }
             val error = when {
                 cachedShelf != null -> null
@@ -354,7 +360,7 @@ class ReaderViewModel(
                     shelfLoading = false,
                     shelfError = error,
                     shelfNotice = if (cachedShelf != null) "网络不可用，已显示离线书架" else current.shelfNotice,
-                    books = (booksResult as? ApiResult.Success)?.value
+                    books = mergedShelf
                         ?: cachedShelf
                         ?: current.books,
                     groups = groups,
@@ -364,6 +370,27 @@ class ReaderViewModel(
             }
         }
     }
+
+    /**
+     * 把本地听书检查点盖到书架进度上。
+     *
+     * 服务端进度只在每 5 秒上报成功一次；切后台后立即回到书架时，服务端可能
+     * 还是旧位置。本地更新时以本地为准，保证书架与进入书籍后的续播位置一致。
+     */
+    private fun mergeLocalAudioProgress(books: List<ReaderBookDto>): List<ReaderBookDto> =
+        books.map { book ->
+            if (!book.isAudio) return@map book
+            val local = checkpoints.load(scope, book.id) ?: return@map book
+            if (local.updatedAtMs <= book.durChapterTime) return@map book
+            book.copy(
+                durChapterIndex = local.chapterIndex,
+                durChapterPos = (local.positionMs / 1_000L)
+                    .coerceIn(0L, Int.MAX_VALUE.toLong())
+                    .toInt(),
+                durChapterTitle = local.chapterTitle,
+                durChapterTime = local.updatedAtMs,
+            )
+        }
 
     fun refreshToc() {
         if (_state.value.tocRefreshing) return
@@ -923,18 +950,36 @@ class ReaderViewModel(
         pendingChapterIndex = startChapterIndex
         contentJob?.cancel()
         cacheJob?.cancel()
+        // 服务端进度可能落后于本地最后几秒；只在不指定起始章节时应用本地检查点。
+        val localResume = if (
+            book.isAudio &&
+            startChapterUrl == null &&
+            startChapterIndex == null
+        ) {
+            checkpoints.load(scope, book.id)
+                ?.takeIf { it.updatedAtMs > book.durChapterTime }
+        } else {
+            null
+        }
+        val initialChapter = localResume?.chapterIndex ?: book.durChapterIndex.coerceAtLeast(0)
+        val initialPage = when {
+            localResume != null ->
+                (localResume.positionMs / 1_000L).coerceAtLeast(0L).toInt()
+            book.hasProgress -> book.durChapterPos
+            else -> 0
+        }
         _state.update {
             it.clearDetail().copy(
                 screen = ReaderScreen.Reading,
                 book = book,
                 chapters = emptyList(),
-                chapterIndex = book.durChapterIndex.coerceAtLeast(0),
+                chapterIndex = initialChapter,
                 content = null,
                 paragraphs = emptyList(),
                 chapterLoading = true,
                 chapterError = null,
                 chapterNotice = null,
-                restorePage = if (book.hasProgress) book.durChapterPos else 0,
+                restorePage = initialPage,
                 tocOpen = false,
                 settingsOpen = false,
                 infoOpen = false,
@@ -985,8 +1030,28 @@ class ReaderViewModel(
         val hintIndex = requestedHint
             ?.takeIf { it in loaded.chapters.indices && !loaded.chapters[it].isVolume }
         val requestedIndex = urlIndex ?: hintIndex
-        val index = requestedIndex ?: ReaderChapters.initialIndex(book, loaded.chapters)
-        val page = if (index == book.durChapterIndex && requestedIndex == null) book.durChapterPos else 0
+        // 本地检查点只在用户没有明确点某一章时参与，且必须比服务端进度新。
+        val resume = if (requestedIndex == null && book.isAudio) {
+            ReaderAudioResume.choose(
+                bookId = book.id,
+                serverChapterIndex = book.durChapterIndex,
+                serverPositionSec = book.durChapterPos,
+                serverUpdatedAtMs = book.durChapterTime,
+                local = checkpoints.load(scope, book.id),
+                chapters = loaded.chapters,
+            )
+        } else {
+            null
+        }
+        val index = requestedIndex
+            ?: resume?.chapterIndex
+            ?: ReaderChapters.initialIndex(book, loaded.chapters)
+        val page = when {
+            requestedIndex != null -> 0
+            resume?.fromLocalCheckpoint == true -> resume.positionSec
+            index == book.durChapterIndex -> book.durChapterPos
+            else -> 0
+        }
         _state.update {
             it.copy(
                 chapters = loaded.chapters,
@@ -1272,6 +1337,11 @@ class ReaderViewModel(
         val safe = ReaderAudioTuning.snapSpeed(speed)
         audio.setSpeed(safe)
         saveAudioPreferences(speed = safe)
+    }
+
+    /** 与其他应用同时播放：不申请音频焦点，切换应用时不会被暂停。 */
+    fun setAudioMixWithOtherApps(enabled: Boolean) {
+        audio.setMixWithOtherApps(enabled)
     }
 
     fun setAudioTimer(minutes: Int) {
@@ -2336,6 +2406,8 @@ class ReaderViewModel(
 
     fun closeReading() {
         val snapshot = _state.value
+        // 听书可能在离开阅读页后继续播放；先落一次本地位置。
+        audio.persistCheckpoint(synchronous = true)
         loadToken += 1
         contentJob?.cancel()
         progressJob?.cancel()
@@ -2384,6 +2456,7 @@ class ReaderViewModel(
                     contentJob?.cancel()
                     progressJob?.cancel()
                     if (audio.state.value.bookId == book.id) audio.stop()
+                    checkpoints.clear(scope, book.id)
                     withContext(Dispatchers.IO) { cache.clear(scope, book.id) }
                     _state.update {
                         it.copy(
@@ -2475,12 +2548,21 @@ class ReaderViewModel(
         private val preferences: ReaderPreferences,
         private val cache: ReaderCacheStore,
         private val audio: ReaderAudioEngine,
+        private val checkpoints: ReaderAudioCheckpointStore,
         private val origin: String,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             require(modelClass.isAssignableFrom(ReaderViewModel::class.java))
-            return ReaderViewModel(repository, scope, preferences, cache, audio, origin) as T
+            return ReaderViewModel(
+                repository,
+                scope,
+                preferences,
+                cache,
+                audio,
+                checkpoints,
+                origin,
+            ) as T
         }
     }
 

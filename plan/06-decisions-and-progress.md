@@ -152,6 +152,29 @@ Android 手机/平板、推荐 minSdk 26、单活动服务器、根路径部署�
 
 ## 7. 变更历史
 
+### 2026-10-18 / 听书后台保活、混音与本地进度兜底
+
+安卓（仓库 `D:\project\MeBox-APP`，未提交）：
+
+- 「与其他应用同时播放」：新增本机偏好 `reader_audio_mix_other_apps`，默认开启；
+  开启时 ExoPlayer 不申请音频焦点，切换微信/视频等应用不会再暂停听书；播放页
+  「更多」菜单可随时切换，下次创建播放器时生效，已连接时通过服务 action 立即应用。
+- 保活：Manifest 增加 `WAKE_LOCK` 与 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`；
+  ExoPlayer 播放期启用 `C.WAKE_MODE_NETWORK`；服务声明 `stopWithTask="false"`；
+  播放页「更多」新增「后台播放保护」入口，直接打开系统电池优化豁免授权页。
+- 本地进度：新增 `ReaderAudioCheckpointStore`，按 `serverId/userId/bookId` 保存
+  `bookId/chapterIndex/chapterTitle/positionMs/updatedAtMs/playing`；每 5 秒、
+  暂停、拖动、切章、播完本章、停止、`MainActivity.onStop`、服务
+  `onTaskRemoved/onDestroy` 都会落盘。关键时机使用同步 `commit()`。
+- 续播：打开书籍时用 `ReaderAudioResume.choose` 比较本地检查点与服务端
+  `dur_chapter_time`；本地更新则优先本地章节和秒数，书架的音频进度也叠加本地值。
+  服务端进度仍是跨端权威，本地只在更新时覆盖。
+- 控制器断连：注册 `MediaController.Listener`；后台服务被回收时保留书籍/章节，
+  清理失效控制器，下一次点播放重新连接并从最后位置装载，不再从头播放。
+- 新增 `ReaderAudioResumeTest` 8 项与音频状态混音断言；全量 JVM 测试、lint、
+  assembleDebug 通过。真机验证仍需覆盖：切后台、划掉任务、系统回收服务、
+  电池优化授权页、与其他应用同时出声及来电。
+
 ### 2026-10-18 / App 书架设置对齐网页端
 
 安卓（仓库 `D:\project\MeBox-APP`，未提交）：

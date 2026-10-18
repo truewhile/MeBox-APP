@@ -41,6 +41,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStop() {
+        // 用户切到其他应用/锁屏时事件回调不一定还有机会执行，先把听书位置
+        // 同步落盘；这样即使后台服务随后被系统回收，回到 App 也能接着听。
+        (application as? MeBoxApplication)
+            ?.container
+            ?.readerAudio
+            ?.persistCheckpoint(synchronous = true)
+        super.onStop()
+    }
+
     private companion object {
         const val EXTRA_TV_UI = "app.mebox.android.EXTRA_TV_UI"
     }

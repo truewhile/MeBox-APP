@@ -276,6 +276,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             val remote = repo.logout(current.scope)
             container.watchProgress.clear(current.scope)
             container.readerAudio.stop()
+            container.readerAudioCheckpoints.clearAccount(current.scope)
             container.readerCache.clearAccount(current.scope)
             container.preferences.clearAccount()
             // 主动退出时不再在登录页带出用户名。
@@ -767,6 +768,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             preferences = container.readerPreferences,
             cache = container.readerCache,
             audio = container.readerAudio,
+            checkpoints = container.readerAudioCheckpoints,
             origin = address.origin,
         )
     }
