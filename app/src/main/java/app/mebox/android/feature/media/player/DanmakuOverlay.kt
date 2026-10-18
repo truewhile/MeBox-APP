@@ -1,5 +1,6 @@
 package app.mebox.android.feature.media.player
 
+import android.util.LruCache
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -17,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
@@ -24,15 +26,15 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import app.mebox.android.core.media.DanmakuComment
+import app.mebox.android.core.media.DanmakuPlaybackClock
 import app.mebox.android.core.media.DanmakuTimeline
 import kotlinx.coroutines.isActive
 
 /**
- * 弹幕渲染层。
+ * 弹幕渲染层：用帧时钟平滑推进移动，与播放器进度校准。
  *
- * 位置完全由播放器的绝对播放时间推导，因此拖动进度或倍速播放都不会与画面
- * 脱节。绘制发生在 Canvas 的绘制阶段，每帧只重绘而不重组；
- * 弹道在尺寸/样式变化时预计算一次。
+ * 每帧只更新 Canvas 的绘制状态，不触发重组；弹道在尺寸/样式变化时预计算，
+ * 文字排版按需放入有界缓存，绘制时不创建逐条弹幕的位置对象。
  */
 @Composable
 fun DanmakuOverlay(
@@ -42,6 +44,10 @@ fun DanmakuOverlay(
     fontScale: Float,
     areaFraction: Float,
     positionProvider: () -> Long,
+    playing: Boolean,
+    playbackSpeed: Float,
+    playbackKey: Any,
+    discontinuity: Int,
     modifier: Modifier = Modifier,
 ) {
     if (!enabled || comments.isEmpty()) return
@@ -65,44 +71,58 @@ fun DanmakuOverlay(
         }
     }
 
-    val textMeasurer = rememberTextMeasurer(cacheSize = 1024)
-    var frameNanos by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(timeline) {
+    // 命中时直接复用排版，不再逐帧创建 TextStyle 或查询 TextMeasurer 的布局缓存。
+    val textMeasurer = rememberTextMeasurer(cacheSize = 0)
+    val layouts = remember(textMeasurer, baseFontSp) {
+        LruCache<DanmakuComment, TextLayoutResult>(TEXT_CACHE_SIZE)
+    }
+    val clock = remember(playbackKey) { DanmakuPlaybackClock() }
+    var positionMs by remember(clock) { mutableLongStateOf(-1L) }
+    val currentPosition by rememberUpdatedState(positionProvider)
+    LaunchedEffect(timeline, clock, playing, playbackSpeed, discontinuity) {
         if (timeline == null) return@LaunchedEffect
-        // 帧时钟只用于驱动重绘；弹幕位置读取播放器时间，暂停时自然停住。
         while (isActive) {
-            withFrameNanos { frameNanos = it }
+            withFrameNanos { frameNanos ->
+                positionMs = clock.positionMs(
+                    frameNanos = frameNanos,
+                    sampledPositionMs = currentPosition(),
+                    playing = playing,
+                    speed = playbackSpeed,
+                    discontinuity = discontinuity,
+                )
+            }
+            // 暂停时相同位置不会触发重绘；继续采样以接收异步 seek 的最终落点。
         }
     }
-    val currentPosition by rememberUpdatedState(positionProvider)
 
     Canvas(
         modifier = modifier
             .fillMaxSize()
             .onSizeChanged { viewport = it },
     ) {
-        // 在绘制阶段读取帧时钟：只触发重绘，不触发重组。
-        val frame = frameNanos
-        if (frame < 0L) return@Canvas
-        val positionMs = currentPosition().coerceAtLeast(0L)
-        val items = timeline?.activeAt(positionMs) ?: return@Canvas
+        // 仅在绘制阶段读取位置：逐帧移动不触发 Compose 重组。
+        val position = positionMs
+        if (position < 0L) return@Canvas
         val alpha = opacity.coerceIn(0.1f, 1f)
-        items.forEach { item ->
-            val comment = item.comment
-            val style = TextStyle(
-                color = Color(comment.color),
-                fontSize = (baseFontSp * comment.sizeScale).sp,
-                fontWeight = FontWeight.SemiBold,
-                shadow = Shadow(
-                    color = Color(0xCC000000),
-                    offset = Offset(0f, 2f),
-                    blurRadius = 3f,
+        timeline?.forEachActive(position) { comment, x, y ->
+            val layout = layouts.get(comment) ?: textMeasurer.measure(
+                text = comment.text,
+                style = TextStyle(
+                    color = Color(comment.color),
+                    fontSize = (baseFontSp * comment.sizeScale).sp,
+                    fontWeight = FontWeight.SemiBold,
+                    shadow = Shadow(
+                        color = Color(0xCC000000),
+                        offset = Offset(0f, 2f),
+                        blurRadius = 3f,
+                    ),
                 ),
-            )
-            val layout = textMeasurer.measure(comment.text, style)
+                softWrap = false,
+                maxLines = 1,
+            ).also { layouts.put(comment, it) }
             drawText(
                 textLayoutResult = layout,
-                topLeft = Offset(item.x, item.y),
+                topLeft = Offset(x, y),
                 alpha = alpha,
             )
         }
@@ -110,3 +130,4 @@ fun DanmakuOverlay(
 }
 
 private const val BASE_FONT_SP = 18f
+private const val TEXT_CACHE_SIZE = 1024

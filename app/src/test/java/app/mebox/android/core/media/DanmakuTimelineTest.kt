@@ -108,6 +108,52 @@ class DanmakuTimelineTest {
     }
 
     @Test
+    fun `direct traversal draws mixed modes at their expected coordinates`() {
+        val timeline = timeline(
+            listOf(
+                comment(1_000L, "ab"),
+                comment(2_000L, "top", DanmakuMode.TOP),
+                comment(4_000L, "底部", DanmakuMode.BOTTOM),
+            ),
+        )
+        val drawn = mutableListOf<DanmakuFrameItem>()
+
+        timeline.forEachActive(5_000L) { comment, x, y ->
+            drawn += DanmakuFrameItem(comment, x, y)
+        }
+
+        assertEquals(listOf("ab", "top", "底部"), drawn.map { it.comment.text })
+        assertEquals(488.8f, drawn[0].x, 0.1f)
+        assertEquals(4.5f, drawn[0].y, 0.1f)
+        assertEquals(483.2f, drawn[1].x, 0.1f)
+        assertEquals(4.5f, drawn[1].y, 0.1f)
+        assertEquals(480f, drawn[2].x, 0.1f)
+        assertEquals(475.5f, drawn[2].y, 0.1f)
+    }
+
+    @Test
+    fun `direct traversal respects time boundaries after seeks in either direction`() {
+        val timeline = timeline(listOf(comment(1_000L, "scroll")))
+        val timestamps = listOf(-1L, 999L, 1_000L, 9_000L, 9_001L, 4_000L, 999L, 1_000L)
+        val expectedCounts = listOf(0, 0, 1, 1, 0, 1, 0, 1)
+
+        timestamps.zip(expectedCounts).forEach { (position, expectedCount) ->
+            var count = 0
+            timeline.forEachActive(position) { _, _, _ -> count++ }
+            assertEquals("at $position", expectedCount, count)
+        }
+    }
+
+    @Test
+    fun `direct traversal expires fixed comments at the same boundary`() {
+        val timeline = timeline(listOf(comment(1_000L, "top", DanmakuMode.TOP)))
+        val drawn = mutableListOf<String>()
+        timeline.forEachActive(5_500L) { comment, _, _ -> drawn += comment.text }
+        timeline.forEachActive(5_501L) { comment, _, _ -> drawn += comment.text }
+        assertEquals(listOf("top"), drawn)
+    }
+
+    @Test
     fun `width estimate treats cjk as full width`() {
         val cjk = DanmakuTimeline.estimateWidthPx("弹幕", 20f)
         val ascii = DanmakuTimeline.estimateWidthPx("ab", 20f)

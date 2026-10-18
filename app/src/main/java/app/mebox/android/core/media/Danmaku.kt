@@ -240,6 +240,11 @@ data class DanmakuFrameItem(
     val y: Float,
 )
 
+/** 绘制回调使用原生 Float 参数，避免通用 Function3 对每条弹幕的坐标装箱。 */
+fun interface DanmakuFrameConsumer {
+    fun draw(comment: DanmakuComment, x: Float, y: Float)
+}
+
 /**
  * 预计算弹幕弹道，避免每帧做碰撞检测。
  *
@@ -309,8 +314,16 @@ class DanmakuTimeline(
     }
 
     fun activeAt(positionMs: Long): List<DanmakuFrameItem> {
-        if (positionMs < 0L) return emptyList()
         val result = ArrayList<DanmakuFrameItem>()
+        forEachActive(positionMs) { comment, x, y ->
+            result += DanmakuFrameItem(comment, x, y)
+        }
+        return result
+    }
+
+    /** 绘制热路径：直接遍历可见弹幕，不创建逐帧列表和每条弹幕的位置对象。 */
+    fun forEachActive(positionMs: Long, action: DanmakuFrameConsumer) {
+        if (positionMs < 0L) return
 
         var index = lowerBound(scrollItems, positionMs - scrollDurationMs)
         while (index < scrollItems.size) {
@@ -322,21 +335,20 @@ class DanmakuTimeline(
                 val x = widthPx - progress * (widthPx + item.widthPx)
                 val y = item.lane * laneHeightPx +
                     (laneHeightPx - baseFontPx * item.comment.sizeScale) / 2f
-                result += DanmakuFrameItem(item.comment, x, y)
+                action.draw(item.comment, x, y)
             }
             index++
         }
 
-        appendFixed(topItems, positionMs, top = true, result = result)
-        appendFixed(bottomItems, positionMs, top = false, result = result)
-        return result
+        forEachFixed(topItems, positionMs, top = true, action = action)
+        forEachFixed(bottomItems, positionMs, top = false, action = action)
     }
 
-    private fun appendFixed(
+    private fun forEachFixed(
         items: List<Placement>,
         positionMs: Long,
         top: Boolean,
-        result: MutableList<DanmakuFrameItem>,
+        action: DanmakuFrameConsumer,
     ) {
         var index = lowerBound(items, positionMs - fixedHoldMs)
         while (index < items.size) {
@@ -351,7 +363,7 @@ class DanmakuTimeline(
                     areaHeightPx - (item.lane + 1) * laneHeightPx +
                         (laneHeightPx - fontSize) / 2f
                 }
-                result += DanmakuFrameItem(item.comment, x, y)
+                action.draw(item.comment, x, y)
             }
             index++
         }

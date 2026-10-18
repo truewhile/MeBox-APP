@@ -114,6 +114,14 @@ interface VideoPlayerEngine {
     fun selectAudioTrack(trackId: String?)
     fun selectTextTrack(trackId: String?)
 
+    /**
+     * 播放页正在恢复用户的手动字幕选择（含明确关闭）。
+     *
+     * 支持异步加载外挂字幕的内核（LibVLC）据此暂停自动选中，避免晚到的
+     * 偏好字幕覆盖用户意图；同步加载的内核不需要处理。
+     */
+    fun holdSubtitleAutoSelection() = Unit
+
     fun playbackState(): EnginePlaybackState
     fun positionMs(): Long
     fun durationMs(): Long

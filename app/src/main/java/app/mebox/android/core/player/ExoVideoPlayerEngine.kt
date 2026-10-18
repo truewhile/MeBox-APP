@@ -70,9 +70,14 @@ class ExoVideoPlayerEngine(
     private var resizeMode: EngineResizeMode = EngineResizeMode.FIT
     private var pendingMedia: EngineMedia? = null
     private var pendingStartMs: Long = 0L
-    private var pendingAutoPlay: Boolean = true
     private var released: Boolean = false
     private var mediaLoaded: Boolean = false
+
+    /**
+     * 用户播放意图。内部换中转地址/重新 prepare 时沿用最新意图，
+     * 不能再用装载时的初值，否则暂停状态下会自动开播。
+     */
+    private val intent = PlaybackIntent()
 
     /** 直连被 CDN 拒绝后是否已经尝试过服务端中转，避免来回重试。 */
     private var proxyAttempted = false
@@ -161,7 +166,8 @@ class ExoVideoPlayerEngine(
                     "ExoPlayer 直连返回 ${error.errorCodeName}，改走服务端中转",
                 )
                 listener?.onMediaReloaded()
-                setMedia(media.copy(url = media.proxyUrl, proxyUrl = null), resume, pendingAutoPlay)
+                // 用户可能在这期间暂停过：用最新意图重载，而不是装载时的初值。
+                setMedia(media.copy(url = media.proxyUrl, proxyUrl = null), resume, intent.playWhenReady)
                 return
             }
             DiagnosticsLog.e(
@@ -283,7 +289,7 @@ class ExoVideoPlayerEngine(
         if (media.mediaId != pendingMedia?.mediaId) proxyAttempted = false
         pendingMedia = media
         pendingStartMs = startPositionMs.coerceAtLeast(0L)
-        pendingAutoPlay = autoPlay
+        intent.onMediaLoaded(autoPlay)
         mediaLoaded = false
         // 换成新集时旧轨道覆盖不再有效。
         overrides = emptyMap()
@@ -297,16 +303,18 @@ class ExoVideoPlayerEngine(
         mediaLoaded = true
         player.setMediaItem(media.toMediaItem(), pendingStartMs)
         player.prepare()
-        player.playWhenReady = pendingAutoPlay
+        player.playWhenReady = intent.playWhenReady
     }
 
     override fun play() {
         if (released) return
+        intent.onPlay()
         player.play()
     }
 
     override fun pause() {
         if (released) return
+        intent.onPause()
         player.pause()
     }
 
@@ -317,6 +325,8 @@ class ExoVideoPlayerEngine(
 
     override fun retry() {
         if (released) return
+        // 显式重试意味着用户要求继续播放；内部中转重载沿用这个意图。
+        intent.onPlay()
         player.prepare()
         player.play()
     }
@@ -556,19 +566,45 @@ private object SoftwareOnlySelector : MediaCodecSelector {
         mimeType: String,
         requiresSecureDecoder: Boolean,
         requiresTunnelingDecoder: Boolean,
-    ): List<MediaCodecInfo> =
-        MediaCodecUtil.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
-            .filter { it.softwareOnly }
+    ): List<MediaCodecInfo> = constrainDecoders(
+        infos = MediaCodecUtil.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder),
+        mode = DecoderMode.SOFTWARE,
+        mimeType = mimeType,
+    )
 }
 
-/** 只用硬件解码器；显式选择“硬件解码”时生效。 */
+/**
+ * 视频只用硬件解码器，音频保留系统候选。
+ *
+ * 部分设备的音频编码没有硬件解码器；如果连音频一起过滤，会变成
+ * “有画面没声音”。强制硬解只应约束占大头的视频解码。
+ */
 @OptIn(UnstableApi::class)
 private object HardwareOnlySelector : MediaCodecSelector {
     override fun getDecoderInfos(
         mimeType: String,
         requiresSecureDecoder: Boolean,
         requiresTunnelingDecoder: Boolean,
-    ): List<MediaCodecInfo> =
-        MediaCodecUtil.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
-            .filter { it.hardwareAccelerated }
+    ): List<MediaCodecInfo> = constrainDecoders(
+        infos = MediaCodecUtil.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder),
+        mode = DecoderMode.HARDWARE,
+        mimeType = mimeType,
+    )
+}
+
+@OptIn(UnstableApi::class)
+private fun constrainDecoders(
+    infos: List<MediaCodecInfo>,
+    mode: DecoderMode,
+    mimeType: String,
+): List<MediaCodecInfo> {
+    val constraint = DecoderSelectionPolicy.constraintFor(
+        mode = mode,
+        isVideo = DecoderSelectionPolicy.isVideoMimeType(mimeType),
+    )
+    return when (constraint) {
+        DecoderConstraint.HARDWARE_VIDEO_ONLY -> infos.filter { it.hardwareAccelerated }
+        DecoderConstraint.SOFTWARE_ONLY -> infos.filter { it.softwareOnly }
+        DecoderConstraint.NONE -> infos
+    }
 }

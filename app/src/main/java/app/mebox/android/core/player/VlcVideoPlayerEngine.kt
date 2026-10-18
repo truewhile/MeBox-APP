@@ -87,9 +87,10 @@ class VlcVideoPlayerEngine(
     private var slaveLabels: List<String> = emptyList()
     private var pendingMedia: EngineMedia? = null
     private var pendingStartMs: Long = 0L
-    private var pendingAutoPlay: Boolean = true
     private var pendingSeekMs: Long = 0L
     private var ended: Boolean = false
+    /** 用户播放意图；内部换地址/换软解时不变，避免暂停中被重新开播。 */
+    private val intent = PlaybackIntent()
     private var released: Boolean = false
     private var playing: Boolean = false
     private var speed: Float = 1f
@@ -97,9 +98,10 @@ class VlcVideoPlayerEngine(
     /**
      * 硬解失败后只对当前媒体改走 FFmpeg 软解。
      *
-     * 手机硬解只覆盖 8-bit H.264/HEVC，Hi10P（H.264 High 10）、10-bit HEVC
-     * 这类编码触发 EncounteredError 时，VLC 不一定能自己回退，表现为
-     * “LibVLC 无法播放该视频”且时长 0。这里主动用软件解码重试一次。
+     * 设备硬解能力按芯片和系统版本差异很大；部分编码（例如 10-bit 视频）
+     * 触发 EncounteredError 时，VLC 不一定能自己回退，表现为“LibVLC 无法
+     * 播放该视频”且时长 0。自动模式下这里主动用软件解码重试一次；
+     * 用户强制硬件解码时尊重该选择，不隐式软解。
      */
     private var softwareDecodeOnly = decoderMode == DecoderMode.SOFTWARE
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -143,9 +145,6 @@ class VlcVideoPlayerEngine(
      */
     private var stallToken = 0
 
-    /** 用户主动暂停时不触发起播看门狗。 */
-    private var userPaused = false
-
     /** 轨道 id 的默认值：用于「自动」清晰度/音轨。 */
     private var defaultVideoId: Int? = null
     private var defaultAudioId: Int? = null
@@ -188,7 +187,7 @@ class VlcVideoPlayerEngine(
                         mediaPlayer.setTime(pendingSeekMs)
                         pendingSeekMs = 0L
                     }
-                    if (!pendingAutoPlay || userPaused) mediaPlayer.pause()
+                    if (!intent.playWhenReady) mediaPlayer.pause()
                     refreshTracks()
                     // 先有画面，再异步准备外挂字幕；VLC 永远不在起播时等待远端字幕。
                     subtitleLoader.onPlaying()
@@ -279,7 +278,7 @@ class VlcVideoPlayerEngine(
         applyResizeMode()
         val media = pendingMedia
         if (media != null && !mediaPlayer.hasMedia()) {
-            load(media, pendingStartMs, pendingAutoPlay)
+            load(media, pendingStartMs)
         }
     }
 
@@ -296,15 +295,15 @@ class VlcVideoPlayerEngine(
         stallToken++
         pendingMedia = media
         pendingStartMs = startPositionMs.coerceAtLeast(0L)
-        pendingAutoPlay = autoPlay
+        intent.onMediaLoaded(autoPlay)
         ended = false
         pendingSeekMs = pendingStartMs
         if (videoLayout != null) {
-            load(media, pendingStartMs, autoPlay)
+            load(media, pendingStartMs)
         }
     }
 
-    private fun load(media: EngineMedia, startPositionMs: Long, autoPlay: Boolean) {
+    private fun load(media: EngineMedia, startPositionMs: Long) {
         loadGeneration++
         stallToken++
         recoveryScheduled = false
@@ -318,7 +317,6 @@ class VlcVideoPlayerEngine(
         pendingMedia = media
         pendingStartMs = startPositionMs.coerceAtLeast(0L)
         playing = false
-        userPaused = !autoPlay
         videoAspect = null
         defaultVideoId = null
         defaultAudioId = null
@@ -358,7 +356,6 @@ class VlcVideoPlayerEngine(
         slaveLabels = emptyList()
         subtitleLoader.prepare(media)
         pendingSeekMs = startPositionMs.coerceAtLeast(0L)
-        pendingAutoPlay = autoPlay
         installPlayerListener()
         mediaPlayer.play()
         armStallWatchdog()
@@ -372,7 +369,7 @@ class VlcVideoPlayerEngine(
         val token = ++stallToken
         mainHandler.postDelayed(object : Runnable {
             override fun run() {
-                if (released || token != stallToken || userPaused || startupComplete || recoveryScheduled) return
+                if (released || token != stallToken || !intent.playWhenReady || startupComplete || recoveryScheduled) return
                 if (playing || runCatching { mediaPlayer.isPlaying }.getOrDefault(false)) return
                 val stats = readMediaStats()
                 val now = SystemClock.elapsedRealtime()
@@ -464,7 +461,7 @@ class VlcVideoPlayerEngine(
         val httpUrl = httpVariantOf(media.url) ?: return
         httpAttempted = true
         DiagnosticsLog.w("Player", "$reason：改用 http 重试 $detail")
-        val resume = positionMs().takeIf { it > 0L } ?: pendingStartMs
+        val resume = resumeTargetMs()
         val plain = media.copy(url = httpUrl)
         pendingMedia = plain
         playing = false
@@ -478,7 +475,7 @@ class VlcVideoPlayerEngine(
         val proxyUrl = media.proxyUrl ?: return
         proxyAttempted = true
         DiagnosticsLog.w("Player", "$reason：改走服务端中转 $detail")
-        val resume = positionMs().takeIf { it > 0L } ?: pendingStartMs
+        val resume = resumeTargetMs()
         val proxied = media.copy(url = proxyUrl, proxyUrl = null)
         pendingMedia = proxied
         playing = false
@@ -491,7 +488,7 @@ class VlcVideoPlayerEngine(
     private fun retryWithSoftware(media: EngineMedia, reason: String, detail: String) {
         softwareDecodeOnly = true
         DiagnosticsLog.w("Player", "$reason：改用软件解码重试 $detail")
-        val resume = positionMs().takeIf { it > 0L } ?: pendingStartMs
+        val resume = resumeTargetMs()
         playing = false
         listener?.onBufferingChanged(true)
         listener?.onPlaybackStateChanged(EnginePlaybackState.BUFFERING)
@@ -503,15 +500,14 @@ class VlcVideoPlayerEngine(
         val generation = loadGeneration
         mainHandler.post {
             if (!released && generation == loadGeneration && pendingMedia?.mediaId == media.mediaId) {
-                load(media, resume, pendingAutoPlay)
+                load(media, resume)
             }
         }
     }
 
     override fun play() {
         if (released) return
-        userPaused = false
-        pendingAutoPlay = true
+        intent.onPlay()
         if (!startupComplete && !recoveryScheduled) {
             startupWatchdog = PlaybackStartupWatchdog(SystemClock.elapsedRealtime())
             armStallWatchdog()
@@ -525,8 +521,7 @@ class VlcVideoPlayerEngine(
 
     override fun pause() {
         if (released) return
-        userPaused = true
-        pendingAutoPlay = false
+        intent.onPause()
         stallToken++
         runCatching { mediaPlayer.pause() }
     }
@@ -534,14 +529,27 @@ class VlcVideoPlayerEngine(
     override fun seekTo(positionMs: Long) {
         if (released) return
         ended = false
-        runCatching { mediaPlayer.setTime(positionMs.coerceAtLeast(0L)) }
+        val target = positionMs.coerceAtLeast(0L)
+        // 尚未起播时 libVLC 的 setTime 可能被后续解析覆盖；记下来，Playing 时再定位。
+        if (!startupComplete) pendingSeekMs = target
+        runCatching { mediaPlayer.setTime(target) }
     }
 
     override fun retry() {
         val media = pendingMedia ?: return
         if (released) return
-        load(media, positionMs().takeIf { it > 0L } ?: pendingStartMs, true)
+        intent.onPlay()
+        load(media, resumeTargetMs())
     }
+
+    /**
+     * 重新装载时的续播点：优先当前播放位置，其次尚未生效的 seek 目标，
+     * 最后才是本轮装载的起始位置。
+     */
+    private fun resumeTargetMs(): Long =
+        positionMs().takeIf { it > 0L }
+            ?: pendingSeekMs.takeIf { it > 0L }
+            ?: pendingStartMs
 
     override fun setSpeed(speed: Float) {
         if (released) return
@@ -632,6 +640,14 @@ class VlcVideoPlayerEngine(
         refreshTracks()
     }
 
+    /**
+     * 播放页正在恢复用户之前选中的字幕（或用户明确关闭了字幕）。
+     * 外挂字幕稍后才下载，先禁止自动选中，避免短暂覆盖用户意图。
+     */
+    override fun holdSubtitleAutoSelection() {
+        subtitleLoader.holdAutoSelection()
+    }
+
     override fun playbackState(): EnginePlaybackState = when {
         ended -> EnginePlaybackState.ENDED
         startupComplete -> EnginePlaybackState.READY
@@ -684,6 +700,8 @@ class VlcVideoPlayerEngine(
         val audioDescriptions = runCatching { mediaPlayer.audioTracks }.getOrNull().orEmpty()
         val spuDescriptions = runCatching { mediaPlayer.spuTracks }.getOrNull().orEmpty()
         val videoDescriptions = runCatching { mediaPlayer.videoTracks }.getOrNull().orEmpty()
+        // TrackDescription 只有显示名称，语言标签要从 IMedia 的轨道列表补。
+        val trackLanguages = mediaTrackLanguages()
 
         val currentAudio = runCatching { mediaPlayer.audioTrack }.getOrDefault(-1)
         val currentSpu = runCatching { mediaPlayer.spuTrack }.getOrDefault(-1)
@@ -697,6 +715,7 @@ class VlcVideoPlayerEngine(
                     label = description.name?.takeIf { it.isNotBlank() } ?: "音轨 ${description.id}",
                     type = EngineTrackType.AUDIO,
                     selected = description.id == currentAudio,
+                    language = trackLanguages[description.id],
                 )
             }
         val text = labelTextTracks(
@@ -708,6 +727,7 @@ class VlcVideoPlayerEngine(
                         label = description.name?.takeIf { it.isNotBlank() } ?: "字幕 ${description.id}",
                         type = EngineTrackType.TEXT,
                         selected = description.id == currentSpu,
+                        language = trackLanguages[description.id],
                     )
                 },
         )
@@ -725,6 +745,7 @@ class VlcVideoPlayerEngine(
                     },
                     type = EngineTrackType.VIDEO,
                     selected = description.id == currentVideo,
+                    language = trackLanguages[description.id],
                 )
             }
 
@@ -760,6 +781,27 @@ class VlcVideoPlayerEngine(
     /** 只记录主机名，避免把带签名的完整直链写进日志。 */
     private fun mediaHost(url: String): String =
         runCatching { Uri.parse(url).host }.getOrNull().orEmpty()
+
+    /**
+     * 当前媒体的轨道语言（ES id -> 语言标签）。
+     *
+     * `MediaPlayer.TrackDescription` 只带显示名称；跨内核恢复音轨/字幕时
+     * 语言标签比名称更稳定。`mediaPlayer.media` 会 retain，读完必须 release。
+     */
+    private fun mediaTrackLanguages(): Map<Int, String> {
+        val media = runCatching { mediaPlayer.media }.getOrNull() ?: return emptyMap()
+        return try {
+            buildMap {
+                for (index in 0 until media.trackCount) {
+                    val track = runCatching { media.getTrack(index) }.getOrNull() ?: continue
+                    val language = track.language?.takeIf { it.isNotBlank() } ?: continue
+                    put(track.id, language)
+                }
+            }
+        } finally {
+            runCatching { media.release() }
+        }
+    }
 
     /** 清空 VLC 日志，避免 verbose 日志无限增长。 */
     private fun truncateVlcLog() {

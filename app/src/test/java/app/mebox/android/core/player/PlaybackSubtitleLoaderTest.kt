@@ -107,4 +107,42 @@ class PlaybackSubtitleLoaderTest {
         assertEquals(1, requests)
         loader.close()
     }
+
+    @Test
+    fun `restored subtitle choice is never auto selected by late loading`() = runTest {
+        val selections = mutableListOf<Boolean>()
+        val file = Files.createTempFile("subtitle", ".ass").toFile()
+        val loader = PlaybackSubtitleLoader(this, { file }, { _, _, select ->
+            selections += select
+            true
+        })
+        // 换内核后用户之前的手动选择由播放页恢复；外挂字幕可能还在下载。
+        loader.holdAutoSelection()
+        loader.prepare(media(listOf(chinese)))
+        loader.onPlaying()
+        runCurrent()
+
+        assertEquals(listOf(false), selections)
+        loader.close()
+    }
+
+    @Test
+    fun `auto selection hold survives an internal media reload`() = runTest {
+        val selections = mutableListOf<Boolean>()
+        val file = Files.createTempFile("subtitle", ".ass").toFile()
+        val loader = PlaybackSubtitleLoader(this, { file }, { _, _, select ->
+            selections += select
+            true
+        })
+        loader.holdAutoSelection()
+        loader.prepare(media(listOf(chinese)))
+        loader.onPlaying()
+        runCurrent()
+        loader.prepare(media(listOf(chinese)).copy(mediaId = "after-reload"))
+        loader.onPlaying()
+        runCurrent()
+
+        assertEquals(listOf(false, false), selections)
+        loader.close()
+    }
 }

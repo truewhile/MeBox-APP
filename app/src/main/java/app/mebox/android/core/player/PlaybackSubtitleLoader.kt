@@ -19,13 +19,21 @@ internal class PlaybackSubtitleLoader(
     private var media: EngineMedia? = null
     private var job: Job? = null
     private var userSelected = false
+
+    /**
+     * 播放页正在恢复用户的手动字幕选择（或用户已明确关闭字幕）。
+     *
+     * LibVLC 的外挂字幕在 Playing 后才下载；恢复期间不能让晚到的自动选择
+     * 覆盖用户意图。与 [onUserSelection] 不同，这个标记跨内部媒体重载保持。
+     */
+    private var holdAutoSelection = false
     private val files = mutableListOf<File>()
 
     /** 必须先停止旧媒体，再清理其仍可能在使用的字幕文件。 */
     fun prepare(media: EngineMedia) {
         close()
         this.media = media
-        userSelected = false
+        userSelected = holdAutoSelection
     }
 
     fun onPlaying() {
@@ -60,6 +68,17 @@ internal class PlaybackSubtitleLoader(
 
     /** 下载期间用户切换/关闭字幕后，迟到的自动选择不能覆盖用户操作。 */
     fun onUserSelection() {
+        userSelected = true
+    }
+
+    /**
+     * 恢复用户字幕选择期间禁止自动选中，直到内核实例释放。
+     *
+     * 调用后 [prepare] 也会重置为“已选择”，确保换地址、换软解等内部重载
+     * 不会把用户选的字幕换回偏好默认项。
+     */
+    fun holdAutoSelection() {
+        holdAutoSelection = true
         userSelected = true
     }
 

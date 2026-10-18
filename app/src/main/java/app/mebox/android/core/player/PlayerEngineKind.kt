@@ -26,10 +26,10 @@ enum class PlayerEngineKind(
     ),
     VLC(
         key = "vlc",
-        label = "LibVLC（FFmpeg 软解）",
+        label = "LibVLC（FFmpeg 解码）",
         shortLabel = "LibVLC",
         description = "内置 FFmpeg 解码器，兼容 RMVB、WMV、DTS 等系统不支持的格式；" +
-            "以软件解码为主，功耗和发热更高。",
+            "默认优先硬件解码，必要时可回退软件解码，功耗和发热更高。",
     ),
     ;
 
@@ -44,9 +44,8 @@ enum class PlayerEngineKind(
         /**
          * 系统解码失败时应当自动换成哪个内核；没有可用备选时返回 null。
          *
-         * 只走 ExoPlayer → LibVLC 一条路：ExoPlayer 用的系统 MediaCodec 在手机上
-         * 通常只有 8-bit H.264/HEVC 硬解，Hi10P（H.264 High 10）这类编码既没有
-         * 硬解、系统软解也不支持，只能交给 LibVLC 内置的 FFmpeg。
+         * 只走 ExoPlayer → LibVLC 一条路：设备对 H.264 High 10、10-bit HEVC
+         * 这类编码不一定有硬解，系统软解也不一定覆盖，可以交给 LibVLC 内置的 FFmpeg。
          */
         fun automaticFallback(current: PlayerEngineKind): PlayerEngineKind? =
             when (current) {

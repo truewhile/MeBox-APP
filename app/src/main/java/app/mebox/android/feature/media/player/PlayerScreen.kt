@@ -69,6 +69,10 @@ import app.mebox.android.core.player.EngineTrack
 import app.mebox.android.core.player.EngineTrackType
 import app.mebox.android.core.player.EngineTracks
 import app.mebox.android.core.player.DecoderMode
+import app.mebox.android.core.player.PlaybackSessionState
+import app.mebox.android.core.player.PlaybackTrackRef
+import app.mebox.android.core.player.PlaybackTrackRestorer
+import app.mebox.android.core.player.PlaybackTrackSelection
 import app.mebox.android.core.player.PlayerEngineKind
 import app.mebox.android.core.player.SubtitlePreference
 import app.mebox.android.core.player.SubtitleSelector
@@ -84,7 +88,7 @@ import kotlin.math.roundToInt
  * 原生播放页。
  *
  * 播放内核通过统一接口接入：默认 Media3 ExoPlayer（系统解码），可在设置页或
- * 页内「更多」面板切换到 LibVLC（FFmpeg 软解）。界面完全由 Compose 自绘：
+ * 页内「更多」面板切换到 LibVLC（内置 FFmpeg 解码）。界面完全由 Compose 自绘：
  * 手势、进度条、倍速、清晰度、音轨、字幕和画面缩放都不依赖默认控制器，
  * 便于后续统一视觉和电视端扩展。
  *
@@ -301,6 +305,7 @@ private fun PlayerSurface(
     var playbackEnded by remember(initialKey) { mutableStateOf(false) }
 
     var positionMs by remember(initialKey) { mutableLongStateOf(request.startPositionMs) }
+    var danmakuDiscontinuity by remember(initialKey) { mutableIntStateOf(0) }
     var bufferedMs by remember(initialKey) { mutableLongStateOf(0L) }
     var durationMs by remember(initialKey) { mutableLongStateOf(request.durationMs) }
     var isPlaying by remember(initialKey) { mutableStateOf(false) }
@@ -329,7 +334,25 @@ private fun PlayerSurface(
     var engineKind by remember(initialKey) {
         mutableStateOf(sessionFallbackEngine ?: initialEngine)
     }
-    var resumePositionMs by remember(initialKey) { mutableStateOf<Long?>(null) }
+    // 本次播放会话的用户意图与续播位置：缓冲、错误、换内核都不改变它。
+    val session = remember(initialKey) {
+        PlaybackSessionState(initialPositionMs = request.startPositionMs)
+    }
+    // 切换内核的目标与原因：新内核真正就绪后才提示成功，失败时清空。
+    var switchTarget by remember(initialKey) { mutableStateOf<PlayerEngineKind?>(null) }
+    var switchReason by remember(initialKey) { mutableStateOf<String?>(null) }
+    // 用户手动选中的音轨/字幕。轨道 id 每次装载都会变，切换内核时按语义恢复。
+    var audioSelection by remember(initialKey) {
+        mutableStateOf<PlaybackTrackSelection>(PlaybackTrackSelection.Auto)
+    }
+    var subtitleSelection by remember(initialKey) {
+        mutableStateOf<PlaybackTrackSelection>(PlaybackTrackSelection.Auto)
+    }
+    // 字幕"没找到"的提示要等外挂字幕异步加载完再判定，找到就取消。
+    var subtitleMissToken by remember(initialKey, engineKind) { mutableIntStateOf(0) }
+    var subtitleMissNotified by remember(initialKey, engineKind) { mutableStateOf(false) }
+    var audioMissToken by remember(initialKey, engineKind) { mutableIntStateOf(0) }
+    var audioMissNotified by remember(initialKey, engineKind) { mutableStateOf(false) }
     // 系统解码遇到本机不支持的编码（例如 Hi10P）时自动换到 LibVLC；
     // 同一次播放只尝试一次，避免两个内核来回失败刷屏。
     var autoFallbackAttempted by remember(initialKey) { mutableStateOf(false) }
@@ -339,7 +362,6 @@ private fun PlayerSurface(
 
     var dragBaseMs by remember(initialKey) { mutableLongStateOf(0L) }
     var dragDeltaMs by remember(initialKey) { mutableLongStateOf(0L) }
-    var lastKnownPosition by remember(initialKey) { mutableLongStateOf(request.startPositionMs) }
 
     // 一个内核实例绑定一集内容；切换内核会重建实例并从当前位置续播。
     val engine = remember(initialKey, engineKind, decoderMode) {
@@ -367,29 +389,141 @@ private fun PlayerSurface(
         val position = absolutePosition()
         val duration = currentDuration()
         if (position > 0L && duration > 0L) {
-            lastKnownPosition = position
+            session.recordPosition(position)
             progressCallback(request.mediaId, position, duration, force)
         }
     }
 
-    fun disableTextTracks() {
-        subtitlesOff = true
-        engine.selectTextTrack(null)
+    fun seekTo(absoluteMs: Long) {
+        val duration = currentDuration()
+        val target = if (duration > 0L) {
+            absoluteMs.coerceIn(0L, duration)
+        } else {
+            absoluteMs.coerceAtLeast(0L)
+        }
+        engine.seekTo(target)
+        danmakuDiscontinuity++
+        positionMs = target
+        // 0 是合法位置：用户主动拖回开头后切换内核要停在开头。
+        session.recordPosition(target)
+        playbackEnded = false
     }
 
-    /** 切换播放内核：保留进度并立即用新内核重新起播。 */
+    /**
+     * 切换播放内核：保留进度、播放/暂停意图和倍速，从当前位置续播。
+     *
+     * 先摘掉旧内核的监听并暂停：避免切换过程中两个内核同时出声，也避免旧内核
+     * 迟到的回调把新内核的界面状态改回去。旧实例的进度上报和释放由
+     * [DisposableEffect] 收尾。
+     */
     fun switchEngine(next: PlayerEngineKind, persist: Boolean = true, reason: String? = null) {
         if (next == engineKind) return
-        resumePositionMs = engine.positionMs().takeIf { it > 0L } ?: lastKnownPosition
+        session.beginHandoff(engine.positionMs())
+        val handoffDuration = currentDuration()
+        engine.listener = null
+        runCatching { engine.pause() }
+        // 缓冲/出错时 playbackState 可能已经是 IDLE；直接上报最后一次有效进度。
+        val handoffPosition = session.lastKnownPositionMs
+        if (handoffPosition > 0L && handoffDuration > 0L) {
+            progressCallback(request.mediaId, handoffPosition, handoffDuration, true)
+        }
         failedMessage = null
         errorIsDecode = false
         playbackEnded = false
         isBuffering = true
+        isPlaying = false
+        // 旧内核的轨道 id 在新内核里无效，先清空，等新轨道到达再按语义恢复。
+        trackState = PlayerTrackState()
+        pinnedQuality = null
+        bufferedMs = 0L
+        // 进度条在新内核报告时长前保持原值，避免瞬间归零。
+        durationMs = handoffDuration
+        autoSubtitleApplied = false
+        switchTarget = next
+        switchReason = reason
+        hint = "正在切换到 ${next.shortLabel}…"
         engineKind = next
         sessionFallbackEngine = next
         // 自动切换只影响这一次播放，不写回全局偏好；手动切换才记住选择。
         if (persist) onEngineSelected(next)
-        hint = reason ?: "已切换播放内核：${next.shortLabel}"
+    }
+
+    fun togglePlayback() {
+        if (playbackEnded) {
+            seekTo(0L)
+            playbackEnded = false
+            session.onUserPlay()
+            engine.play()
+        } else if (isPlaying) {
+            session.onUserPause()
+            engine.pause()
+        } else {
+            session.onUserPlay()
+            engine.play()
+        }
+        controlsVisible = true
+    }
+
+    /** 错误页与遥控器共用的显式重试入口：重置本轮错误并继续播放。 */
+    fun retryPlayback() {
+        failedMessage = null
+        errorIsDecode = false
+        session.onExplicitRetry()
+        isBuffering = true
+        switchTarget = null
+        switchReason = null
+        engine.retry()
+    }
+
+    /**
+     * 内核每次报告轨道时，把用户之前手动选中的音轨/字幕按语义恢复。
+     *
+     * 已经选中时不下发，避免 LibVLC 的 ESSelected 事件触发反复选择；
+     * LibVLC 的选择接口又会同步回调轨道变化，这里再加一层重入保护。
+     */
+    var restoringTrackSelection = false
+    fun restoreTrackSelections(tracks: EngineTracks) {
+        if (restoringTrackSelection) return
+        restoringTrackSelection = true
+        try {
+            if (audioSelection is PlaybackTrackSelection.Track) {
+                val matched = PlaybackTrackRestorer.match(
+                    tracks = tracks.audio,
+                    type = EngineTrackType.AUDIO,
+                    selection = audioSelection,
+                )
+                if (matched != null) {
+                    audioMissToken = 0
+                    if (!matched.selected) engine.selectAudioTrack(matched.id)
+                } else if (tracks.audio.isNotEmpty() && !audioMissNotified && audioMissToken == 0) {
+                    // 音轨可能随解析逐条上报，先给一点时间再判定没找到。
+                    audioMissToken = 1
+                }
+            }
+            when (val selection = subtitleSelection) {
+                is PlaybackTrackSelection.Off -> {
+                    if (tracks.text.any { it.selected }) engine.selectTextTrack(null)
+                }
+                is PlaybackTrackSelection.Track -> {
+                    val matched = PlaybackTrackRestorer.match(
+                        tracks = tracks.text,
+                        type = EngineTrackType.TEXT,
+                        selection = selection,
+                    )
+                    if (matched != null) {
+                        // 找到目标字幕（可能是迟到的外挂字幕），取消待发提示。
+                        subtitleMissToken = 0
+                        if (!matched.selected) engine.selectTextTrack(matched.id)
+                    } else if (tracks.text.isNotEmpty() && !subtitleMissNotified && subtitleMissToken == 0) {
+                        // 外挂字幕还在异步下载时先不判定失败；稍后仍未匹配再提示。
+                        subtitleMissToken = 1
+                    }
+                }
+                PlaybackTrackSelection.Auto -> Unit
+            }
+        } finally {
+            restoringTrackSelection = false
+        }
     }
 
 
@@ -429,6 +563,8 @@ private fun PlayerSurface(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) {
                 report(force = true)
+                // 退到后台属于用户可见的暂停：切回前台后仍保持暂停。
+                session.onUserPause()
                 engine.pause()
             }
         }
@@ -439,23 +575,25 @@ private fun PlayerSurface(
     DisposableEffect(engine, request) {
         engine.listener = object : VideoPlayerEngineListener {
             override fun onMediaReloaded() {
-                // 内核换中转地址/换解码方式后重新装载了媒体，字幕轨选择需要重做。
+                // 内核换中转地址/换解码方式后重新装载了媒体，轨道选择需要重做。
                 autoSubtitleApplied = false
+                danmakuDiscontinuity++
             }
 
             override fun onError(message: String, decodeRelated: Boolean) {
-                // 系统解码器不支持该编码（最常见的是 10-bit H.264 / Hi10P）时，
-                // 直接换到 LibVLC 的 FFmpeg 软解续播，不把错误糊到用户脸上。
+                // 系统解码器不支持该编码时，直接换到 LibVLC 续播，不把错误糊到用户脸上。
                 if (PlayerEngineKind.shouldAutoFallback(engineKind, decodeRelated, autoFallbackAttempted)) {
                     val fallback = PlayerEngineKind.automaticFallback(engineKind) ?: return
                     autoFallbackAttempted = true
                     switchEngine(
                         next = fallback,
                         persist = false,
-                        reason = "系统解码不支持该编码，已自动切换到 ${fallback.shortLabel}",
+                        reason = "当前内核无法解码该片源",
                     )
                     return
                 }
+                switchTarget = null
+                switchReason = null
                 errorIsDecode = decodeRelated
                 failedMessage = message
                 errorCallback(message)
@@ -466,6 +604,14 @@ private fun PlayerSurface(
                 playbackEnded = state == EnginePlaybackState.ENDED
                 if (state == EnginePlaybackState.READY) {
                     durationMs = currentDuration()
+                    // 新内核真正进入就绪后才算切换成功。
+                    if (switchTarget != null && switchTarget == engineKind) {
+                        val reason = switchReason
+                        switchTarget = null
+                        switchReason = null
+                        hint = reason?.let { "$it，已切换到 ${engineKind.shortLabel}" }
+                            ?: "已切换到 ${engineKind.shortLabel}"
+                    }
                 }
                 if (state == EnginePlaybackState.ENDED) {
                     report(force = true)
@@ -494,6 +640,8 @@ private fun PlayerSurface(
                     selectedTextLabel = text.firstOrNull { it.selected }?.label,
                 )
                 pinnedQuality = pinnedQuality?.takeIf { pinned -> video.any { it.id == pinned.id } }
+                // 换内核或内部重载后，按名称/语言找回用户选中的音轨和字幕。
+                restoreTrackSelections(tracks)
                 // 首次拿到字幕轨时按设置自动选一条；用户手动操作过就不再干预。
                 if (!autoSubtitleApplied && !userPickedSubtitles && text.isNotEmpty()) {
                     autoSubtitleApplied = true
@@ -516,7 +664,9 @@ private fun PlayerSurface(
                         }
                     }
                 }
-                if (subtitlesOff && text.any { it.selected }) {
+                // 用户没手动选过字幕时，内核自动选中的字幕要反映到界面；
+                // 手动关闭的字幕不能被这里重新打开。
+                if (!userPickedSubtitles && text.any { it.selected }) {
                     subtitlesOff = false
                 }
             }
@@ -524,13 +674,45 @@ private fun PlayerSurface(
         onDispose { engine.listener = null }
     }
 
+    // 字幕轨可能比视频晚到（LibVLC 外挂字幕异步下载），给一点时间再提示没找到。
+    LaunchedEffect(subtitleMissToken) {
+        if (subtitleMissToken == 0) return@LaunchedEffect
+        delay(2_000)
+        if (!subtitleMissNotified) {
+            subtitleMissNotified = true
+            hint = "新内核没有找到原来的字幕，可在字幕菜单重新选择"
+        }
+        subtitleMissToken = 0
+    }
+
+    // 音轨同理：等本轮轨道全部上报完，仍未匹配才提示。
+    LaunchedEffect(audioMissToken) {
+        if (audioMissToken == 0) return@LaunchedEffect
+        delay(2_000)
+        if (!audioMissNotified) {
+            audioMissNotified = true
+            hint = "新内核没有找到原来的音轨，可在音轨菜单重新选择"
+        }
+        audioMissToken = 0
+    }
+
     // 只按媒体/地址变化重新装载，后台补拉字幕不会打断正在播放的画面。
     LaunchedEffect(engine, initialKey) {
-        val startAt = resumePositionMs ?: request.startPositionMs
+        // 切换内核时从会话记录的续播点开始；首次进入用请求里的进度。
+        val startAt = session.consumeResumePosition()
         positionMs = startAt
-        engine.setMedia(request.toEngineMedia(subtitlePreference), startAt, autoPlay = true)
-        // 切换内核后沿用用户已经选好的倍速，不回到 1x。
+        // 用户有明确字幕选择时，先禁止内核的异步自动选中，再由轨道事件恢复。
+        if (subtitleSelection !is PlaybackTrackSelection.Auto) {
+            engine.holdSubtitleAutoSelection()
+        }
+        engine.setMedia(
+            request.toEngineMedia(subtitlePreference),
+            startAt,
+            autoPlay = session.playWhenReady,
+        )
+        // 切换内核后沿用用户已经选好的倍速和画面缩放。
         engine.setSpeed(playbackSpeed)
+        engine.setResizeMode(resizeMode)
     }
 
     LaunchedEffect(engine, request.mediaId) {
@@ -542,7 +724,7 @@ private fun PlayerSurface(
             val state = engine.playbackState()
             if (state != EnginePlaybackState.IDLE && position > 0L) {
                 positionMs = position
-                lastKnownPosition = position
+                session.recordPosition(position)
             }
             durationMs = duration
             bufferedMs = engine.bufferedMs()
@@ -614,19 +796,6 @@ private fun PlayerSurface(
         }
     }
 
-    fun seekTo(absoluteMs: Long) {
-        val duration = currentDuration()
-        val target = if (duration > 0L) {
-            absoluteMs.coerceIn(0L, duration)
-        } else {
-            absoluteMs.coerceAtLeast(0L)
-        }
-        engine.seekTo(target)
-        positionMs = target
-        lastKnownPosition = target
-        playbackEnded = false
-    }
-
     fun adjustBrightness(delta: Float) {
         val window = activity?.window ?: return
         val attributes = window.attributes
@@ -651,10 +820,21 @@ private fun PlayerSurface(
     fun chooseTrack(choice: TrackChoice) {
         when (choice.type) {
             EngineTrackType.VIDEO -> engine.selectVideoTrack(choice.id)
-            EngineTrackType.AUDIO -> engine.selectAudioTrack(choice.id)
+            EngineTrackType.AUDIO -> {
+                // 记住语义身份（名称+语言），切内核后按它找回同一条音轨。
+                audioSelection = PlaybackTrackSelection.Track(
+                    PlaybackTrackRef(label = choice.label, language = choice.lang),
+                )
+                engine.selectAudioTrack(choice.id)
+            }
             EngineTrackType.TEXT -> {
                 userPickedSubtitles = true
                 subtitlesOff = false
+                subtitleSelection = PlaybackTrackSelection.Track(
+                    PlaybackTrackRef(label = choice.label, language = choice.lang),
+                )
+                // 本次内核之后的重载也保持这条手动选择。
+                engine.holdSubtitleAutoSelection()
                 engine.selectTextTrack(choice.id)
             }
         }
@@ -671,6 +851,9 @@ private fun PlayerSurface(
     fun disableSubtitles() {
         userPickedSubtitles = true
         subtitlesOff = true
+        // 明确关闭是一个跨内核、跨内部重载都要保持的选择。
+        subtitleSelection = PlaybackTrackSelection.Off
+        engine.holdSubtitleAutoSelection()
         engine.selectTextTrack(null)
     }
 
@@ -692,8 +875,12 @@ private fun PlayerSurface(
         else -> "默认"
     }
     val imageSubtitleNote = request.imageSubtitles.takeIf { it.isNotEmpty() }?.let { labels ->
-        "检测到 ${labels.size} 条图片字幕（${labels.joinToString("、")}）。" +
+        val note = if (engineKind == PlayerEngineKind.VLC) {
+            "LibVLC 对图片字幕的显示取决于片源封装，可能无法完整还原。"
+        } else {
             "系统解码内核无法渲染，可切换到 LibVLC 内核尝试。"
+        }
+        "检测到 ${labels.size} 条图片字幕（${labels.joinToString("、")}）。$note"
     }
     val assSubtitleCount = request.subtitles.count { it.hasAssStyle }
     val subtitleNote = buildList {
@@ -728,23 +915,10 @@ private fun PlayerSurface(
     LaunchedEffect(isTv) {
         if (isTv) runCatching { tvFocusRequester.requestFocus() }
     }
-    LaunchedEffect(isTv, moreSheetVisible, settingsSection) {
-        if (isTv && !moreSheetVisible && settingsSection == null) {
+    LaunchedEffect(isTv, moreSheetVisible, settingsSection, failedMessage) {
+        if (isTv && !moreSheetVisible && settingsSection == null && failedMessage == null) {
             runCatching { tvFocusRequester.requestFocus() }
         }
-    }
-
-    fun togglePlayback() {
-        if (playbackEnded) {
-            seekTo(0L)
-            playbackEnded = false
-            engine.play()
-        } else if (isPlaying) {
-            engine.pause()
-        } else {
-            engine.play()
-        }
-        controlsVisible = true
     }
 
     fun tvSeek(deltaMs: Long) {
@@ -760,19 +934,11 @@ private fun PlayerSurface(
         // 设置面板打开时把方向键/确认键完全还给面板，否则 KeyUp 被根节点吞掉会导致
         // 面板里的 clickable 选项无法触发。
         if (moreSheetVisible || settingsSection != null) return false
+        // 播放失败时把按键完全交给错误页的按钮（重试/切换内核/返回）：
+        // 根节点的预览阶段一旦吞掉确认键，焦点按钮就永远点不动。
+        if (failedMessage != null) return false
         if (event.type == KeyEventType.KeyUp) {
             return code in TV_CONFIRM_KEYS
-        }
-
-        // 播放失败时 OK 直接重试，保证遥控器不会卡在没有焦点的错误页。
-        if (failedMessage != null) {
-            if (code in TV_CONFIRM_KEYS) {
-                failedMessage = null
-                errorIsDecode = false
-                engine.retry()
-                return true
-            }
-            return false
         }
 
         return when (code) {
@@ -872,6 +1038,10 @@ private fun PlayerSurface(
             fontScale = danmaku.fontScale,
             areaFraction = danmaku.area,
             positionProvider = { engine.positionMs() },
+            playing = isPlaying && !isBuffering && !playbackEnded && failedMessage == null,
+            playbackSpeed = playbackSpeed,
+            playbackKey = engine,
+            discontinuity = danmakuDiscontinuity,
             modifier = Modifier.fillMaxSize(),
         )
 
@@ -959,18 +1129,7 @@ private fun PlayerSurface(
             ) {
                 PlayerCenterButton(
                     isPlaying = isPlaying && !playbackEnded,
-                    onClick = {
-                        if (playbackEnded) {
-                            seekTo(0L)
-                            playbackEnded = false
-                            engine.play()
-                        } else if (isPlaying) {
-                            engine.pause()
-                        } else {
-                            engine.play()
-                        }
-                        controlsVisible = true
-                    },
+                    onClick = { togglePlayback() },
                 )
             }
         }
@@ -987,18 +1146,7 @@ private fun PlayerSurface(
                 danmakuEnabled = danmaku.enabled,
                 danmakuLabel = "弹幕：$danmakuLabel",
                 onSeek = { position -> seekTo(position) },
-                onTogglePlay = {
-                    if (playbackEnded) {
-                        seekTo(0L)
-                        playbackEnded = false
-                        engine.play()
-                    } else if (isPlaying) {
-                        engine.pause()
-                    } else {
-                        engine.play()
-                    }
-                    controlsVisible = true
-                },
+                onTogglePlay = { togglePlayback() },
                 onPlayNext = {
                     playbackEnded = false
                     autoNextCancelled = true
@@ -1090,6 +1238,15 @@ private fun PlayerSurface(
         }
 
         failedMessage?.let { message ->
+            val alternative = PlayerEngineKind.entries.firstOrNull { it != engineKind }
+            val retryFocus = remember { FocusRequester() }
+            // 电视端把焦点放到“重试”，方向键可以在重试/切换内核/返回之间移动。
+            LaunchedEffect(isTv, message) {
+                if (isTv) {
+                    delay(80)
+                    runCatching { retryFocus.requestFocus() }
+                }
+            }
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1108,7 +1265,7 @@ private fun PlayerSurface(
                     Spacer(Modifier.height(6.dp))
                     Text(
                         if (errorIsDecode) {
-                            "本机解码不支持该格式，可切换播放内核后重试"
+                            "当前内核无法解码该片源，可切换到另一个内核重试"
                         } else {
                             "检查网络或地址后重试，也可以切换播放内核"
                         },
@@ -1117,12 +1274,17 @@ private fun PlayerSurface(
                     )
                     Spacer(Modifier.height(16.dp))
                     TextButton(
-                        onClick = {
-                            failedMessage = null
-                            errorIsDecode = false
-                            engine.retry()
-                        },
+                        onClick = { retryPlayback() },
+                        modifier = Modifier.focusRequester(retryFocus),
                     ) { Text("重试") }
+                    if (alternative != null) {
+                        TextButton(
+                            onClick = {
+                                // 手动切换会记住为默认内核；本次播放从当前位置续播。
+                                switchEngine(alternative)
+                            },
+                        ) { Text("切换到 ${alternative.shortLabel}") }
+                    }
                     TextButton(onClick = onBack) { Text("返回") }
                 }
             }
@@ -1140,6 +1302,7 @@ private fun PlayerSurface(
                 onReplay = {
                     seekTo(0L)
                     playbackEnded = false
+                    session.onUserPlay()
                     engine.play()
                 },
                 onCancelAutoNext = {
@@ -1196,7 +1359,7 @@ private fun PlayerSurface(
             val sheetDescription = when (section) {
                 PlayerSettingsSection.SUBTITLE -> subtitleNote
                 PlayerSettingsSection.ENGINE ->
-                    "切换后立即用新内核从当前位置继续播放；也可以在我的 → 播放设置里修改默认内核。"
+                    "切换后从当前位置续播，并保持播放/暂停状态；也可以在我的 → 播放设置里修改默认内核。"
                 else -> null
             }
             PlayerSettingsSheet(
