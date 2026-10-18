@@ -52,6 +52,9 @@ sealed interface ReaderScreen {
     /** 搜索结果的书源详情（仿 legado 书籍信息页），加入书架前就能看目录和章数。 */
     data object BookDetail : ReaderScreen
     data object Reading : ReaderScreen
+
+    /** 书源管理（仿网页端：「书源管理」页）：导入、启停、删除、登录与调试。 */
+    data object Sources : ReaderScreen
 }
 
 data class ReaderUiState(
@@ -129,6 +132,29 @@ data class ReaderUiState(
     // 段评与宿主浏览器
     val browserPage: ReaderBrowserPageDto? = null,
     val pendingBrowsers: List<ReaderBrowserPageDto> = emptyList(),
+
+    // 书源管理
+    val sources: List<ReaderSourceDto> = emptyList(),
+    val sourcesLoaded: Boolean = false,
+    val sourcesLoading: Boolean = false,
+    val sourcesError: String? = null,
+    val sourcesNotice: String? = null,
+    /** 正在提交启停/删除的书源 ID：按钮与开关据此禁用，避免重复请求。 */
+    val sourcePendingIds: Set<String> = emptySet(),
+    val sourceImportOpen: Boolean = false,
+    val sourceImportText: String = "",
+    val sourceImportFileName: String? = null,
+    val sourceImportFileSize: Long = 0,
+    /** 从文件读入的原始内容（不放进可编辑输入框，避免大 JSON 卡顿）。 */
+    val sourceImportPayload: String? = null,
+    val sourceImporting: Boolean = false,
+    val sourceImportError: String? = null,
+    val sourceDebugId: String? = null,
+    val sourceDebugKey: String = "",
+    val sourceDebugRunning: Boolean = false,
+    val sourceDebugLogs: List<String>? = null,
+    /** 本次会话里确认过的书源登录态（id → 是否已登录），用于列表上的登录标记。 */
+    val sourceLoggedIn: Map<String, Boolean> = emptyMap(),
 
     // 书源登录
     val currentSource: ReaderSourceDto? = null,
@@ -1476,6 +1502,270 @@ class ReaderViewModel(
         _state.update { it.copy(pendingBrowsers = emptyList()) }
     }
 
+    // ── 书源管理 ──
+
+    fun openSources() {
+        _state.update {
+            it.copy(
+                screen = ReaderScreen.Sources,
+                sourcesError = null,
+                sourcesNotice = null,
+                sourceImportError = null,
+            )
+        }
+        loadSources(force = true)
+    }
+
+    fun closeSources() {
+        stopBrowserPolling()
+        _state.update {
+            it.copy(
+                screen = ReaderScreen.Shelf,
+                sourceImportOpen = false,
+                sourceDebugId = null,
+                sourceDebugLogs = null,
+                sourceLoginOpen = false,
+                sourceLogin = null,
+                browserPage = null,
+            )
+        }
+    }
+
+    fun refreshSources() {
+        loadSources(force = true)
+    }
+
+    private fun loadSources(force: Boolean = false) {
+        val current = _state.value
+        if (current.sourcesLoading) return
+        if (!force && current.sourcesLoaded) return
+        _state.update { it.copy(sourcesLoading = true, sourcesError = null) }
+        viewModelScope.launch {
+            when (val result = repo.sources(refresh = force)) {
+                is ApiResult.Success -> _state.update {
+                    it.copy(
+                        sourcesLoading = false,
+                        sourcesLoaded = true,
+                        sources = result.value,
+                    )
+                }
+                is ApiResult.Failure -> _state.update {
+                    it.copy(sourcesLoading = false, sourcesError = readerError(result))
+                }
+                is ApiResult.NetworkError -> _state.update {
+                    it.copy(sourcesLoading = false, sourcesError = "网络不可用，请稍后重试")
+                }
+                ApiResult.Stale -> _state.update { it.copy(sourcesLoading = false) }
+            }
+        }
+    }
+
+    fun setSourceEnabled(source: ReaderSourceDto, enabled: Boolean) {
+        if (source.id in _state.value.sourcePendingIds) return
+        // 先切换界面再发请求：开关跟着手指走，失败时回滚并给出原因。
+        _state.update { state ->
+            state.copy(
+                sourcePendingIds = state.sourcePendingIds + source.id,
+                sourcesError = null,
+                sourcesNotice = null,
+                sources = state.sources.map {
+                    if (it.id == source.id) it.copy(enabled = enabled) else it
+                },
+            )
+        }
+        viewModelScope.launch {
+            when (val result = repo.setSourceEnabled(source.id, enabled)) {
+                is ApiResult.Success -> _state.update { state ->
+                    state.copy(
+                        sourcePendingIds = state.sourcePendingIds - source.id,
+                        sourcesNotice = if (enabled) "已启用「${source.name}」" else "已停用「${source.name}」",
+                    )
+                }
+                is ApiResult.Failure -> rollbackSourceEnabled(source.id, !enabled, readerError(result))
+                is ApiResult.NetworkError -> rollbackSourceEnabled(source.id, !enabled, "网络不可用，请稍后重试")
+                ApiResult.Stale -> rollbackSourceEnabled(source.id, !enabled, "请求已失效，请重试")
+            }
+        }
+    }
+
+    private fun rollbackSourceEnabled(sourceId: String, enabled: Boolean, error: String) {
+        _state.update { state ->
+            state.copy(
+                sourcePendingIds = state.sourcePendingIds - sourceId,
+                sourcesError = error,
+                sources = state.sources.map {
+                    if (it.id == sourceId) it.copy(enabled = enabled) else it
+                },
+            )
+        }
+    }
+
+    fun deleteSource(source: ReaderSourceDto) {
+        if (source.id in _state.value.sourcePendingIds) return
+        _state.update { state ->
+            state.copy(
+                sourcePendingIds = state.sourcePendingIds + source.id,
+                sourcesError = null,
+                sourcesNotice = null,
+            )
+        }
+        viewModelScope.launch {
+            when (val result = repo.deleteSource(source.id)) {
+                is ApiResult.Success -> _state.update { state ->
+                    state.copy(
+                        sourcePendingIds = state.sourcePendingIds - source.id,
+                        sources = state.sources.filterNot { it.id == source.id },
+                        sourcesNotice = "已删除「${source.name}」",
+                    )
+                }
+                is ApiResult.Failure -> _state.update {
+                    it.copy(
+                        sourcePendingIds = it.sourcePendingIds - source.id,
+                        sourcesError = readerError(result),
+                    )
+                }
+                is ApiResult.NetworkError -> _state.update {
+                    it.copy(
+                        sourcePendingIds = it.sourcePendingIds - source.id,
+                        sourcesError = "网络不可用，请稍后重试",
+                    )
+                }
+                ApiResult.Stale -> _state.update {
+                    it.copy(
+                        sourcePendingIds = it.sourcePendingIds - source.id,
+                        sourcesError = "请求已失效，请重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun toggleSourceImport() {
+        _state.update {
+            it.copy(
+                sourceImportOpen = !it.sourceImportOpen,
+                sourceImportError = null,
+            )
+        }
+    }
+
+    fun onSourceImportTextChange(value: String) {
+        _state.update {
+            it.copy(
+                sourceImportText = value,
+                // 用户开始手输/粘贴后，之前选中的文件不再参与导入。
+                sourceImportPayload = null,
+                sourceImportFileName = null,
+                sourceImportFileSize = 0,
+                sourceImportError = null,
+            )
+        }
+    }
+
+    fun onSourceImportFileLoaded(name: String, size: Long, text: String) {
+        _state.update {
+            it.copy(
+                sourceImportOpen = true,
+                sourceImportPayload = text,
+                sourceImportFileName = name,
+                sourceImportFileSize = size,
+                sourceImportText = "",
+                sourceImportError = null,
+            )
+        }
+    }
+
+    fun onSourceImportFileError(message: String) {
+        _state.update { it.copy(sourceImportOpen = true, sourceImportError = message) }
+    }
+
+    fun clearSourceImportFile() {
+        _state.update {
+            it.copy(sourceImportPayload = null, sourceImportFileName = null, sourceImportFileSize = 0)
+        }
+    }
+
+    fun importSources() {
+        val current = _state.value
+        if (current.sourceImporting) return
+        val payload = (current.sourceImportPayload ?: current.sourceImportText).trim()
+        if (payload.isEmpty()) {
+            _state.update { it.copy(sourceImportError = "请粘贴书源内容或选择书源文件") }
+            return
+        }
+        _state.update { it.copy(sourceImporting = true, sourceImportError = null) }
+        viewModelScope.launch {
+            when (val result = repo.importSources(payload)) {
+                is ApiResult.Success -> {
+                    _state.update {
+                        it.copy(
+                            sourceImporting = false,
+                            sourceImportOpen = false,
+                            sourceImportText = "",
+                            sourceImportPayload = null,
+                            sourceImportFileName = null,
+                            sourceImportFileSize = 0,
+                            sourcesNotice = "成功导入 ${result.value} 个书源",
+                        )
+                    }
+                    loadSources(force = true)
+                }
+                is ApiResult.Failure -> _state.update {
+                    it.copy(sourceImporting = false, sourceImportError = readerError(result))
+                }
+                is ApiResult.NetworkError -> _state.update {
+                    it.copy(sourceImporting = false, sourceImportError = "网络不可用，请稍后重试")
+                }
+                ApiResult.Stale -> _state.update {
+                    it.copy(sourceImporting = false, sourceImportError = "请求已失效，请重试")
+                }
+            }
+        }
+    }
+
+    fun toggleSourceDebug(sourceId: String) {
+        _state.update {
+            it.copy(
+                sourceDebugId = if (it.sourceDebugId == sourceId) null else sourceId,
+                sourceDebugLogs = null,
+            )
+        }
+    }
+
+    fun clearSourcesNotice() {
+        _state.update { it.copy(sourcesNotice = null, sourcesError = null) }
+    }
+
+    fun onSourceDebugKeyChange(value: String) {
+        _state.update { it.copy(sourceDebugKey = value) }
+    }
+
+    fun runSourceDebug(source: ReaderSourceDto) {
+        val key = _state.value.sourceDebugKey.trim()
+        if (key.isEmpty()) return
+        if (_state.value.sourceDebugRunning) return
+        _state.update { it.copy(sourceDebugRunning = true, sourceDebugLogs = null, sourcesError = null) }
+        viewModelScope.launch {
+            when (val result = repo.debugSource(source.id, key)) {
+                is ApiResult.Success -> _state.update {
+                    it.copy(sourceDebugRunning = false, sourceDebugLogs = result.value)
+                }
+                is ApiResult.Failure -> _state.update {
+                    it.copy(
+                        sourceDebugRunning = false,
+                        sourceDebugLogs = listOf("调试失败：" + readerError(result)),
+                    )
+                }
+                is ApiResult.NetworkError -> _state.update {
+                    it.copy(sourceDebugRunning = false, sourceDebugLogs = listOf("网络不可用，请稍后重试"))
+                }
+                ApiResult.Stale -> _state.update {
+                    it.copy(sourceDebugRunning = false, sourceDebugLogs = listOf("请求已失效，请重试"))
+                }
+            }
+        }
+    }
+
     // ── 书源登录 ──
 
     fun loadCurrentSource() {
@@ -1495,6 +1785,12 @@ class ReaderViewModel(
     fun openSourceLogin() {
         val current = _state.value
         val book = current.book ?: return
+        val known = current.currentSource
+            ?: current.sources.firstOrNull { it.sourceUrl == book.origin }
+        if (known != null) {
+            openSourceLoginFor(known)
+            return
+        }
         if (current.sourceLoginOpen) return
         _state.update {
             it.copy(
@@ -1507,9 +1803,8 @@ class ReaderViewModel(
             )
         }
         viewModelScope.launch {
-            val source = current.currentSource
-                ?: (repo.sources() as? ApiResult.Success)?.value
-                    ?.firstOrNull { it.sourceUrl == book.origin }
+            val source = (repo.sources() as? ApiResult.Success)?.value
+                ?.firstOrNull { it.sourceUrl == book.origin }
             if (source == null) {
                 _state.update {
                     it.copy(sourceLoginLoading = false, sourceLoginError = "未找到这本书对应的书源")
@@ -1517,6 +1812,26 @@ class ReaderViewModel(
                 return@launch
             }
             _state.update { it.copy(currentSource = source) }
+            startBrowserPolling(source.id)
+            loadSourceLoginInternal(source.id)
+        }
+    }
+
+    /** 从书源管理列表直接登录某个书源（不依赖当前打开的书）。 */
+    fun openSourceLoginFor(source: ReaderSourceDto) {
+        if (_state.value.sourceLoginOpen) return
+        _state.update {
+            it.copy(
+                currentSource = source,
+                sourceLoginOpen = true,
+                sourceLoginLoading = true,
+                sourceLogin = null,
+                sourceLoginFields = emptyMap(),
+                sourceLoginError = null,
+                sourceLoginNotice = null,
+            )
+        }
+        viewModelScope.launch {
             startBrowserPolling(source.id)
             loadSourceLoginInternal(source.id)
         }
@@ -1530,6 +1845,7 @@ class ReaderViewModel(
                     sourceLogin = result.value,
                     sourceLoginFields = initialLoginFields(result.value),
                     sourceLoginError = result.value.error.takeIf { message -> message.isNotBlank() },
+                    sourceLoggedIn = it.sourceLoggedIn + (sourceId to result.value.loggedIn),
                 )
             }
             is ApiResult.Failure -> _state.update {
@@ -1584,6 +1900,7 @@ class ReaderViewModel(
                                 loggedIn = value.loggedIn,
                             ),
                             sourceLoginFields = value.values.ifEmpty { state.sourceLoginFields },
+                            sourceLoggedIn = state.sourceLoggedIn + (source.id to value.loggedIn),
                         )
                     }
                     if (value.uiRefresh || !value.ok) {
@@ -1611,8 +1928,57 @@ class ReaderViewModel(
             when (val result = repo.sourceLogout(source.id)) {
                 is ApiResult.Success -> {
                     _state.update {
-                        it.copy(sourceLoginBusy = false, sourceLoginNotice = "已清除书源登录状态")
+                        it.copy(
+                            sourceLoginBusy = false,
+                            sourceLoginNotice = "已清除书源登录状态",
+                            sourceLoggedIn = it.sourceLoggedIn + (source.id to false),
+                        )
                     }
+                    loadSourceLoginInternal(source.id)
+                }
+                is ApiResult.Failure -> _state.update {
+                    it.copy(sourceLoginBusy = false, sourceLoginError = readerError(result))
+                }
+                is ApiResult.NetworkError -> _state.update {
+                    it.copy(sourceLoginBusy = false, sourceLoginError = "网络不可用，请稍后重试")
+                }
+                ApiResult.Stale -> _state.update { it.copy(sourceLoginBusy = false) }
+            }
+        }
+    }
+
+    /** 仅保存登录表单值，不触发书源的 login()（网页版「仅保存信息」）。 */
+    fun saveSourceLoginInfo() {
+        val current = _state.value
+        val source = current.currentSource ?: return
+        if (current.sourceLoginBusy) return
+        _state.update { it.copy(sourceLoginBusy = true, sourceLoginError = null, sourceLoginNotice = null) }
+        viewModelScope.launch {
+            when (val result = repo.saveSourceLoginInfo(source.id, current.sourceLoginFields)) {
+                is ApiResult.Success -> _state.update {
+                    it.copy(sourceLoginBusy = false, sourceLoginNotice = "已保存登录信息")
+                }
+                is ApiResult.Failure -> _state.update {
+                    it.copy(sourceLoginBusy = false, sourceLoginError = readerError(result))
+                }
+                is ApiResult.NetworkError -> _state.update {
+                    it.copy(sourceLoginBusy = false, sourceLoginError = "网络不可用，请稍后重试")
+                }
+                ApiResult.Stale -> _state.update { it.copy(sourceLoginBusy = false) }
+            }
+        }
+    }
+
+    /** 保存书源变量（bookSourceUrl 变量的 JSON，配合书源 JS 的 source.getVariable）。 */
+    fun saveSourceVariable(variable: String) {
+        val current = _state.value
+        val source = current.currentSource ?: return
+        if (current.sourceLoginBusy) return
+        _state.update { it.copy(sourceLoginBusy = true, sourceLoginError = null, sourceLoginNotice = null) }
+        viewModelScope.launch {
+            when (val result = repo.saveSourceVariable(source.id, variable)) {
+                is ApiResult.Success -> {
+                    _state.update { it.copy(sourceLoginBusy = false, sourceLoginNotice = "源变量已保存") }
                     loadSourceLoginInternal(source.id)
                 }
                 is ApiResult.Failure -> _state.update {

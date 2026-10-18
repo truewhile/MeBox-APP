@@ -113,8 +113,28 @@ class ReaderRepository(
     suspend fun refreshToc(): ApiResult<ReaderRefreshTocDto> =
         authorized { api.readerRefreshToc(it) }
 
-    suspend fun sources(): ApiResult<List<ReaderSourceDto>> =
-        authorized { api.readerSources(it) }.mapSuccess { it.sources.orEmpty() }
+    suspend fun sources(refresh: Boolean = false): ApiResult<List<ReaderSourceDto>> =
+        authorized { api.readerSources(it, refresh) }.mapSuccess { it.sources.orEmpty() }
+
+    /** 导入书源：支持 JSON 数组 / 单对象 / Base64 / 书源链接，返回导入数量。 */
+    suspend fun importSources(text: String): ApiResult<Int> =
+        authorized { api.readerImportSources(it, text) }.mapSuccess { it.imported }
+
+    suspend fun setSourceEnabled(sourceId: String, enabled: Boolean): ApiResult<Unit> =
+        authorized { api.readerUpdateSource(it, sourceId, enabled) }.mapSuccess { }
+
+    suspend fun deleteSource(sourceId: String): ApiResult<Unit> =
+        authorized { api.readerDeleteSource(it, sourceId) }.mapSuccess { }
+
+    /** 书源调试：按关键词跑一次搜索规则，返回服务端收集的执行日志。 */
+    suspend fun debugSource(sourceId: String, key: String): ApiResult<List<String>> =
+        authorized { api.readerDebugSource(it, sourceId, key) }.mapSuccess { it.logs.orEmpty() }
+
+    suspend fun saveSourceVariable(sourceId: String, variable: String): ApiResult<Unit> =
+        authorized { api.readerSetSourceVariable(it, sourceId, variable) }.mapSuccess { }
+
+    suspend fun saveSourceLoginInfo(sourceId: String, fields: Map<String, String>): ApiResult<Unit> =
+        authorized { api.readerSetSourceLoginInfo(it, sourceId, fields) }.mapSuccess { }
 
     suspend fun sourceLogin(sourceId: String): ApiResult<ReaderSourceLoginDto> =
         authorized { api.readerSourceLogin(it, sourceId) }

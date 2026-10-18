@@ -133,6 +133,7 @@ import app.mebox.android.feature.reader.ReaderScreen
 import app.mebox.android.feature.reader.ReaderBookDetailContent
 import app.mebox.android.feature.reader.ReaderSearchContent
 import app.mebox.android.feature.reader.ReaderShelfContent
+import app.mebox.android.feature.reader.ReaderSourcesContent
 import app.mebox.android.feature.reader.ReaderUiState
 import app.mebox.android.feature.reader.ReaderViewModel
 import kotlinx.coroutines.delay
@@ -193,6 +194,11 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
                 viewModel = readerViewModel,
             )
             readerState.screen == ReaderScreen.BookDetail -> ReaderBookDetailContent(
+                state = readerState,
+                origin = account.address.origin,
+                viewModel = readerViewModel,
+            )
+            readerState.screen == ReaderScreen.Sources -> ReaderSourcesContent(
                 state = readerState,
                 origin = account.address.origin,
                 viewModel = readerViewModel,
@@ -274,6 +280,7 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
                 ReaderScreen.Reading -> readerViewModel.closeReading()
                 ReaderScreen.BookDetail -> readerViewModel.dismissSearchDetail()
                 ReaderScreen.Search -> readerViewModel.closeSearch()
+                ReaderScreen.Sources -> readerViewModel.closeSources()
                 ReaderScreen.Shelf -> mediaViewModel.back()
             }
         }

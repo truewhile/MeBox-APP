@@ -225,6 +225,12 @@ data class ReaderSourceDto(
     @SerialName("source_url") val sourceUrl: String = "",
     val type: Int = 0,
     val enabled: Boolean = true,
+    @SerialName("enabled_explore") val enabledExplore: Boolean = true,
+    @SerialName("custom_order") val customOrder: Int = 0,
+    val weight: Int = 0,
+    @SerialName("concurrent_rate") val concurrentRate: String = "",
+    @SerialName("last_update_time") val lastUpdateTime: Long = 0,
+    @SerialName("respond_time") val respondTime: Long = 0,
     @SerialName("has_login") val hasLogin: Boolean = false,
     @SerialName("needs_browser") val needsBrowser: Boolean = false,
     val comment: String = "",
@@ -232,6 +238,27 @@ data class ReaderSourceDto(
 
 @Serializable
 data class ReaderSourcesDto(val sources: List<ReaderSourceDto>? = null)
+
+@Serializable
+data class ReaderSourceImportRequest(val text: String)
+
+@Serializable
+data class ReaderSourceImportResponseDto(val imported: Int = 0)
+
+@Serializable
+data class ReaderSourceEnabledRequest(val enabled: Boolean)
+
+@Serializable
+data class ReaderSourceDebugRequest(val key: String)
+
+@Serializable
+data class ReaderSourceDebugResponseDto(val logs: List<String>? = null)
+
+@Serializable
+data class ReaderSourceVariableRequest(val variable: String)
+
+@Serializable
+data class ReaderSourceLoginInfoRequest(val fields: Map<String, String> = emptyMap())
 
 @Serializable
 data class ReaderLoginFieldDto(

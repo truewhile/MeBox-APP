@@ -31,6 +31,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Bookmarks
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -115,6 +116,12 @@ internal fun ReaderShelfContent(
                         onClick = viewModel::refreshToc,
                     )
                 }
+                Spacer(Modifier.width(8.dp))
+                MeBoxChip(
+                    text = "书源",
+                    leadingIcon = Icons.Default.Bookmarks,
+                    onClick = viewModel::openSources,
+                )
                 Spacer(Modifier.width(8.dp))
                 MeBoxIconButton(
                     icon = Icons.Default.Search,

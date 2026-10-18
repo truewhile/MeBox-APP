@@ -55,6 +55,7 @@ import app.mebox.android.feature.media.MediaScreen
 import app.mebox.android.feature.media.MediaViewModel
 import app.mebox.android.feature.media.player.PlayerScreen
 import app.mebox.android.feature.reader.ReaderScreen
+import app.mebox.android.feature.reader.ReaderSourcesContent
 import app.mebox.android.feature.reader.ReaderViewModel
 import coil.compose.LocalImageLoader
 
@@ -140,6 +141,12 @@ fun TvAccountHost(
                 origin = account.address.origin,
                 viewModel = readerViewModel,
                 onOpenPhoneSearch = { phonePurpose = PhonePurpose.READER_SEARCH },
+            )
+
+            readerState.screen == ReaderScreen.Sources -> ReaderSourcesContent(
+                state = readerState,
+                origin = account.address.origin,
+                viewModel = readerViewModel,
             )
 
             else -> when (val screen = state.screen) {
@@ -243,6 +250,7 @@ fun TvAccountHost(
             ReaderScreen.Reading -> readerViewModel.closeReading()
             ReaderScreen.BookDetail -> readerViewModel.dismissSearchDetail()
             ReaderScreen.Search -> readerViewModel.closeSearch()
+            ReaderScreen.Sources -> readerViewModel.closeSources()
             ReaderScreen.Shelf -> mediaViewModel.back()
         }
     }

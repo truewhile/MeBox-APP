@@ -9,6 +9,7 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -282,6 +283,9 @@ internal fun ReaderSourceLoginSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val login = state.sourceLogin
+    // 源变量是书源 JSON 里的 bookSourceUrl 变量，形如 {"线路":"https://..."}；
+    // 服务端已保存的值随登录信息一起下发，这里做本地编辑副本。
+    var variableText by remember(login?.variable) { mutableStateOf(login?.variable.orEmpty()) }
     ModalBottomSheet(
         onDismissRequest = viewModel::closeSourceLogin,
         sheetState = sheetState,
@@ -351,6 +355,30 @@ internal fun ReaderSourceLoginSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "源变量（bookSourceUrl 变量的 JSON）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = variableText,
+                    onValueChange = { variableText = it },
+                    minLines = 3,
+                    maxLines = 6,
+                    placeholder = { Text("{\"线路\":\"https://v1.example.com\"}", style = MaterialTheme.typography.bodySmall) },
+                    textStyle = MaterialTheme.typography.bodySmall,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(6.dp))
+                MeBoxOutlinedButton(
+                    onClick = { viewModel.saveSourceVariable(variableText) },
+                    enabled = !state.sourceLoginBusy,
+                ) {
+                    Text("保存变量")
+                }
             }
 
             state.sourceLoginError?.let { error ->
@@ -363,7 +391,7 @@ internal fun ReaderSourceLoginSheet(
             }
 
             Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MeBoxButton(
                     onClick = { viewModel.submitSourceLogin(null) },
                     enabled = !state.sourceLoginBusy && login != null,
@@ -385,6 +413,12 @@ internal fun ReaderSourceLoginSheet(
                     ) {
                         Text("退出登录")
                     }
+                }
+                MeBoxOutlinedButton(
+                    onClick = viewModel::saveSourceLoginInfo,
+                    enabled = !state.sourceLoginBusy && login != null,
+                ) {
+                    Text("仅保存信息")
                 }
             }
             Spacer(Modifier.height(16.dp))

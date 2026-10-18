@@ -314,8 +314,53 @@ class MeBoxApiClient(
     suspend fun readerRefreshToc(accessToken: String): ApiResult<ReaderRefreshTocDto> =
         call { api.readerRefreshToc(bearer(accessToken)) }
 
-    suspend fun readerSources(accessToken: String): ApiResult<ReaderSourcesDto> =
-        call { api.readerSources(bearer(accessToken)) }
+    suspend fun readerSources(
+        accessToken: String,
+        refresh: Boolean = false,
+    ): ApiResult<ReaderSourcesDto> =
+        // refresh=1 会被 HttpCachePolicy 视为不缓存，导入/删除后强制重读，
+        // 避免 30 秒的客户端缓存把旧列表顶回来。
+        call { api.readerSources(bearer(accessToken), if (refresh) "1" else null) }
+
+    suspend fun readerImportSources(
+        accessToken: String,
+        text: String,
+    ): ApiResult<ReaderSourceImportResponseDto> =
+        call { api.readerImportSources(bearer(accessToken), ReaderSourceImportRequest(text)) }
+
+    suspend fun readerUpdateSource(
+        accessToken: String,
+        sourceId: String,
+        enabled: Boolean,
+    ): ApiResult<ReaderOkResponse> =
+        call { api.readerUpdateSource(bearer(accessToken), sourceId, ReaderSourceEnabledRequest(enabled)) }
+
+    suspend fun readerDeleteSource(
+        accessToken: String,
+        sourceId: String,
+    ): ApiResult<ReaderOkResponse> =
+        call { api.readerDeleteSource(bearer(accessToken), sourceId) }
+
+    suspend fun readerDebugSource(
+        accessToken: String,
+        sourceId: String,
+        key: String,
+    ): ApiResult<ReaderSourceDebugResponseDto> =
+        call { api.readerDebugSource(bearer(accessToken), sourceId, ReaderSourceDebugRequest(key)) }
+
+    suspend fun readerSetSourceVariable(
+        accessToken: String,
+        sourceId: String,
+        variable: String,
+    ): ApiResult<ReaderOkResponse> =
+        call { api.readerSetSourceVariable(bearer(accessToken), sourceId, ReaderSourceVariableRequest(variable)) }
+
+    suspend fun readerSetSourceLoginInfo(
+        accessToken: String,
+        sourceId: String,
+        fields: Map<String, String>,
+    ): ApiResult<ReaderOkResponse> =
+        call { api.readerSetSourceLoginInfo(bearer(accessToken), sourceId, ReaderSourceLoginInfoRequest(fields)) }
 
     suspend fun readerSourceLogin(
         accessToken: String,

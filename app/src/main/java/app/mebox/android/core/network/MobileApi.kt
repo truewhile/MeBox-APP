@@ -11,6 +11,7 @@ import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.Header
+import retrofit2.http.PATCH
 import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Path
@@ -295,7 +296,48 @@ interface MobileApi {
     @GET("api/reader/sources")
     suspend fun readerSources(
         @Header("Authorization") authorization: String,
+        @Query("refresh") refresh: String?,
     ): Response<ReaderSourcesDto>
+
+    @POST("api/reader/sources/import")
+    suspend fun readerImportSources(
+        @Header("Authorization") authorization: String,
+        @Body request: ReaderSourceImportRequest,
+    ): Response<ReaderSourceImportResponseDto>
+
+    @PATCH("api/reader/sources/{id}")
+    suspend fun readerUpdateSource(
+        @Header("Authorization") authorization: String,
+        @Path("id") sourceId: String,
+        @Body request: ReaderSourceEnabledRequest,
+    ): Response<ReaderOkResponse>
+
+    @DELETE("api/reader/sources/{id}")
+    suspend fun readerDeleteSource(
+        @Header("Authorization") authorization: String,
+        @Path("id") sourceId: String,
+    ): Response<ReaderOkResponse>
+
+    @POST("api/reader/sources/{id}/debug")
+    suspend fun readerDebugSource(
+        @Header("Authorization") authorization: String,
+        @Path("id") sourceId: String,
+        @Body request: ReaderSourceDebugRequest,
+    ): Response<ReaderSourceDebugResponseDto>
+
+    @PUT("api/reader/sources/{id}/variable")
+    suspend fun readerSetSourceVariable(
+        @Header("Authorization") authorization: String,
+        @Path("id") sourceId: String,
+        @Body request: ReaderSourceVariableRequest,
+    ): Response<ReaderOkResponse>
+
+    @PUT("api/reader/sources/{id}/login-info")
+    suspend fun readerSetSourceLoginInfo(
+        @Header("Authorization") authorization: String,
+        @Path("id") sourceId: String,
+        @Body request: ReaderSourceLoginInfoRequest,
+    ): Response<ReaderOkResponse>
 
     @GET("api/reader/sources/{id}/login")
     suspend fun readerSourceLogin(
