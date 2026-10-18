@@ -26,6 +26,9 @@ import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
@@ -47,6 +50,8 @@ class ExoVideoPlayerEngine(
     private val context: Context,
     /** App 共享的网络客户端；传入后会复用它的连接池与已有的 TLS 连接。 */
     private val httpClient: OkHttpClient? = null,
+    /** 解码方式：自动 / 强制硬件 / 强制软件。 */
+    private val decoderMode: DecoderMode = DecoderMode.AUTO,
 ) : VideoPlayerEngine {
 
     override val kind: PlayerEngineKind = PlayerEngineKind.EXO
@@ -82,8 +87,15 @@ class ExoVideoPlayerEngine(
         // 保证 ExoPlayer 的默认样式能解析主题属性。
         val appContext = context.applicationContext
         val dataSourceFactory = DefaultDataSource.Factory(appContext, httpDataSourceFactory())
-        val renderersFactory = DefaultRenderersFactory(appContext)
-            .setEnableDecoderFallback(true)
+        val renderersFactory = DefaultRenderersFactory(appContext).apply {
+            // 强制硬件时不再回退其它解码器；自动/软件模式保留回退。
+            setEnableDecoderFallback(decoderMode != DecoderMode.HARDWARE)
+            when (decoderMode) {
+                DecoderMode.SOFTWARE -> setMediaCodecSelector(SoftwareOnlySelector)
+                DecoderMode.HARDWARE -> setMediaCodecSelector(HardwareOnlySelector)
+                DecoderMode.AUTO -> Unit
+            }
+        }
         ExoPlayer.Builder(appContext, renderersFactory)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .setSeekBackIncrementMs(10_000)
@@ -534,4 +546,28 @@ private fun isIoError(errorCode: Int): Boolean = when (errorCode) {
     -> true
 
     else -> false
+}
+
+/** 只用 Android 自带的软件解码器（不含硬件 MediaCodec）。 */
+@OptIn(UnstableApi::class)
+private object SoftwareOnlySelector : MediaCodecSelector {
+    override fun getDecoderInfos(
+        mimeType: String,
+        requiresSecureDecoder: Boolean,
+        requiresTunnelingDecoder: Boolean,
+    ): List<MediaCodecInfo> =
+        MediaCodecUtil.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
+            .filter { it.softwareOnly }
+}
+
+/** 只用硬件解码器；显式选择“硬件解码”时生效。 */
+@OptIn(UnstableApi::class)
+private object HardwareOnlySelector : MediaCodecSelector {
+    override fun getDecoderInfos(
+        mimeType: String,
+        requiresSecureDecoder: Boolean,
+        requiresTunnelingDecoder: Boolean,
+    ): List<MediaCodecInfo> =
+        MediaCodecUtil.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
+            .filter { it.hardwareAccelerated }
 }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import app.mebox.android.BuildConfig
+import app.mebox.android.core.player.DecoderMode
 import app.mebox.android.core.player.SubtitlePriority
 import app.mebox.android.core.storage.AppPreferences
 import java.io.File
@@ -113,6 +114,7 @@ object DiagnosticsLog {
                 val preferences = AppPreferences(context)
                 appendLine("上次服务器: ${preferences.lastAddress ?: "-"}")
                 appendLine("播放内核: ${preferences.playerEngine ?: "默认"}")
+                appendLine("解码方式: ${DecoderMode.fromKey(preferences.decoderMode).label}")
                 appendLine(
                     "字幕: " + (if (preferences.subtitlesAutoLoad) "自动加载" else "不自动加载") +
                         " / 优先 " + SubtitlePriority.fromKey(preferences.subtitlePriority).label,

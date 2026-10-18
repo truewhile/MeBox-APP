@@ -64,6 +64,7 @@ import app.mebox.android.core.network.LibraryDto
 import app.mebox.android.core.network.MediaDto
 import app.mebox.android.core.network.SeriesCardDto
 import app.mebox.android.core.network.WatchHistoryDto
+import app.mebox.android.core.player.DecoderMode
 import app.mebox.android.core.player.PlayerEngineKind
 import app.mebox.android.core.player.SubtitlePreference
 import app.mebox.android.core.player.SubtitlePriority
@@ -1152,6 +1153,8 @@ fun TvProfileScreen(
     account: AppUiState.Account,
     engine: PlayerEngineKind,
     onSelectEngine: (PlayerEngineKind) -> Unit,
+    decoderMode: DecoderMode,
+    onSelectDecoderMode: (DecoderMode) -> Unit,
     subtitlePreference: SubtitlePreference,
     onToggleSubtitlesAutoLoad: (Boolean) -> Unit,
     onSelectSubtitlePriority: (SubtitlePriority) -> Unit,
@@ -1319,6 +1322,73 @@ fun TvProfileScreen(
                         )
                     }
                     if (kind == engine) {
+                        Text(
+                            "当前",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+            }
+        }
+
+        item(key = "profile-decoder-title") {
+            Spacer(Modifier.height(8.dp))
+            TvSectionHeader(title = "解码方式", modifier = Modifier.padding(horizontal = 0.dp))
+            Spacer(Modifier.height(2.dp))
+        }
+        items(DecoderMode.entries, key = { "decoder-${it.key}" }) { mode ->
+            TvFocusableSurface(
+                onClick = { onSelectDecoderMode(mode) },
+                modifier = Modifier.fillMaxWidth(),
+                focusedScale = 1.01f,
+                shape = RoundedCornerShape(14.dp),
+            ) { focused ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            if (focused) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.surface
+                            },
+                            RoundedCornerShape(14.dp),
+                        )
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(18.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(
+                                if (mode == decoderMode) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                },
+                            ),
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            mode.label,
+                            color = if (mode == decoderMode) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            mode.description,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    if (mode == decoderMode) {
                         Text(
                             "当前",
                             color = MaterialTheme.colorScheme.primary,

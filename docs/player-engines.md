@@ -29,6 +29,41 @@ FFmpeg 软件解码（`:avcodec-hw=none` + `setHWDecoderEnabled(false, false)`�
 
 只对当前媒体降级，换集或换地址后会重新从硬解开始尝试。
 
+### 起播看门狗
+
+LibVLC 硬解初始化失败时并不总会抛 `EncounteredError`：表现可能是
+`Opening` 之后既不进入 `Playing` 也不报错，播放页一直转圈。现在 `load()`
+后会启动 10 秒看门狗（`STALL_TIMEOUT_MS`）：
+
+- 正常起播由 `Playing` 事件作废；
+- 超时仍未起播，按同一套 `handleOpenFailure` 降级：
+  1. `read=0` → 先改走服务端中转；
+  2. 读到了数据 → 先改软件解码；
+  3. 软解仍不行 → 再试中转；
+  4. 都失败才报错。
+- 用户主动暂停（`userPaused`）不会触发看门狗；内部的 `Stopped`/`Paused`
+  事件也不会作废看门狗，避免 `load()` 里 `stop()` 的异步事件把定时器误杀。
+
+## 解码方式（硬解 / 软解）
+
+「我的 → 播放设置 → 解码方式」可以手动指定内核走硬件还是软件解码，
+保存在 `AppPreferences.decoderMode`，下次起播生效；电视端「我的」也有同一组选项：
+
+- **自动（默认）**：优先硬件解码；失败或起播卡住时按内核规则回退软件解码。
+- **硬件解码**：尽量强制硬件解码，不自动回退软件；适合省电和 4K，
+  但 10-bit H.264（Hi10P）这类编码可能直接失败。
+- **软件解码**：跳过硬件解码器。LibVLC 用内置 FFmpeg；ExoPlayer 用 Android
+  自带的软件解码器（没有 FFmpeg 扩展，Hi10P 仍可能不支持，此时自动换内核
+  会继续走 LibVLC + FFmpeg）。
+
+实现落点：
+
+- ExoPlayer：通过 `DefaultRenderersFactory.setMediaCodecSelector` 过滤
+  `softwareOnly` / `hardwareAccelerated` 的解码器；强制硬件时同时关闭
+  decoder fallback。
+- LibVLC：软件模式使用 `:avcodec-hw=none` + `setHWDecoderEnabled(false, false)`；
+  硬件模式使用 `setHWDecoderEnabled(true, true)`（force），不自动回退。
+
 ## 直连 403 时改走服务端中转
 
 115 直链是绑定 UA 的签名地址。如果客户端直连 CDN 收到 403/404（常见于

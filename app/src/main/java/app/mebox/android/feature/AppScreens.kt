@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.mebox.android.core.network.ServerAddress
 import app.mebox.android.core.network.ServerInfo
+import app.mebox.android.core.player.DecoderMode
 import app.mebox.android.core.player.PlayerEngineKind
 import app.mebox.android.core.player.SubtitlePriority
 import app.mebox.android.core.ui.MeBoxButton
@@ -392,6 +393,7 @@ internal fun ProfileContent(
     onOpenHistory: (() -> Unit)? = null,
 ) {
     val currentEngine by viewModel.playerEngine.collectAsStateWithLifecycle()
+    val decoderMode by viewModel.decoderMode.collectAsStateWithLifecycle()
     val subtitlePreference by viewModel.subtitlePreference.collectAsStateWithLifecycle()
     val exportLogs = rememberLogExport()
     var showLogShare by remember { mutableStateOf(false) }
@@ -526,6 +528,22 @@ internal fun ProfileContent(
                         selected = engine == currentEngine,
                         onClick = { viewModel.selectPlayerEngine(engine) },
                     )
+                }
+                MeBoxDivider()
+                Column(Modifier.padding(top = 8.dp, bottom = 4.dp)) {
+                    Text(
+                        "解码方式",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+                    )
+                    DecoderMode.entries.forEach { mode ->
+                        DecoderModeRow(
+                            mode = mode,
+                            selected = mode == decoderMode,
+                            onClick = { viewModel.selectDecoderMode(mode) },
+                        )
+                    }
                 }
             }
         }
@@ -764,6 +782,49 @@ private fun PlayerEngineRow(
             Spacer(Modifier.height(3.dp))
             Text(
                 engine.description,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(2.dp))
+        }
+    }
+}
+
+@Composable
+private fun DecoderModeRow(
+    mode: DecoderMode,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = onClick,
+            modifier = Modifier.padding(end = 4.dp),
+        )
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(top = 6.dp),
+        ) {
+            Text(
+                mode.label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                mode.description,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

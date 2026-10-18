@@ -55,6 +55,11 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_PLAYER_ENGINE, null)
         set(value) = prefs.edit().putString(KEY_PLAYER_ENGINE, value).apply()
 
+    /** 解码方式的持久化键；具体取值见 DecoderMode.key。 */
+    var decoderMode: String?
+        get() = prefs.getString(KEY_DECODER_MODE, null)
+        set(value) = prefs.edit().putString(KEY_DECODER_MODE, value).apply()
+
     /** 起播时是否自动选中一条字幕。 */
     var subtitlesAutoLoad: Boolean
         get() = prefs.getBoolean(KEY_SUBTITLES_AUTO_LOAD, true)
@@ -97,6 +102,7 @@ class AppPreferences(context: Context) {
         const val KEY_CLEARTEXT = "cleartext_risk_accepted"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_PLAYER_ENGINE = "player_engine"
+        const val KEY_DECODER_MODE = "decoder_mode"
         const val KEY_SUBTITLES_AUTO_LOAD = "subtitles_auto_load"
         const val KEY_SUBTITLE_PRIORITY = "subtitle_priority"
         const val KEY_SERVER_SNAPSHOT_ADDRESS = "server_snapshot_address"

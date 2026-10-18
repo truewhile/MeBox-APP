@@ -96,6 +96,7 @@ fun TvAccountHost(
     val readerState by readerViewModel.state.collectAsStateWithLifecycle()
     val playerEngine by mainViewModel.playerEngine.collectAsStateWithLifecycle()
     val subtitlePreference by mainViewModel.subtitlePreference.collectAsStateWithLifecycle()
+    val decoderMode by mainViewModel.decoderMode.collectAsStateWithLifecycle()
     val context = androidx.compose.ui.platform.LocalContext.current
     val imageLoader = remember(mediaViewModel) { mediaViewModel.createImageLoader(context) }
     DisposableEffect(imageLoader) {
@@ -150,6 +151,7 @@ fun TvAccountHost(
                     danmaku = state.danmaku,
                     engine = playerEngine,
                     subtitlePreference = subtitlePreference,
+                    decoderMode = decoderMode,
                     isTv = true,
                     onEngineSelected = mainViewModel::selectPlayerEngine,
                     onBack = mediaViewModel::back,
@@ -209,6 +211,7 @@ fun TvAccountHost(
                     readerViewModel = readerViewModel,
                     playerEngine = playerEngine,
                     subtitlePreference = subtitlePreference,
+                    decoderMode = decoderMode,
                     onOpenPhoneSearch = { purpose ->
                         phonePurpose = purpose
                     },
@@ -255,6 +258,7 @@ private fun TvMainScaffold(
     readerViewModel: ReaderViewModel,
     playerEngine: app.mebox.android.core.player.PlayerEngineKind,
     subtitlePreference: app.mebox.android.core.player.SubtitlePreference,
+    decoderMode: app.mebox.android.core.player.DecoderMode,
     onOpenPhoneSearch: (PhonePurpose) -> Unit,
     onOpenLogShare: () -> Unit,
 ) {
@@ -396,6 +400,8 @@ private fun TvMainScaffold(
                     subtitlePreference = subtitlePreference,
                     onToggleSubtitlesAutoLoad = mainViewModel::setSubtitlesAutoLoad,
                     onSelectSubtitlePriority = mainViewModel::setSubtitlePriority,
+                    decoderMode = decoderMode,
+                    onSelectDecoderMode = mainViewModel::selectDecoderMode,
                     onOpenFavorites = mediaViewModel::openFavorites,
                     onOpenHistory = mediaViewModel::openHistory,
                     onOpenPhoneInput = { onOpenPhoneSearch(PhonePurpose.MEDIA_SEARCH) },

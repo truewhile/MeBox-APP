@@ -173,6 +173,7 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
     val readerState by readerViewModel.state.collectAsStateWithLifecycle()
     val playerEngine by mainViewModel.playerEngine.collectAsStateWithLifecycle()
     val subtitlePreference by mainViewModel.subtitlePreference.collectAsStateWithLifecycle()
+    val decoderMode by mainViewModel.decoderMode.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val imageLoader = remember(mediaViewModel) { mediaViewModel.createImageLoader(context) }
     DisposableEffect(imageLoader) {
@@ -205,6 +206,7 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
                     danmaku = state.danmaku,
                     engine = playerEngine,
                     subtitlePreference = subtitlePreference,
+                    decoderMode = decoderMode,
                     onEngineSelected = mainViewModel::selectPlayerEngine,
                     onBack = mediaViewModel::back,
                     onProgress = mediaViewModel::reportProgress,

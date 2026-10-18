@@ -68,6 +68,7 @@ import app.mebox.android.core.player.EngineSubtitle
 import app.mebox.android.core.player.EngineTrack
 import app.mebox.android.core.player.EngineTrackType
 import app.mebox.android.core.player.EngineTracks
+import app.mebox.android.core.player.DecoderMode
 import app.mebox.android.core.player.PlayerEngineKind
 import app.mebox.android.core.player.SubtitlePreference
 import app.mebox.android.core.player.SubtitleSelector
@@ -99,6 +100,7 @@ fun PlayerScreen(
     danmaku: DanmakuUiState,
     engine: PlayerEngineKind = PlayerEngineKind.EXO,
     subtitlePreference: SubtitlePreference = SubtitlePreference(),
+    decoderMode: DecoderMode = DecoderMode.AUTO,
     isTv: Boolean = false,
     onEngineSelected: (PlayerEngineKind) -> Unit = {},
     onBack: () -> Unit,
@@ -213,6 +215,7 @@ fun PlayerScreen(
         danmaku = danmaku,
         initialEngine = engine,
         subtitlePreference = subtitlePreference,
+        decoderMode = decoderMode,
         isTv = isTv,
         onEngineSelected = onEngineSelected,
         onBack = onBack,
@@ -266,6 +269,7 @@ private fun PlayerSurface(
     danmaku: DanmakuUiState,
     initialEngine: PlayerEngineKind,
     subtitlePreference: SubtitlePreference,
+    decoderMode: DecoderMode,
     isTv: Boolean,
     onEngineSelected: (PlayerEngineKind) -> Unit,
     onBack: () -> Unit,
@@ -338,13 +342,14 @@ private fun PlayerSurface(
     var lastKnownPosition by remember(initialKey) { mutableLongStateOf(request.startPositionMs) }
 
     // 一个内核实例绑定一集内容；切换内核会重建实例并从当前位置续播。
-    val engine = remember(initialKey, engineKind) {
+    val engine = remember(initialKey, engineKind, decoderMode) {
         // 复用 App 共享的 OkHttp 连接池：起播前刚请求过播放地址，TLS 连接
         // 还是热的，播放器拉流就不用再走一次跨境建连。
         createVideoPlayerEngine(
             kind = engineKind,
             context = context,
             httpClient = (context.applicationContext as? MeBoxApplication)?.container?.httpClient,
+            decoderMode = decoderMode,
         )
     }
 

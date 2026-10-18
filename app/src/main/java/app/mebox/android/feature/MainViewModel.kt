@@ -17,6 +17,7 @@ import app.mebox.android.core.network.ServerAddressError
 import app.mebox.android.core.network.ServerAddressResult
 import app.mebox.android.core.network.ServerCompatibility
 import app.mebox.android.core.network.ServerInfo
+import app.mebox.android.core.player.DecoderMode
 import app.mebox.android.core.player.PlayerEngineKind
 import app.mebox.android.core.player.SubtitlePreference
 import app.mebox.android.core.player.SubtitlePriority
@@ -77,6 +78,15 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
     val playerEngine: StateFlow<PlayerEngineKind> = _playerEngine.asStateFlow()
 
     /**
+     * 解码方式：自动 / 强制硬件 / 强制软件。和内核选择一起保存在本机，
+     * 下次起播时生效；电视端和手机端共用。
+     */
+    private val _decoderMode = MutableStateFlow(
+        DecoderMode.fromKey(container.preferences.decoderMode),
+    )
+    val decoderMode: StateFlow<DecoderMode> = _decoderMode.asStateFlow()
+
+    /**
      * 字幕自动加载与优先语言。播放页起播时按它自动选一条字幕；
      * 结果同样只保存在本机，不上传服务端。
      */
@@ -87,6 +97,12 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         container.preferences.playerEngine = kind.key
         _playerEngine.value = kind
         DiagnosticsLog.i("Play", "切换播放内核为 ${kind.key}")
+    }
+
+    fun selectDecoderMode(mode: DecoderMode) {
+        container.preferences.decoderMode = mode.key
+        _decoderMode.value = mode
+        DiagnosticsLog.i("Play", "切换解码方式为 ${mode.key}")
     }
 
     fun setSubtitlesAutoLoad(enabled: Boolean) {

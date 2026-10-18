@@ -16,8 +16,9 @@ fun createVideoPlayerEngine(
     kind: PlayerEngineKind,
     context: Context,
     httpClient: OkHttpClient? = null,
+    decoderMode: DecoderMode = DecoderMode.AUTO,
 ): VideoPlayerEngine =
     when (kind) {
-        PlayerEngineKind.EXO -> ExoVideoPlayerEngine(context, httpClient)
-        PlayerEngineKind.VLC -> VlcVideoPlayerEngine(context.applicationContext)
+        PlayerEngineKind.EXO -> ExoVideoPlayerEngine(context, httpClient, decoderMode)
+        PlayerEngineKind.VLC -> VlcVideoPlayerEngine(context.applicationContext, decoderMode)
     }
