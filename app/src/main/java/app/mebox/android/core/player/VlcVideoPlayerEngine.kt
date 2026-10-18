@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Log
 import android.widget.FrameLayout
 import app.mebox.android.core.log.DiagnosticsLog
+import app.mebox.android.core.network.APP_USER_AGENT
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
@@ -168,6 +169,9 @@ class VlcVideoPlayerEngine(
             // 先尝试硬件解码，失败时 VLC 会自动回退到 FFmpeg 软解。
             setHWDecoderEnabled(true, false)
             addOption(":network-caching=3000")
+            // 115 直链绑定换取时的 UA：服务端 /api/playback/{id}/info 预置的
+            // 直链是按 App 统一 UA 换的，LibVLC 默认 UA 会被 CDN 403。
+            addOption(":http-user-agent=${APP_USER_AGENT}")
         }
         mediaPlayer.media = libVlcMedia
         libVlcMedia.release()

@@ -1009,7 +1009,11 @@ class MediaViewModel(
             )
 
             // App 只使用直链：不请求 HLS/转码地址，解码全部交给本机。
-            val streamUrl = absolute(infoValue.streamUrl)
+            // 服务端已经换好最终直链时优先用它：播放器直接连 CDN，省掉
+            // /api/stream 的 302 往返（跨境链路上等于一次完整建连）。
+            // 直链是跨域的，绝不能把访问令牌拼进去。
+            val directUrl = infoValue.directUrl?.trim()?.takeIf { it.isNotEmpty() }
+            val streamUrl = directUrl ?: absolute(infoValue.streamUrl)
                 ?.let { PlaybackUrls.withAccessToken(it, accessToken) }
             if (streamUrl == null) {
                 DiagnosticsLog.w("Play", "服务器没有返回直链 ${media.id}")

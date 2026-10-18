@@ -120,6 +120,9 @@ dependencies {
 
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.exoplayer.hls)
+    // 播放器数据源复用 App 的 OkHttp 连接池：起播前 API 已经建好的连接
+    // 可以直接复用，省掉一次 DNS+TCP+TLS（跨境链路上常是数秒）。
+    implementation(libs.media3.datasource.okhttp)
     implementation(libs.media3.session)
     implementation(libs.media3.ui)
 

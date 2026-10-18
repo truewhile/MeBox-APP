@@ -3,6 +3,7 @@ package app.mebox.android.core.player
 import android.content.Context
 import android.graphics.Color
 import android.net.Uri
+import android.widget.FrameLayout
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -18,15 +19,18 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
-import app.mebox.android.BuildConfig
 import app.mebox.android.core.log.DiagnosticsLog
-import android.widget.FrameLayout
+import app.mebox.android.core.network.APP_USER_AGENT
+import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 
 /**
  * 系统解码内核：AndroidX Media3 ExoPlayer。
@@ -37,6 +41,8 @@ import android.widget.FrameLayout
 @OptIn(UnstableApi::class)
 class ExoVideoPlayerEngine(
     private val context: Context,
+    /** App 共享的网络客户端；传入后会复用它的连接池与已有的 TLS 连接。 */
+    private val httpClient: OkHttpClient? = null,
 ) : VideoPlayerEngine {
 
     override val kind: PlayerEngineKind = PlayerEngineKind.EXO
@@ -62,14 +68,7 @@ class ExoVideoPlayerEngine(
         // 播放器本身只持有 Application Context；PlayerView 仍用 Activity Context，
         // 保证 ExoPlayer 的默认样式能解析主题属性。
         val appContext = context.applicationContext
-        val httpFactory = DefaultHttpDataSource.Factory()
-            // MeBox 会把网盘/远程 Emby 的播放重定向到 HTTPS 上游；默认
-            // 不允许跨协议跳转，会表现为 302 播放失败。
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(30_000)
-            .setUserAgent("MeBox-Android/${BuildConfig.VERSION_NAME}")
-        val dataSourceFactory = DefaultDataSource.Factory(appContext, httpFactory)
+        val dataSourceFactory = DefaultDataSource.Factory(appContext, httpDataSourceFactory())
         val renderersFactory = DefaultRenderersFactory(appContext)
             .setEnableDecoderFallback(true)
         ExoPlayer.Builder(appContext, renderersFactory)
@@ -88,6 +87,36 @@ class ExoVideoPlayerEngine(
                 setHandleAudioBecomingNoisy(true)
                 addListener(playerListener)
             }
+    }
+
+    /**
+     * 播放器的 HTTP 数据源。
+     *
+     * 传入共享 OkHttpClient 时复用它（以及它的连接池）：起播前刚请求完播放
+     * 地址，TLS 连接还是热的，播放器打开视频流就不用再走一遍 DNS+TCP+TLS。
+     * 手机到境外服务器的链路上，这一次建连实测常是数秒，正好压在起播上。
+     *
+     * 只去掉磁盘缓存：视频分片不应该写进 48MB 的 HTTP 缓存。
+     */
+    private fun httpDataSourceFactory(): HttpDataSource.Factory {
+        val shared = httpClient
+        if (shared != null) {
+            val playbackClient = shared.newBuilder()
+                .cache(null)
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .build()
+            return OkHttpDataSource.Factory(playbackClient)
+                .setUserAgent(APP_USER_AGENT)
+        }
+        // 没有共享客户端时（测试/独立使用）退回 Media3 自带实现。
+        return DefaultHttpDataSource.Factory()
+            // MeBox 会把网盘/远程 Emby 的播放重定向到 HTTPS 上游；默认
+            // 不允许跨协议跳转，会表现为 302 播放失败。
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(30_000)
+            .setUserAgent(APP_USER_AGENT)
     }
 
     private val playerListener = object : Player.Listener {

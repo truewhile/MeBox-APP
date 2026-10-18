@@ -3,6 +3,7 @@ package app.mebox.android.di
 import android.content.Context
 import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.log.LogShareServer
+import app.mebox.android.core.network.APP_USER_AGENT
 import app.mebox.android.core.network.HttpCachePolicyInterceptor
 import app.mebox.android.core.network.MeBoxApiClient
 import app.mebox.android.core.network.NetTimingListener
@@ -50,8 +51,21 @@ class AppContainer(context: Context) {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        // 手机到境外服务器的链路经常被 NAT/代理提前回收空闲连接，导致下一次
+        // 请求被迫重新 DNS+TCP+TLS（实测常是 5 秒级，正好压在起播路径上）。
+        // HTTP/2 PING 让连接保持活跃，也能提前发现死连接。
+        .pingInterval(20, TimeUnit.SECONDS)
         .cache(Cache(File(appContext.cacheDir, "http-cache"), HTTP_CACHE_BYTES))
         .eventListener(NetTimingListener())
+        // 统一 UA：115 直链绑定换取时的 UA，播放地址解析与播放器拉流必须
+        // 一致，否则信息接口预置的直链在播放时会被 403。
+        .addInterceptor { chain ->
+            chain.proceed(
+                chain.request().newBuilder()
+                    .header("User-Agent", APP_USER_AGENT)
+                    .build(),
+            )
+        }
         // 网络拦截器：在写缓存之前补齐 Cache-Control，应用拦截器做不到
         // 这一点（CacheInterceptor 在网络链更内层）。
         .addNetworkInterceptor(HttpCachePolicyInterceptor())

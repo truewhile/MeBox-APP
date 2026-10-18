@@ -59,6 +59,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import app.mebox.android.MeBoxApplication
 import app.mebox.android.core.media.PlaybackPlan
 import app.mebox.android.core.player.EngineMedia
 import app.mebox.android.core.player.EnginePlaybackState
@@ -322,7 +323,13 @@ private fun PlayerSurface(
 
     // 一个内核实例绑定一集内容；切换内核会重建实例并从当前位置续播。
     val engine = remember(initialKey, engineKind) {
-        createVideoPlayerEngine(engineKind, context)
+        // 复用 App 共享的 OkHttp 连接池：起播前刚请求过播放地址，TLS 连接
+        // 还是热的，播放器拉流就不用再走一次跨境建连。
+        createVideoPlayerEngine(
+            kind = engineKind,
+            context = context,
+            httpClient = (context.applicationContext as? MeBoxApplication)?.container?.httpClient,
+        )
     }
 
     val progressCallback by rememberUpdatedState(onProgress)

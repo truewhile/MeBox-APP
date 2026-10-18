@@ -109,6 +109,14 @@ data class ContinueWatchingDto(
 data class PlaybackInfoDto(
     val media: MediaDto? = null,
     @SerialName("stream_url") val streamUrl: String = "",
+    /**
+     * 服务端预置换好的最终直链（115/网盘 CDN）。
+     *
+     * 有值时播放器可以直接连 CDN，省掉 `/api/stream` 的 302 往返——在高延迟
+     * 链路上那是一次完整的 DNS+TCP+TLS。服务端无法预换链（本地文件、需要
+     * 服务端加头的网盘）时不返回该字段，客户端继续用 [streamUrl]。
+     */
+    @SerialName("direct_url") val directUrl: String? = null,
     /** 服务端仍会返回 HLS 地址供网页/第三方客户端使用；App 忽略它，只走直链。 */
     @SerialName("hls_url") val hlsUrl: String = "",
     /**
