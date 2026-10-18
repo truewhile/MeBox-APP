@@ -95,6 +95,9 @@ class VlcVideoPlayerEngine(
     /** 直连被 CDN 拒绝后是否已经尝试过服务端中转，避免来回重试。 */
     private var proxyAttempted = false
 
+    /** 是否已经试过把 https 直链降级成 http；每次换媒体重置。 */
+    private var httpAttempted = false
+
     /**
      * 起播看门狗：LibVLC 在硬解初始化失败时可能既不报错也不进入 Playing，
      * 表现为一直转圈。超过 [STALL_TIMEOUT_MS] 仍未起播就按失败处理。
@@ -113,6 +116,7 @@ class VlcVideoPlayerEngine(
             if (released) return@setEventListener
             when (event.type) {
                 MediaPlayer.Event.Opening -> {
+                    DiagnosticsLog.d("Player", "LibVLC 事件 Opening")
                     listener?.onBufferingChanged(true)
                     listener?.onPlaybackStateChanged(EnginePlaybackState.BUFFERING)
                 }
@@ -127,6 +131,7 @@ class VlcVideoPlayerEngine(
 
                 MediaPlayer.Event.Playing -> {
                     playing = true
+                    DiagnosticsLog.i("Player", "LibVLC 事件 Playing")
                     // 已起播，作废还在等待的起播看门狗。
                     stallToken++
                     ended = false
@@ -167,6 +172,7 @@ class VlcVideoPlayerEngine(
 
                 MediaPlayer.Event.EncounteredError -> {
                     val stats = runCatching { mediaPlayer.media?.stats }.getOrNull()
+                    DiagnosticsLog.w("Player", "LibVLC 事件 EncounteredError")
                     handleOpenFailure(pendingMedia, stats, "LibVLC 播放失败")
                 }
 
@@ -175,7 +181,10 @@ class VlcVideoPlayerEngine(
                 MediaPlayer.Event.ESSelected,
                 // 视频输出建立后才知道画面尺寸：拿到宽高比重新算一次画面框。
                 MediaPlayer.Event.Vout,
-                -> refreshTracks()
+                -> {
+                    DiagnosticsLog.d("Player", "LibVLC 事件 type=${event.type}")
+                    refreshTracks()
+                }
 
                 MediaPlayer.Event.LengthChanged -> {
                     listener?.onPlaybackStateChanged(EnginePlaybackState.READY)
@@ -229,6 +238,7 @@ class VlcVideoPlayerEngine(
         }
         if (media.mediaId != pendingMedia?.mediaId) {
             proxyAttempted = false
+            httpAttempted = false
         }
         stallToken++
         pendingMedia = media
@@ -355,6 +365,12 @@ class VlcVideoPlayerEngine(
         // 建连还是 HTTP 状态码的问题。
         dumpVlcLog(reason, detail)
         when {
+            // 115 直链同时支持 http/https。个别网络（运营商侧）会把 LibVLC
+            // 这种非浏览器 TLS 握手卡住，OkHttp/ExoPlayer 却正常；降到明文
+            // http 往往能直接绕开，先试一次再谈中转。
+            noData && !httpAttempted && media != null && httpVariantOf(media.url) != null -> {
+                retryWithHttp(media, reason, detail)
+            }
             noData && !proxyAttempted && media?.proxyUrl != null -> {
                 switchToProxy(media, reason, detail)
             }
@@ -373,6 +389,28 @@ class VlcVideoPlayerEngine(
                 )
             }
         }
+    }
+
+    /** `https://` 地址对应的明文地址；本来就是 http 或不是直链时返回 null。 */
+    private fun httpVariantOf(url: String): String? =
+        if (url.startsWith("https://", ignoreCase = true)) {
+            "http://" + url.substring("https://".length)
+        } else {
+            null
+        }
+
+    private fun retryWithHttp(media: EngineMedia, reason: String, detail: String) {
+        val httpUrl = httpVariantOf(media.url) ?: return
+        httpAttempted = true
+        DiagnosticsLog.w("Player", "$reason：改用 http 重试 $detail")
+        val resume = positionMs().takeIf { it > 0L } ?: pendingStartMs
+        val plain = media.copy(url = httpUrl)
+        pendingMedia = plain
+        playing = false
+        listener?.onBufferingChanged(true)
+        listener?.onPlaybackStateChanged(EnginePlaybackState.BUFFERING)
+        listener?.onMediaReloaded()
+        mainHandler.post { if (!released) load(plain, resume, pendingAutoPlay) }
     }
 
     private fun switchToProxy(media: EngineMedia, reason: String, detail: String) {
@@ -644,21 +682,33 @@ class VlcVideoPlayerEngine(
     }
 
     /**
-     * 把 VLC 日志的尾部写进诊断日志。
+     * 把 VLC 自己的日志写进诊断日志。
      *
-     * `--verbose=2` 里能直接看到 `[http]`/`[access]` 模块的报错（DNS 失败、
-     * 建连超时、HTTP 403 等），比 `read=0` 有意义得多；只取最后 16 KB。
+     * 文件日志（`--file-logging`）在 VLC 运行期间不一定刷盘，实测拿不到内容；
+     * 这里直接从 logcat 读本进程的日志——VLC 的 native 日志走
+     * `__android_log_print`，tag 是 `VLC*`。App 只能读到自己 UID 的记录，
+     * 正好覆盖本进程的 VLC 输出。
      */
     private fun dumpVlcLog(reason: String, detail: String) {
-        runCatching {
-            if (!vlcLogFile.exists()) return
-            val bytes = vlcLogFile.readBytes()
-            if (bytes.isEmpty()) return
-            val from = (bytes.size - VLC_LOG_TAIL_BYTES).coerceAtLeast(0)
-            val tail = String(bytes, from, bytes.size - from, Charsets.UTF_8)
-            DiagnosticsLog.w("VlcLog", "$reason $detail\n$tail")
-            truncateVlcLog()
+        val lines = runCatching {
+            val process = ProcessBuilder("logcat", "-d", "-v", "brief", "-t", "8000")
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            process.waitFor()
+            output.lineSequence()
+                .filter { it.contains("VLC") || it.contains("libvlc") }
+                .toList()
+        }.getOrNull().orEmpty()
+        truncateVlcLog()
+        if (lines.isEmpty()) {
+            DiagnosticsLog.w("VlcLog", "$reason $detail（未取到 VLC 日志）")
+            return
         }
+        val tail = lines.takeLast(VLC_LOG_MAX_LINES)
+            .joinToString("\n")
+            .take(VLC_LOG_MAX_CHARS)
+        DiagnosticsLog.w("VlcLog", "$reason $detail\n$tail")
     }
 
     private companion object {
@@ -667,7 +717,8 @@ class VlcVideoPlayerEngine(
         /** 起播超过这个时间还没进入 Playing，就按打开失败处理。 */
         const val STALL_TIMEOUT_MS = 10_000L
 
-        /** 失败时最多摘取这么多 VLC 日志（约 16 KB）。 */
-        const val VLC_LOG_TAIL_BYTES = 16 * 1024
+        /** 失败时最多摘取这么多行 VLC 日志（约 16 KB）。 */
+        const val VLC_LOG_MAX_LINES = 250
+        const val VLC_LOG_MAX_CHARS = 16 * 1024
     }
 }
