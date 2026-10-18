@@ -12,6 +12,7 @@ import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.media.SubtitleLabel
 import app.mebox.android.core.network.APP_USER_AGENT
 import java.io.File
+import java.net.InetAddress
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
@@ -55,6 +56,10 @@ class VlcVideoPlayerEngine(
             // 硬解由每条 Media 单独控制：失败后可以只对这一条改走软解，
             // 不要把全局配置钉死在硬解或软解上。
             "--network-caching=3000",
+            // 强制 IPv4。移动数据下（尤其是 IPv6 优先 / DNS64 的运营商）经常
+            // 解析出一个实际不通的 IPv6 地址：OkHttp 有 Happy Eyeballs 会回落
+            // 到 IPv4，LibVLC 会一直等这个地址，表现就是 10 秒 read=0。
+            "--ipv4",
             "--verbose=2",
             "--file-logging",
             "--logfile=${vlcLogFile.absolutePath}",
@@ -363,6 +368,7 @@ class VlcVideoPlayerEngine(
             "decoded=${stats?.decodedVideo ?: -1}"
         // 把 VLC 自己的日志一起留下来：网络失败时只有它能说明是 DNS、
         // 建连还是 HTTP 状态码的问题。
+        logDnsAddresses(media?.url)
         dumpVlcLog(reason, detail)
         when {
             // 115 直链同时支持 http/https。个别网络（运营商侧）会把 LibVLC
@@ -679,6 +685,18 @@ class VlcVideoPlayerEngine(
     /** 清空 VLC 日志，避免 verbose 日志无限增长。 */
     private fun truncateVlcLog() {
         runCatching { if (vlcLogFile.length() > 0) vlcLogFile.writeText("") }
+    }
+
+    /** 记录媒体主机的解析结果（含 IPv6），用于确认是否踩到不通的地址。 */
+    private fun logDnsAddresses(url: String?) {
+        val host = url?.let { mediaHost(it) }.orEmpty()
+        if (host.isEmpty()) return
+        Thread {
+            val resolved = runCatching {
+                InetAddress.getAllByName(host).joinToString(", ") { it.hostAddress ?: "?" }
+            }.getOrElse { "解析失败：${it.javaClass.simpleName}" }
+            DiagnosticsLog.w("Player", "LibVLC DNS $host → $resolved")
+        }.start()
     }
 
     /**
