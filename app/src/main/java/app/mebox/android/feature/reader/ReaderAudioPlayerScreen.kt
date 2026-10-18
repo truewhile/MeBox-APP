@@ -70,6 +70,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -109,7 +112,9 @@ internal fun AudiobookPlayerScreen(
     origin: String,
     viewModel: ReaderViewModel,
 ) {
-    val audio = state.audio
+    val audio = state.audio.takeIf {
+        it.bookId == state.book?.id && it.chapterIndex == state.chapterIndex
+    } ?: ReaderAudioState()
     val book = state.book
     var speedSheetOpen by remember { mutableStateOf(false) }
     var timerSheetOpen by remember { mutableStateOf(false) }
@@ -328,7 +333,12 @@ private fun PlayerTopBar(
         }
         Column(Modifier.weight(1f)) {
             Text(
-                "正在播放",
+                when (state.audioPlayerFeedback().phase) {
+                    AudioPlayerPhase.PREPARING, AudioPlayerPhase.BUFFERING -> "正在加载"
+                    AudioPlayerPhase.PLAYING -> "正在播放"
+                    AudioPlayerPhase.FAILED -> "播放失败"
+                    AudioPlayerPhase.PAUSED -> "有声书"
+                },
                 color = PlayerSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
@@ -651,8 +661,7 @@ private fun AudioControls(
             enabled = state.hasPreviousChapter,
         )
         PlayPauseButton(
-            playing = audio.playing,
-            loading = audio.loading,
+            feedback = state.audioPlayerFeedback(),
             onClick = onPlay,
         )
         ControlIcon(
@@ -731,8 +740,7 @@ private fun SpeedControl(speed: Float, onClick: () -> Unit) {
 
 @Composable
 private fun PlayPauseButton(
-    playing: Boolean,
-    loading: Boolean,
+    feedback: AudioPlayerFeedback,
     onClick: () -> Unit,
 ) {
     Box(
@@ -745,30 +753,39 @@ private fun PlayPauseButton(
             color = PlayerText,
             modifier = Modifier
                 .size(64.dp)
-                .shadow(12.dp, CircleShape, ambientColor = Color.Black, spotColor = Color.Black),
+                .shadow(12.dp, CircleShape, ambientColor = Color.Black, spotColor = Color.Black)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = feedback.actionDescription
+                    stateDescription = feedback.statusMessage
+                },
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                    contentDescription = if (playing) "暂停" else "播放",
-                    tint = PlayerBackground,
-                    modifier = if (playing) {
-                        Modifier.size(34.dp)
-                    } else {
-                        // 右指三角形的视觉重心偏左，向右补 2dp 才看起来居中。
-                        Modifier
-                            .size(34.dp)
-                            .offset(x = 2.dp)
-                    },
-                )
+                if (feedback.loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(32.dp),
+                        strokeWidth = 3.dp,
+                        color = PlayerBackground,
+                    )
+                    // 加载中仍可暂停/继续，角标明确下一次点击的动作。
+                    Icon(
+                        if (feedback.playRequested) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = null,
+                        tint = PlayerBackground,
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(7.dp).size(14.dp),
+                    )
+                } else {
+                    Icon(
+                        if (feedback.playRequested) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = null,
+                        tint = PlayerBackground,
+                        modifier = if (feedback.playRequested) {
+                            Modifier.size(34.dp)
+                        } else {
+                            Modifier.size(34.dp).offset(x = 2.dp)
+                        },
+                    )
+                }
             }
-        }
-        if (loading) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(70.dp),
-                strokeWidth = 2.dp,
-                color = PlayerAccent,
-            )
         }
     }
 }
@@ -785,7 +802,8 @@ private fun PlayerFooter(
             .padding(top = 8.dp, bottom = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        val error = audio.error
+        val feedback = state.audioPlayerFeedback()
+        val error = feedback.error
         when {
             error != null -> {
                 Text(
@@ -794,13 +812,16 @@ private fun PlayerFooter(
                     style = MaterialTheme.typography.labelSmall,
                     textAlign = TextAlign.Center,
                 )
+                TextButton(onClick = viewModel::toggleAudio) {
+                    Text("重试播放", color = PlayerAccent, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            feedback.loading -> {
                 Text(
-                    "点击关闭提示",
-                    color = PlayerSecondary,
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier
-                        .padding(top = 4.dp)
-                        .clickable { viewModel.clearAudioMessages() },
+                    feedback.statusMessage,
+                    color = PlayerAccent,
+                    style = MaterialTheme.typography.labelMedium,
+                    textAlign = TextAlign.Center,
                 )
             }
             state.cacheBusy -> {
@@ -828,7 +849,7 @@ private fun PlayerFooter(
             }
             else -> {
                 Text(
-                    "后台播放中 · 通知栏和锁屏可控制",
+                    feedback.statusMessage,
                     color = PlayerSecondary.copy(alpha = 0.8f),
                     style = MaterialTheme.typography.labelSmall,
                     textAlign = TextAlign.Center,

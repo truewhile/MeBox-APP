@@ -113,6 +113,8 @@ data class ReaderUiState(
 
     // 听书
     val audio: ReaderAudioState = ReaderAudioState(),
+    /** null 表示沿用当前播放意图；false 表示用户明确要求准备后暂停。 */
+    val audioPlayRequested: Boolean? = null,
     val audioCreditsOpen: Boolean = false,
     val audioCreditsSaving: Boolean = false,
     val audioCreditsError: String? = null,
@@ -224,7 +226,6 @@ class ReaderViewModel(
     private var loadToken = 0L
     private var currentPage = 0
     private var styleTouched = false
-    private var requestAudioPlay = false
 
     init {
         preferences.load(scope)?.let { cached ->
@@ -236,6 +237,7 @@ class ReaderViewModel(
                     val sameBook = current.book?.id == audioState.bookId
                     val chapterIndex = if (
                         sameBook &&
+                        !current.chapterLoading &&
                         current.content?.type == "audio" &&
                         audioState.chapterIndex >= 0
                     ) {
@@ -892,6 +894,7 @@ class ReaderViewModel(
                 browserPage = null,
                 cacheNotice = null,
                 cacheProgress = "",
+                audioPlayRequested = null,
                 audioCreditsOpen = false,
                 audioCreditsError = null,
             )
@@ -1116,8 +1119,8 @@ class ReaderViewModel(
                 audioState.chapterIndex == index &&
                 (audioState.playing || audioState.loading)
             if (!alreadyActive) {
-                val autoPlay = requestAudioPlay || (sameBook && audioState.playing)
-                requestAudioPlay = false
+                val autoPlay = _state.value.audioPlayRequested ?: (sameBook && audioState.playWhenReady)
+                _state.update { it.copy(audioPlayRequested = null) }
                 audio.startChapter(
                     book = book,
                     chapters = _state.value.chapters,
@@ -1133,7 +1136,12 @@ class ReaderViewModel(
                     content = content,
                 )
             } else {
-                requestAudioPlay = false
+                when (_state.value.audioPlayRequested) {
+                    true -> if (!audioState.playWhenReady) audio.play()
+                    false -> audio.pause()
+                    null -> Unit
+                }
+                _state.update { it.copy(audioPlayRequested = null) }
             }
         } else if (audio.state.value.bookId == book.id) {
             // 同一本书从音频章节切到文本/漫画时停止音频，避免两个内容同时继续。
@@ -1164,12 +1172,28 @@ class ReaderViewModel(
         val current = _state.value
         val book = current.book ?: return
         val audioState = audio.state.value
-        if (audioState.bookId == book.id && audioState.chapterIndex == current.chapterIndex) {
+        if (audioState.bookId == book.id && audioState.chapterIndex == current.chapterIndex &&
+            current.chapterError == null
+        ) {
             audio.toggle()
+            _state.update { it.copy(audioPlayRequested = null) }
+        } else if (current.chapterLoading) {
+            // 只改变加载完成后的意图，不取消并重启正在执行的目录/音轨请求。
+            val requested = !current.audioPlayerFeedback().playRequested
+            _state.update { it.copy(audioPlayRequested = requested) }
+            if (!requested && audioState.bookId == book.id) audio.pause()
         } else {
-            // 章节还没交给引擎（例如刚打开或刚切章）：加载后自动开始播放。
-            requestAudioPlay = true
-            loadChapterContent(current.chapterIndex, loadToken, current.restorePage)
+            _state.update { it.copy(audioPlayRequested = true) }
+            if (current.chapters.isEmpty()) {
+                loadToken += 1
+                val token = loadToken
+                _state.update { it.copy(chapterLoading = true, chapterError = null) }
+                viewModelScope.launch { openBookInternal(book, token) }
+            } else if (current.content?.type == "audio") {
+                applyChapterContent(book, current.chapterIndex, current.content, offline = false)
+            } else {
+                loadChapterContent(current.chapterIndex, loadToken, current.restorePage)
+            }
         }
     }
 
@@ -1944,6 +1968,7 @@ class ReaderViewModel(
                 browserPage = null,
                 cacheNotice = null,
                 cacheProgress = "",
+                audioPlayRequested = null,
                 audioCreditsOpen = false,
                 audioCreditsError = null,
             )

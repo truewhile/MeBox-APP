@@ -106,7 +106,7 @@ internal fun ReaderReadingScreen(
     viewModel: ReaderViewModel,
 ) {
     val palette = readerPalette(state.style)
-    val audioMode = state.content?.type == "audio"
+    val audioMode = state.audioPlayerVisible
     val sheetPalette = if (audioMode) AudioPlayerPalette else palette
     val configuration = LocalConfiguration.current
     val view = LocalView.current
