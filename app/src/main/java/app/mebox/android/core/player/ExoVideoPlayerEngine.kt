@@ -82,6 +82,9 @@ class ExoVideoPlayerEngine(
     /** 直连被 CDN 拒绝后是否已经尝试过服务端中转，避免来回重试。 */
     private var proxyAttempted = false
 
+    /** 直连被 CDN 拒绝后是否已经用「服务端重新换链」的地址重试过。 */
+    private var refreshAttempted = false
+
     /** 轨道 id -> ExoPlayer 的覆盖规则；`onTracksChanged` 时重建。 */
     private var overrides: Map<String, TrackSelectionOverride> = emptyMap()
 
@@ -153,8 +156,25 @@ class ExoVideoPlayerEngine(
     private val playerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             val media = pendingMedia
-            // CDN 直连被拒（403/404 等）时改走服务端同源转发：服务端到 CDN
-            // 的线路通常没问题，客户端只需要连自己的 MeBox 服务器。
+            // 直链被 CDN 拒绝（403/404）时的第一层兜底：服务端丢掉过期的云盘
+            // 直链缓存、重新换链后 302 到新直链（115 直链只有 30 分钟寿命）。
+            // 播放器仍然直连 CDN，不像中转那样把整条流压回服务器。
+            if (!refreshAttempted &&
+                media?.refreshUrl != null &&
+                isDirectPlaybackFailure(error.errorCode)
+            ) {
+                refreshAttempted = true
+                val resume = player.currentPosition.takeIf { it > 0L } ?: pendingStartMs
+                DiagnosticsLog.w(
+                    "Player",
+                    "ExoPlayer 直连返回 ${error.errorCodeName}，改走服务端重新换链",
+                )
+                listener?.onMediaReloaded()
+                setMedia(media.copy(url = media.refreshUrl, refreshUrl = null), resume, intent.playWhenReady)
+                return
+            }
+            // 换链仍被拒（服务端也拿不到新直链）时改走服务端同源转发：服务端到
+            // CDN 的线路通常没问题，客户端只需要连自己的 MeBox 服务器。
             if (!proxyAttempted &&
                 media?.proxyUrl != null &&
                 isDirectPlaybackFailure(error.errorCode)
@@ -286,7 +306,10 @@ class ExoVideoPlayerEngine(
 
     override fun setMedia(media: EngineMedia, startPositionMs: Long, autoPlay: Boolean) {
         // 换集时重置中转尝试；同一集内部切换到中转地址不会重置，避免循环。
-        if (media.mediaId != pendingMedia?.mediaId) proxyAttempted = false
+        if (media.mediaId != pendingMedia?.mediaId) {
+            proxyAttempted = false
+            refreshAttempted = false
+        }
         pendingMedia = media
         pendingStartMs = startPositionMs.coerceAtLeast(0L)
         intent.onMediaLoaded(autoPlay)

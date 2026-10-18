@@ -136,6 +136,9 @@ class VlcVideoPlayerEngine(
     /** 直连被 CDN 拒绝后是否已经尝试过服务端中转，避免来回重试。 */
     private var proxyAttempted = false
 
+    /** 直连被 CDN 拒绝后是否已经用「服务端重新换链」的地址重试过。 */
+    private var refreshAttempted = false
+
     /** 是否已经试过把 https 直链降级成 http；每次换媒体重置。 */
     private var httpAttempted = false
 
@@ -290,6 +293,7 @@ class VlcVideoPlayerEngine(
         }
         if (media.mediaId != pendingMedia?.mediaId) {
             proxyAttempted = false
+            refreshAttempted = false
             httpAttempted = false
         }
         stallToken++
@@ -426,6 +430,11 @@ class VlcVideoPlayerEngine(
             noData && !httpAttempted && media != null && httpVariantOf(media.url) != null -> {
                 retryWithHttp(media, reason, detail)
             }
+            // 一个字节都没读到、且手上是服务端发的直链时，先让服务端重新换链
+            // （115 直链 30 分钟过期，403 是典型表现），比直接压到服务器中转省带宽。
+            noData && !refreshAttempted && media?.refreshUrl != null -> {
+                retryWithFreshLink(media, reason, detail)
+            }
             noData && !proxyAttempted && media?.proxyUrl != null -> {
                 switchToProxy(media, reason, detail)
             }
@@ -469,6 +478,24 @@ class VlcVideoPlayerEngine(
         listener?.onPlaybackStateChanged(EnginePlaybackState.BUFFERING)
         listener?.onMediaReloaded()
         postReload(plain, resume)
+    }
+
+    /**
+     * 用「服务端重新换链」的地址重试：请求 /api/stream/{id}?refresh=1，服务端
+     * 丢掉过期的云盘直链缓存、重新换链后 302 到新直链，VLC 跟随 302 仍然直连 CDN。
+     */
+    private fun retryWithFreshLink(media: EngineMedia, reason: String, detail: String) {
+        val refreshUrl = media.refreshUrl ?: return
+        refreshAttempted = true
+        DiagnosticsLog.w("Player", "$reason：改走服务端重新换链 $detail")
+        val resume = resumeTargetMs()
+        val refreshed = media.copy(url = refreshUrl, refreshUrl = null)
+        pendingMedia = refreshed
+        playing = false
+        listener?.onBufferingChanged(true)
+        listener?.onPlaybackStateChanged(EnginePlaybackState.BUFFERING)
+        listener?.onMediaReloaded()
+        postReload(refreshed, resume)
     }
 
     private fun switchToProxy(media: EngineMedia, reason: String, detail: String) {

@@ -38,6 +38,11 @@ data class EngineMedia(
     val url: String,
     /** 直连被 CDN 403/404 时改走同一节目的服务端同源转发地址。 */
     val proxyUrl: String? = null,
+    /**
+     * 直连被 CDN 403/404 时先试这一层：服务端丢掉过期的云盘直链缓存、重新换链
+     * 后再 302 到新直链，播放器仍然直连 CDN。为空表示服务端条目不支持。
+     */
+    val refreshUrl: String? = null,
     val subtitles: List<EngineSubtitle> = emptyList(),
     /**
      * 字幕自动加载与优先语言。LibVLC 在装载媒体时据此选择默认字幕；

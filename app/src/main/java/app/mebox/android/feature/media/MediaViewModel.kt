@@ -98,6 +98,13 @@ data class PlaybackRequest(
      * （`/api/stream/{id}?token=...&proxy=1`）。为空表示没有可用的中转。
      */
     val proxyUrl: String? = null,
+    /**
+     * 直连被 CDN 403/404 时的第一层兜底：让服务端丢掉过期直链缓存、重新换链
+     * 后再 302 到新直链（`/api/stream/{id}?token=...&refresh=1`）。115 直链只有
+     * 30 分钟有效期，换链比把整条流转发回服务器更省带宽，也更接近 Emby 客户端
+     * 的「一次 302 拿直链」行为。
+     */
+    val refreshUrl: String? = null,
     val startPositionMs: Long,
     val durationMs: Long,
     val subtitles: List<PlaybackSubtitle> = emptyList(),
@@ -1035,6 +1042,9 @@ class MediaViewModel(
             // 直连被 CDN 403 时的兜底：让服务端把同一条流转发给客户端。
             // 只有走 /api/stream 的服务器条目才有这个入口。
             val proxyUrl = serverStreamUrl?.let { PlaybackUrls.withSameOriginProxy(it) }
+            // 比中转更优先的一层：服务端重新换链后 302 到新直链，客户端仍然
+            // 直连 CDN。115 直链 30 分钟就过期，缓存里的地址失效时用它兜底。
+            val refreshUrl = serverStreamUrl?.let { PlaybackUrls.withFreshLink(it) }
 
             // 只做能力提示，不再据此切换服务端转码。
             val decodeAssessment = withContext(Dispatchers.Default) {
@@ -1069,6 +1079,7 @@ class MediaViewModel(
                         subtitle = media.displayEpisode.ifBlank { media.episodeTitle }.ifBlank { null },
                         streamUrl = streamUrl,
                         proxyUrl = proxyUrl,
+                        refreshUrl = refreshUrl,
                         startPositionMs = start,
                         durationMs = duration,
                         subtitles = subtitles,

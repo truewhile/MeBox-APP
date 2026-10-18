@@ -33,6 +33,17 @@ object PlaybackUrls {
         url + (if (url.contains('?')) "&" else "?") + "proxy=1"
 
     /**
+     * 让服务端丢掉云盘直链缓存、重新换链后再 302 到新直链（`refresh=1`）。
+     *
+     * 115 直链自带 30 分钟有效期，客户端手上的地址失效时 CDN 会回 403。
+     * 这一步和 Emby 客户端拿到的播放地址行为一致：仍然是「一次 302 拿到
+     * 直链、之后直连 CDN」，但换的是刚签发的新链，不需要把整条流压到服务器。
+     * 只作为直连失败后的第一层兜底，比 [withSameOriginProxy] 更省服务器带宽。
+     */
+    fun withFreshLink(url: String): String =
+        url + (if (url.contains('?')) "&" else "?") + "refresh=1"
+
+    /**
      * 字幕加载地址。
      *
      * `/api/subtitles/:id` 需要鉴权；ExoPlayer 的字幕请求无法附加自定义头，

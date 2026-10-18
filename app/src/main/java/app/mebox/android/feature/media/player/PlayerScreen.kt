@@ -1507,6 +1507,7 @@ private fun PlaybackRequest.toEngineMedia(
     title = title,
     url = streamUrl,
     proxyUrl = proxyUrl,
+    refreshUrl = refreshUrl,
     subtitles = subtitles
         .filter { it.url.isNotBlank() }
         .map { subtitle ->

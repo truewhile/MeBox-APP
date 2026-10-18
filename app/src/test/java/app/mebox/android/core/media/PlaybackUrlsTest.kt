@@ -53,6 +53,22 @@ class PlaybackUrlsTest {
     }
 
     @Test
+    fun `fresh link keeps existing query parameters`() {
+        assertEquals(
+            "http://host/api/stream/m1?token=abc&profile_id=p1&refresh=1",
+            PlaybackUrls.withFreshLink("http://host/api/stream/m1?token=abc&profile_id=p1"),
+        )
+    }
+
+    @Test
+    fun `fresh link starts the query when missing`() {
+        assertEquals(
+            "http://host/api/stream/m1?refresh=1",
+            PlaybackUrls.withFreshLink("http://host/api/stream/m1"),
+        )
+    }
+
+    @Test
     fun `subtitle url encodes path and carries the access token`() {
         val result = PlaybackUrls.subtitleUrl(
             origin = "http://host:8080/",
