@@ -23,6 +23,16 @@ object PlaybackUrls {
     }
 
     /**
+     * 把 `/api/stream/{id}` 改成服务端同源转发模式（`proxy=1`）。
+     *
+     * 网盘直链被 CDN 403（UA/地区/防盗链策略变化）时，由服务端代为拉流：
+     * 服务端到 CDN 的线路通常可用，客户端只面对自己的 MeBox 服务器。
+     * 只作为直连失败后的兜底，正常播放仍走直连以节省服务器带宽。
+     */
+    fun withSameOriginProxy(url: String): String =
+        url + (if (url.contains('?')) "&" else "?") + "proxy=1"
+
+    /**
      * 字幕加载地址。
      *
      * `/api/subtitles/:id` 需要鉴权；ExoPlayer 的字幕请求无法附加自定义头，

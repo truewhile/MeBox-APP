@@ -3,6 +3,8 @@ package app.mebox.android.core.player
 import android.content.Context
 import android.graphics.Color
 import android.net.Uri
+import android.view.View
+import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
@@ -16,6 +18,7 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
@@ -27,6 +30,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.SubtitleView
 import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.network.APP_USER_AGENT
 import okhttp3.OkHttpClient
@@ -51,12 +55,21 @@ class ExoVideoPlayerEngine(
 
     private var host: FrameLayout? = null
     private var playerView: PlayerView? = null
+
+    /**
+     * 自带的字幕视图。Media3 的 `PlayerView` 对同一时刻的多条 cue 是逐条绘制，
+     * 双语字幕会重叠，所以这里用额外的 [SubtitleView] 接管渲染。
+     */
+    private var subtitleOverlay: SubtitleView? = null
     private var resizeMode: EngineResizeMode = EngineResizeMode.FIT
     private var pendingMedia: EngineMedia? = null
     private var pendingStartMs: Long = 0L
     private var pendingAutoPlay: Boolean = true
     private var released: Boolean = false
     private var mediaLoaded: Boolean = false
+
+    /** 直连被 CDN 拒绝后是否已经尝试过服务端中转，避免来回重试。 */
+    private var proxyAttempted = false
 
     /** 轨道 id -> ExoPlayer 的覆盖规则；`onTracksChanged` 时重建。 */
     private var overrides: Map<String, TrackSelectionOverride> = emptyMap()
@@ -121,6 +134,23 @@ class ExoVideoPlayerEngine(
 
     private val playerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
+            val media = pendingMedia
+            // CDN 直连被拒（403/404 等）时改走服务端同源转发：服务端到 CDN
+            // 的线路通常没问题，客户端只需要连自己的 MeBox 服务器。
+            if (!proxyAttempted &&
+                media?.proxyUrl != null &&
+                isDirectPlaybackFailure(error.errorCode)
+            ) {
+                proxyAttempted = true
+                val resume = player.currentPosition.takeIf { it > 0L } ?: pendingStartMs
+                DiagnosticsLog.w(
+                    "Player",
+                    "ExoPlayer 直连返回 ${error.errorCodeName}，改走服务端中转",
+                )
+                listener?.onMediaReloaded()
+                setMedia(media.copy(url = media.proxyUrl, proxyUrl = null), resume, pendingAutoPlay)
+                return
+            }
             DiagnosticsLog.e(
                 "Player",
                 "ExoPlayer 播放失败 ${error.errorCodeName} (${error.errorCode})",
@@ -161,6 +191,12 @@ class ExoVideoPlayerEngine(
         override fun onTracksChanged(tracks: Tracks) {
             publishTracks(tracks)
         }
+
+        override fun onCues(cueGroup: CueGroup) {
+            // 双语字幕会把中文、日文各下发成一条 cue，同一位置逐条绘制会重叠；
+            // 合并成一条多行 cue 后再交给 SubtitleView 排版。
+            subtitleOverlay?.setCues(stackSubtitleCues(cueGroup.cues))
+        }
     }
 
     override fun attach(host: FrameLayout) {
@@ -170,25 +206,68 @@ class ExoVideoPlayerEngine(
             useController = false
             keepScreenOn = true
             setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
-            subtitleView?.setStyle(
-                CaptionStyleCompat(
-                    Color.WHITE,
-                    Color.TRANSPARENT,
-                    Color.TRANSPARENT,
-                    CaptionStyleCompat.EDGE_TYPE_OUTLINE,
-                    Color.BLACK,
-                    null,
-                ),
-            )
             playerView = this
         }
+        mountSubtitleOverlay(view)
         view.player = player
         view.resizeMode = resizeMode.toExoValue()
         host.attachPlayerView(view)
         startIfReady()
     }
 
+    /**
+     * 用自建的字幕视图替换 `PlayerView` 自带的那一个。
+     *
+     * 自带视图的 cue 由 `PlayerView` 内部直接写入，外部无法干预；这里把它隐藏，
+     * 再在同一个父容器（视频画面框）里放一个新的 [SubtitleView]，由
+     * [playerListener] 的 `onCues` 喂入合并后的 cue。新视图沿用相同的布局参数，
+     * 字号、底部留白和宽高比行为与原来一致。
+     */
+    private fun mountSubtitleOverlay(view: PlayerView) {
+        if (subtitleOverlay != null) return
+        val builtIn = view.subtitleView ?: return
+        val parent = builtIn.parent as? ViewGroup ?: view
+        val params = builtIn.layoutParams
+        val layoutParams = if (params != null) {
+            FrameLayout.LayoutParams(params.width, params.height)
+        } else {
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            )
+        }
+        val overlay = SubtitleView(context).apply {
+            // 与 PlayerView 自带字幕视图一致：先套系统字幕字号/样式偏好，
+            // 再用 App 固定的白字黑描边覆盖。
+            setUserDefaultTextSize()
+            setStyle(subtitleCaptionStyle())
+            setLayoutParams(layoutParams)
+        }
+        builtIn.visibility = View.GONE
+        // 放在自带字幕视图后面，保持绘制顺序与原来一致（视频 → 字幕 → 控制层）。
+        val builtInIndex = parent.indexOfChild(builtIn)
+        if (builtInIndex >= 0) {
+            parent.addView(overlay, builtInIndex + 1)
+        } else {
+            parent.addView(overlay)
+        }
+        subtitleOverlay = overlay
+        // 画面挂载时可能刚好播到一条字幕中间，先把当前的 cue 补上。
+        overlay.setCues(stackSubtitleCues(player.currentCues.cues))
+    }
+
+    private fun subtitleCaptionStyle(): CaptionStyleCompat = CaptionStyleCompat(
+        Color.WHITE,
+        Color.TRANSPARENT,
+        Color.TRANSPARENT,
+        CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+        Color.BLACK,
+        null,
+    )
+
     override fun setMedia(media: EngineMedia, startPositionMs: Long, autoPlay: Boolean) {
+        // 换集时重置中转尝试；同一集内部切换到中转地址不会重置，避免循环。
+        if (media.mediaId != pendingMedia?.mediaId) proxyAttempted = false
         pendingMedia = media
         pendingStartMs = startPositionMs.coerceAtLeast(0L)
         pendingAutoPlay = autoPlay
@@ -294,6 +373,10 @@ class ExoVideoPlayerEngine(
         released = true
         player.removeListener(playerListener)
         playerView?.player = null
+        subtitleOverlay?.let { overlay ->
+            (overlay.parent as? ViewGroup)?.removeView(overlay)
+        }
+        subtitleOverlay = null
         (playerView?.parent as? android.view.ViewGroup)?.removeView(playerView)
         playerView = null
         host = null
@@ -418,6 +501,21 @@ private fun isParsingError(errorCode: Int): Boolean = when (errorCode) {
     PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
     PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
     PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+    -> true
+
+    else -> false
+}
+
+/**
+ * 直连 CDN 失败、值得改走服务端中转的错误。
+ *
+ * 403/404 等 HTTP 状态是 115 防盗链/风控的典型表现；连接失败/超时在部分
+ * 网络下也会出现（DNS、运营商、VPN 分流），同样交给服务端再试一次。
+ */
+private fun isDirectPlaybackFailure(errorCode: Int): Boolean = when (errorCode) {
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
     -> true
 
     else -> false

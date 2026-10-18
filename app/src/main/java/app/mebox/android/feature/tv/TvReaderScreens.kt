@@ -467,6 +467,15 @@ private fun TvReaderBookDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 13.sp,
                     )
+                    Text(
+                        if (state.detailChaptersLoading && state.detailChapters.isEmpty()) {
+                            "章数加载中…"
+                        } else {
+                            "共 ${state.detailChapters.size} 章"
+                        },
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = 13.sp,
+                    )
                     Spacer(Modifier.height(10.dp))
                     Text(
                         book.intro.ifBlank { "暂无简介" },

@@ -222,9 +222,19 @@ interface MobileApi {
         @Body request: ReaderProgressRequest,
     ): Response<ReaderOkResponse>
 
+    /** 搜索结果的书源详情；目录地址与书籍地址不同时后续用 toc_url 重新拉目录。 */
+    @GET("api/reader/book-info")
+    suspend fun readerBookInfo(
+        @Header("Authorization") authorization: String,
+        @Query("source_id") sourceId: String,
+        @Query("source_url") sourceUrl: String,
+        @Query("book_url") bookUrl: String,
+    ): Response<ReaderBookInfoDto>
+
     @GET("api/reader/toc")
     suspend fun readerToc(
         @Header("Authorization") authorization: String,
+        @Query("source_id") sourceId: String,
         @Query("source_url") sourceUrl: String,
         @Query("book_url") bookUrl: String,
         @Query("toc_url") tocUrl: String,

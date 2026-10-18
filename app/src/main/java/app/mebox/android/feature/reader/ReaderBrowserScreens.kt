@@ -537,7 +537,7 @@ internal fun ReaderOriginPickerDialog(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun OriginRow(
+internal fun OriginRow(
     origin: ReaderSearchOriginDto,
     enabled: Boolean,
     onClick: () -> Unit,

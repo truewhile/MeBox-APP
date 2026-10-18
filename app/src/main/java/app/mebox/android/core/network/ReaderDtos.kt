@@ -48,6 +48,24 @@ data class ReaderBookDto(
 @Serializable
 data class ReaderBooksDto(val books: List<ReaderBookDto>? = null)
 
+/**
+ * 书源详情（对应 legado 的书籍信息页，`GET /api/reader/book-info`）。
+ * 搜索结果已经带了书名、作者和简介，这里补抓详情规则，主要是拿到更准确的
+ * 封面、最新章节和目录地址；[tocUrl] 与书籍地址不同时要用它重新拉目录。
+ */
+@Serializable
+data class ReaderBookInfoDto(
+    val name: String = "",
+    val author: String = "",
+    val kind: String = "",
+    @SerialName("word_count") val wordCount: String = "",
+    @SerialName("latest_chapter") val latestChapter: String = "",
+    val intro: String = "",
+    @SerialName("cover_url") val coverUrl: String = "",
+    @SerialName("toc_url") val tocUrl: String = "",
+    @SerialName("book_url") val bookUrl: String = "",
+)
+
 @Serializable
 data class ReaderChapterDto(
     val index: Int = 0,

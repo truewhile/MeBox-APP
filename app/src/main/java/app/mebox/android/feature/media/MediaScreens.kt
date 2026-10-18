@@ -130,6 +130,7 @@ import app.mebox.android.feature.ProfileContent
 import app.mebox.android.feature.media.player.PlayerScreen
 import app.mebox.android.feature.reader.ReaderReadingScreen
 import app.mebox.android.feature.reader.ReaderScreen
+import app.mebox.android.feature.reader.ReaderBookDetailContent
 import app.mebox.android.feature.reader.ReaderSearchContent
 import app.mebox.android.feature.reader.ReaderShelfContent
 import app.mebox.android.feature.reader.ReaderUiState
@@ -171,6 +172,7 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
     val state by mediaViewModel.state.collectAsStateWithLifecycle()
     val readerState by readerViewModel.state.collectAsStateWithLifecycle()
     val playerEngine by mainViewModel.playerEngine.collectAsStateWithLifecycle()
+    val subtitlePreference by mainViewModel.subtitlePreference.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val imageLoader = remember(mediaViewModel) { mediaViewModel.createImageLoader(context) }
     DisposableEffect(imageLoader) {
@@ -189,6 +191,11 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
                 origin = account.address.origin,
                 viewModel = readerViewModel,
             )
+            readerState.screen == ReaderScreen.BookDetail -> ReaderBookDetailContent(
+                state = readerState,
+                origin = account.address.origin,
+                viewModel = readerViewModel,
+            )
             else -> when (val screen = state.screen) {
                 is MediaScreen.Player -> PlayerScreen(
                     request = state.playerRequest,
@@ -197,6 +204,7 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
                     title = screen.title,
                     danmaku = state.danmaku,
                     engine = playerEngine,
+                    subtitlePreference = subtitlePreference,
                     onEngineSelected = mainViewModel::selectPlayerEngine,
                     onBack = mediaViewModel::back,
                     onProgress = mediaViewModel::reportProgress,
@@ -262,6 +270,7 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
         ) {
             when (readerState.screen) {
                 ReaderScreen.Reading -> readerViewModel.closeReading()
+                ReaderScreen.BookDetail -> readerViewModel.dismissSearchDetail()
                 ReaderScreen.Search -> readerViewModel.closeSearch()
                 ReaderScreen.Shelf -> mediaViewModel.back()
             }
@@ -1677,14 +1686,18 @@ private fun DetailScreen(
     val resumeMs = state.detailResumeMs.takeIf {
         it > 0 && (duration <= 0 || it < duration - PlaybackPlan.FINISHED_MARGIN_MS)
     }
-    val seasons = remember(state.episodes, media.id) { MediaBrowseFormat.seasons(state.episodes) }
-    val defaultSeason = media.seasonNum.takeIf { it in seasons } ?: seasons.firstOrNull() ?: 0
+    val seasonGroups = remember(state.episodes, media.id) { MediaBrowseFormat.seasonGroups(state.episodes) }
+    val defaultSeason = MediaBrowseFormat.seasonOf(media)
+        .takeIf { season -> seasonGroups.any { it.season == season } }
+        ?: seasonGroups.firstOrNull()?.season
+        ?: 0
     var selectedSeason by rememberSaveable(media.id) { mutableIntStateOf(defaultSeason) }
-    val visibleEpisodes = if (seasons.size > 1) {
-        state.episodes.filter { it.seasonNum == selectedSeason }
-    } else {
-        state.episodes
-    }
+    // 重新加载后原来的分季可能不存在（例如整季被删除），回落到默认季。
+    val currentSeason = selectedSeason
+        .takeIf { season -> seasonGroups.any { it.season == season } }
+        ?: defaultSeason
+    val visibleEpisodes = seasonGroups.firstOrNull { it.season == currentSeason }?.episodes
+        ?: state.episodes
     val showEpisodes = state.episodes.size > 1 ||
         state.episodes.any { episode -> episode.id != media.id }
 
@@ -1789,12 +1802,12 @@ private fun DetailScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (seasons.size > 1) {
+                    if (seasonGroups.size > 1) {
                         Spacer(Modifier.height(10.dp))
                         MeBoxSegmentedBar(
-                            labels = seasons.map { "第 $it 季" },
-                            selectedIndex = seasons.indexOf(selectedSeason).coerceAtLeast(0),
-                            onSelect = { index -> seasons.getOrNull(index)?.let { selectedSeason = it } },
+                            labels = seasonGroups.map { MediaBrowseFormat.seasonLabel(it.season) },
+                            selectedIndex = seasonGroups.indexOfFirst { it.season == currentSeason }.coerceAtLeast(0),
+                            onSelect = { index -> seasonGroups.getOrNull(index)?.let { selectedSeason = it.season } },
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }

@@ -7,6 +7,7 @@ import app.mebox.android.core.network.MeBoxApiClient
 import app.mebox.android.core.network.ReaderAudioConfigRequest
 import app.mebox.android.core.network.ReaderBookDto
 import app.mebox.android.core.network.ReaderBookGroupDto
+import app.mebox.android.core.network.ReaderBookInfoDto
 import app.mebox.android.core.network.ReaderBrowserPageDto
 import app.mebox.android.core.network.ReaderBrowserXhrResponseDto
 import app.mebox.android.core.network.ReaderChapterContentDto
@@ -55,9 +56,18 @@ class ReaderRepository(
         sourceUrl: String,
         bookUrl: String,
         tocUrl: String,
+        sourceId: String = "",
     ): ApiResult<List<ReaderTocChapterDto>> =
-        authorized { api.readerToc(it, sourceUrl, bookUrl, tocUrl) }
+        authorized { api.readerToc(it, sourceUrl, bookUrl, tocUrl, sourceId) }
             .mapSuccess { it.chapters.orEmpty() }
+
+    /** 书源详情：用于搜索结果的书籍详情页，不需要先把书加入书架。 */
+    suspend fun bookInfo(
+        sourceId: String,
+        sourceUrl: String,
+        bookUrl: String,
+    ): ApiResult<ReaderBookInfoDto> =
+        authorized { api.readerBookInfo(it, sourceId, sourceUrl, bookUrl) }
 
     suspend fun saveChapters(
         bookId: String,

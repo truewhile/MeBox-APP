@@ -36,7 +36,15 @@ data class EngineMedia(
     val mediaId: String,
     val title: String,
     val url: String,
+    /** 直连被 CDN 403/404 时改走同一节目的服务端同源转发地址。 */
+    val proxyUrl: String? = null,
     val subtitles: List<EngineSubtitle> = emptyList(),
+    /**
+     * 字幕自动加载与优先语言。LibVLC 在装载媒体时据此选择默认字幕；
+     * ExoPlayer 的轨道由播放页在 [VideoPlayerEngine.listener] 的
+     * `onTracksChanged` 里按同一偏好选中。
+     */
+    val subtitlePreference: SubtitlePreference = SubtitlePreference(),
 )
 
 /** 画面缩放策略，两个内核各自映射到自己的实现。 */
@@ -56,6 +64,12 @@ interface VideoPlayerEngineListener {
     fun onTracksChanged(tracks: EngineTracks) = Unit
     fun onSpeedChanged(speed: Float) = Unit
     fun onEnded() = Unit
+
+    /**
+     * 内核在内部重新装载了当前媒体（例如直连 403 后改用服务端中转、
+     * LibVLC 硬解失败后改软解）。界面据此重新应用字幕选择、轨道状态等。
+     */
+    fun onMediaReloaded() = Unit
 
     /**
      * @param decodeRelated 是否更像“解码器不支持”而不是网络/地址问题；

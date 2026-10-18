@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import app.mebox.android.BuildConfig
+import app.mebox.android.core.player.SubtitlePriority
 import app.mebox.android.core.storage.AppPreferences
 import java.io.File
 import java.time.LocalDateTime
@@ -112,6 +113,10 @@ object DiagnosticsLog {
                 val preferences = AppPreferences(context)
                 appendLine("上次服务器: ${preferences.lastAddress ?: "-"}")
                 appendLine("播放内核: ${preferences.playerEngine ?: "默认"}")
+                appendLine(
+                    "字幕: " + (if (preferences.subtitlesAutoLoad) "自动加载" else "不自动加载") +
+                        " / 优先 " + SubtitlePriority.fromKey(preferences.subtitlePriority).label,
+                )
             }
             appendLine("日志文件: ${files().size} 个 / ${totalBytes() / 1024} KB")
         }

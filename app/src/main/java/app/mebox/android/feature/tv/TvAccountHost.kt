@@ -95,6 +95,7 @@ fun TvAccountHost(
     val state by mediaViewModel.state.collectAsStateWithLifecycle()
     val readerState by readerViewModel.state.collectAsStateWithLifecycle()
     val playerEngine by mainViewModel.playerEngine.collectAsStateWithLifecycle()
+    val subtitlePreference by mainViewModel.subtitlePreference.collectAsStateWithLifecycle()
     val context = androidx.compose.ui.platform.LocalContext.current
     val imageLoader = remember(mediaViewModel) { mediaViewModel.createImageLoader(context) }
     DisposableEffect(imageLoader) {
@@ -132,7 +133,8 @@ fun TvAccountHost(
                 viewModel = readerViewModel,
             )
 
-            readerState.screen == ReaderScreen.Search -> TvReaderSearchScreen(
+            readerState.screen == ReaderScreen.Search ||
+                readerState.screen == ReaderScreen.BookDetail -> TvReaderSearchScreen(
                 state = readerState,
                 origin = account.address.origin,
                 viewModel = readerViewModel,
@@ -147,6 +149,7 @@ fun TvAccountHost(
                     title = screen.title,
                     danmaku = state.danmaku,
                     engine = playerEngine,
+                    subtitlePreference = subtitlePreference,
                     isTv = true,
                     onEngineSelected = mainViewModel::selectPlayerEngine,
                     onBack = mediaViewModel::back,
@@ -205,6 +208,7 @@ fun TvAccountHost(
                     mediaViewModel = mediaViewModel,
                     readerViewModel = readerViewModel,
                     playerEngine = playerEngine,
+                    subtitlePreference = subtitlePreference,
                     onOpenPhoneSearch = { purpose ->
                         phonePurpose = purpose
                     },
@@ -234,6 +238,7 @@ fun TvAccountHost(
     ) {
         when (readerState.screen) {
             ReaderScreen.Reading -> readerViewModel.closeReading()
+            ReaderScreen.BookDetail -> readerViewModel.dismissSearchDetail()
             ReaderScreen.Search -> readerViewModel.closeSearch()
             ReaderScreen.Shelf -> mediaViewModel.back()
         }
@@ -249,6 +254,7 @@ private fun TvMainScaffold(
     mediaViewModel: MediaViewModel,
     readerViewModel: ReaderViewModel,
     playerEngine: app.mebox.android.core.player.PlayerEngineKind,
+    subtitlePreference: app.mebox.android.core.player.SubtitlePreference,
     onOpenPhoneSearch: (PhonePurpose) -> Unit,
     onOpenLogShare: () -> Unit,
 ) {
@@ -387,6 +393,9 @@ private fun TvMainScaffold(
                     account = account,
                     engine = playerEngine,
                     onSelectEngine = mainViewModel::selectPlayerEngine,
+                    subtitlePreference = subtitlePreference,
+                    onToggleSubtitlesAutoLoad = mainViewModel::setSubtitlesAutoLoad,
+                    onSelectSubtitlePriority = mainViewModel::setSubtitlePriority,
                     onOpenFavorites = mediaViewModel::openFavorites,
                     onOpenHistory = mediaViewModel::openHistory,
                     onOpenPhoneInput = { onOpenPhoneSearch(PhonePurpose.MEDIA_SEARCH) },

@@ -34,6 +34,25 @@ class PlaybackUrlsTest {
     }
 
     @Test
+    fun `same origin proxy keeps existing query parameters`() {
+        val result = PlaybackUrls.withSameOriginProxy(
+            "http://host/api/stream/m1?token=abc&profile_id=p1",
+        )
+        assertEquals(
+            "http://host/api/stream/m1?token=abc&profile_id=p1&proxy=1",
+            result,
+        )
+    }
+
+    @Test
+    fun `same origin proxy starts the query when missing`() {
+        assertEquals(
+            "http://host/api/stream/m1?proxy=1",
+            PlaybackUrls.withSameOriginProxy("http://host/api/stream/m1"),
+        )
+    }
+
+    @Test
     fun `subtitle url encodes path and carries the access token`() {
         val result = PlaybackUrls.subtitleUrl(
             origin = "http://host:8080/",

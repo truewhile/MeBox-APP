@@ -69,6 +69,8 @@ import app.mebox.android.core.player.EngineTrack
 import app.mebox.android.core.player.EngineTrackType
 import app.mebox.android.core.player.EngineTracks
 import app.mebox.android.core.player.PlayerEngineKind
+import app.mebox.android.core.player.SubtitlePreference
+import app.mebox.android.core.player.SubtitleSelector
 import app.mebox.android.core.player.VideoPlayerEngineListener
 import app.mebox.android.core.player.createVideoPlayerEngine
 import app.mebox.android.feature.media.DanmakuUiState
@@ -96,6 +98,7 @@ fun PlayerScreen(
     title: String,
     danmaku: DanmakuUiState,
     engine: PlayerEngineKind = PlayerEngineKind.EXO,
+    subtitlePreference: SubtitlePreference = SubtitlePreference(),
     isTv: Boolean = false,
     onEngineSelected: (PlayerEngineKind) -> Unit = {},
     onBack: () -> Unit,
@@ -209,6 +212,7 @@ fun PlayerScreen(
         title = request.title.ifBlank { title },
         danmaku = danmaku,
         initialEngine = engine,
+        subtitlePreference = subtitlePreference,
         isTv = isTv,
         onEngineSelected = onEngineSelected,
         onBack = onBack,
@@ -261,6 +265,7 @@ private fun PlayerSurface(
     title: String,
     danmaku: DanmakuUiState,
     initialEngine: PlayerEngineKind,
+    subtitlePreference: SubtitlePreference,
     isTv: Boolean,
     onEngineSelected: (PlayerEngineKind) -> Unit,
     onBack: () -> Unit,
@@ -314,8 +319,19 @@ private fun PlayerSurface(
     var trackState by remember(initialKey) { mutableStateOf(PlayerTrackState()) }
 
     // 播放内核可以在页内切换；切换时记录当前位置，新内核从同一点起播。
-    var engineKind by remember(initialKey) { mutableStateOf(initialEngine) }
+    // 本次播放会话里自动回退过的内核会带到下一集，避免每集都先失败一次；
+    // 离开播放页后失效，不写回全局偏好。
+    var sessionFallbackEngine by remember { mutableStateOf<PlayerEngineKind?>(null) }
+    var engineKind by remember(initialKey) {
+        mutableStateOf(sessionFallbackEngine ?: initialEngine)
+    }
     var resumePositionMs by remember(initialKey) { mutableStateOf<Long?>(null) }
+    // 系统解码遇到本机不支持的编码（例如 Hi10P）时自动换到 LibVLC；
+    // 同一次播放只尝试一次，避免两个内核来回失败刷屏。
+    var autoFallbackAttempted by remember(initialKey) { mutableStateOf(false) }
+    // 字幕自动选择只做一次；用户手动选过字幕（或手动关闭）后不再覆盖。
+    var autoSubtitleApplied by remember(initialKey, engineKind) { mutableStateOf(false) }
+    var userPickedSubtitles by remember(initialKey) { mutableStateOf(false) }
 
     var dragBaseMs by remember(initialKey) { mutableLongStateOf(0L) }
     var dragDeltaMs by remember(initialKey) { mutableLongStateOf(0L) }
@@ -357,7 +373,7 @@ private fun PlayerSurface(
     }
 
     /** 切换播放内核：保留进度并立即用新内核重新起播。 */
-    fun switchEngine(next: PlayerEngineKind) {
+    fun switchEngine(next: PlayerEngineKind, persist: Boolean = true, reason: String? = null) {
         if (next == engineKind) return
         resumePositionMs = engine.positionMs().takeIf { it > 0L } ?: lastKnownPosition
         failedMessage = null
@@ -365,8 +381,10 @@ private fun PlayerSurface(
         playbackEnded = false
         isBuffering = true
         engineKind = next
-        onEngineSelected(next)
-        hint = "已切换播放内核：${next.shortLabel}"
+        sessionFallbackEngine = next
+        // 自动切换只影响这一次播放，不写回全局偏好；手动切换才记住选择。
+        if (persist) onEngineSelected(next)
+        hint = reason ?: "已切换播放内核：${next.shortLabel}"
     }
 
 
@@ -415,7 +433,24 @@ private fun PlayerSurface(
 
     DisposableEffect(engine, request) {
         engine.listener = object : VideoPlayerEngineListener {
+            override fun onMediaReloaded() {
+                // 内核换中转地址/换解码方式后重新装载了媒体，字幕轨选择需要重做。
+                autoSubtitleApplied = false
+            }
+
             override fun onError(message: String, decodeRelated: Boolean) {
+                // 系统解码器不支持该编码（最常见的是 10-bit H.264 / Hi10P）时，
+                // 直接换到 LibVLC 的 FFmpeg 软解续播，不把错误糊到用户脸上。
+                if (PlayerEngineKind.shouldAutoFallback(engineKind, decodeRelated, autoFallbackAttempted)) {
+                    val fallback = PlayerEngineKind.automaticFallback(engineKind) ?: return
+                    autoFallbackAttempted = true
+                    switchEngine(
+                        next = fallback,
+                        persist = false,
+                        reason = "系统解码不支持该编码，已自动切换到 ${fallback.shortLabel}",
+                    )
+                    return
+                }
                 errorIsDecode = decodeRelated
                 failedMessage = message
                 errorCallback(message)
@@ -454,6 +489,28 @@ private fun PlayerSurface(
                     selectedTextLabel = text.firstOrNull { it.selected }?.label,
                 )
                 pinnedQuality = pinnedQuality?.takeIf { pinned -> video.any { it.id == pinned.id } }
+                // 首次拿到字幕轨时按设置自动选一条；用户手动操作过就不再干预。
+                if (!autoSubtitleApplied && !userPickedSubtitles && text.isNotEmpty()) {
+                    autoSubtitleApplied = true
+                    when {
+                        engineKind == PlayerEngineKind.EXO && subtitlePreference.autoLoad -> {
+                            SubtitleSelector.choose(tracks.text, subtitlePreference)?.let { chosen ->
+                                subtitlesOff = false
+                                engine.selectTextTrack(chosen.id)
+                            }
+                        }
+                        engineKind == PlayerEngineKind.EXO -> {
+                            // 关闭自动加载时明确禁用字幕轨，避免内核按默认标记自动选中。
+                            subtitlesOff = true
+                            engine.selectTextTrack(null)
+                        }
+                        engineKind == PlayerEngineKind.VLC && !subtitlePreference.autoLoad -> {
+                            // LibVLC 会自己挑一条内嵌字幕；关闭自动加载时明确关掉。
+                            subtitlesOff = true
+                            engine.selectTextTrack(null)
+                        }
+                    }
+                }
                 if (subtitlesOff && text.any { it.selected }) {
                     subtitlesOff = false
                 }
@@ -466,7 +523,7 @@ private fun PlayerSurface(
     LaunchedEffect(engine, initialKey) {
         val startAt = resumePositionMs ?: request.startPositionMs
         positionMs = startAt
-        engine.setMedia(request.toEngineMedia(), startAt, autoPlay = true)
+        engine.setMedia(request.toEngineMedia(subtitlePreference), startAt, autoPlay = true)
         // 切换内核后沿用用户已经选好的倍速，不回到 1x。
         engine.setSpeed(playbackSpeed)
     }
@@ -591,6 +648,7 @@ private fun PlayerSurface(
             EngineTrackType.VIDEO -> engine.selectVideoTrack(choice.id)
             EngineTrackType.AUDIO -> engine.selectAudioTrack(choice.id)
             EngineTrackType.TEXT -> {
+                userPickedSubtitles = true
                 subtitlesOff = false
                 engine.selectTextTrack(choice.id)
             }
@@ -606,6 +664,7 @@ private fun PlayerSurface(
     }
 
     fun disableSubtitles() {
+        userPickedSubtitles = true
         subtitlesOff = true
         engine.selectTextTrack(null)
     }
@@ -1273,10 +1332,13 @@ private fun EngineTrack.toChoice(): TrackChoice = TrackChoice(
 )
 
 /** 服务端只提供直链；容器解析和字幕渲染交给当前播放内核。 */
-private fun PlaybackRequest.toEngineMedia(): EngineMedia = EngineMedia(
+private fun PlaybackRequest.toEngineMedia(
+    subtitlePreference: SubtitlePreference,
+): EngineMedia = EngineMedia(
     mediaId = mediaId,
     title = title,
     url = streamUrl,
+    proxyUrl = proxyUrl,
     subtitles = subtitles
         .filter { it.url.isNotBlank() }
         .map { subtitle ->
@@ -1287,6 +1349,7 @@ private fun PlaybackRequest.toEngineMedia(): EngineMedia = EngineMedia(
                 assUrl = subtitle.assUrl,
             )
         },
+    subtitlePreference = subtitlePreference,
 )
 
 

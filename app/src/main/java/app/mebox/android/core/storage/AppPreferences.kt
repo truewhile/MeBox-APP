@@ -55,6 +55,16 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_PLAYER_ENGINE, null)
         set(value) = prefs.edit().putString(KEY_PLAYER_ENGINE, value).apply()
 
+    /** 起播时是否自动选中一条字幕。 */
+    var subtitlesAutoLoad: Boolean
+        get() = prefs.getBoolean(KEY_SUBTITLES_AUTO_LOAD, true)
+        set(value) = prefs.edit().putBoolean(KEY_SUBTITLES_AUTO_LOAD, value).apply()
+
+    /** 字幕优先语言的持久化键；具体取值见 SubtitlePriority.key。 */
+    var subtitlePriority: String?
+        get() = prefs.getString(KEY_SUBTITLE_PRIORITY, null)
+        set(value) = prefs.edit().putString(KEY_SUBTITLE_PRIORITY, value).apply()
+
     /**
      * 设备 ID 由安装随机生成，不使用 IMEI/MAC 等硬件标识。
      */
@@ -87,6 +97,8 @@ class AppPreferences(context: Context) {
         const val KEY_CLEARTEXT = "cleartext_risk_accepted"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_PLAYER_ENGINE = "player_engine"
+        const val KEY_SUBTITLES_AUTO_LOAD = "subtitles_auto_load"
+        const val KEY_SUBTITLE_PRIORITY = "subtitle_priority"
         const val KEY_SERVER_SNAPSHOT_ADDRESS = "server_snapshot_address"
         const val KEY_SERVER_SNAPSHOT_INFO = "server_snapshot_info"
     }

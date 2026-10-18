@@ -237,8 +237,18 @@ class MeBoxApiClient(
         sourceUrl: String,
         bookUrl: String,
         tocUrl: String,
+        sourceId: String = "",
     ): ApiResult<ReaderTocDto> = call {
-        api.readerToc(bearer(accessToken), sourceUrl, bookUrl, tocUrl)
+        api.readerToc(bearer(accessToken), sourceId, sourceUrl, bookUrl, tocUrl)
+    }
+
+    suspend fun readerBookInfo(
+        accessToken: String,
+        sourceId: String,
+        sourceUrl: String,
+        bookUrl: String,
+    ): ApiResult<ReaderBookInfoDto> = call {
+        api.readerBookInfo(bearer(accessToken), sourceId, sourceUrl, bookUrl)
     }
 
     suspend fun readerSaveChapters(

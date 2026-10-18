@@ -92,6 +92,11 @@ data class PlaybackRequest(
     val subtitle: String? = null,
     /** 服务器返回的直链播放地址；App 始终直接播放，不再请求服务端转码。 */
     val streamUrl: String,
+    /**
+     * 直连被 CDN 403/404 时的兜底：同一节目的服务端同源转发地址
+     * （`/api/stream/{id}?token=...&proxy=1`）。为空表示没有可用的中转。
+     */
+    val proxyUrl: String? = null,
     val startPositionMs: Long,
     val durationMs: Long,
     val subtitles: List<PlaybackSubtitle> = emptyList(),
@@ -1013,8 +1018,9 @@ class MediaViewModel(
             // /api/stream 的 302 往返（跨境链路上等于一次完整建连）。
             // 直链是跨域的，绝不能把访问令牌拼进去。
             val directUrl = infoValue.directUrl?.trim()?.takeIf { it.isNotEmpty() }
-            val streamUrl = directUrl ?: absolute(infoValue.streamUrl)
+            val serverStreamUrl = absolute(infoValue.streamUrl)
                 ?.let { PlaybackUrls.withAccessToken(it, accessToken) }
+            val streamUrl = directUrl ?: serverStreamUrl
             if (streamUrl == null) {
                 DiagnosticsLog.w("Play", "服务器没有返回直链 ${media.id}")
                 _state.update {
@@ -1025,6 +1031,9 @@ class MediaViewModel(
                 }
                 return@launch
             }
+            // 直连被 CDN 403 时的兜底：让服务端把同一条流转发给客户端。
+            // 只有走 /api/stream 的服务器条目才有这个入口。
+            val proxyUrl = serverStreamUrl?.let { PlaybackUrls.withSameOriginProxy(it) }
 
             // 只做能力提示，不再据此切换服务端转码。
             val decodeAssessment = withContext(Dispatchers.Default) {
@@ -1058,6 +1067,7 @@ class MediaViewModel(
                         title = media.title,
                         subtitle = media.displayEpisode.ifBlank { media.episodeTitle }.ifBlank { null },
                         streamUrl = streamUrl,
+                        proxyUrl = proxyUrl,
                         startPositionMs = start,
                         durationMs = duration,
                         subtitles = subtitles,

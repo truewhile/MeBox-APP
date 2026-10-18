@@ -2,6 +2,8 @@ package app.mebox.android.core.player
 
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.widget.FrameLayout
 import app.mebox.android.core.log.DiagnosticsLog
@@ -37,7 +39,8 @@ class VlcVideoPlayerEngine(
             "--no-drop-late-frames",
             "--no-skip-frames",
             "--audio-time-stretch",
-            "--avcodec-hw=any",
+            // 硬解由每条 Media 单独控制：失败后可以只对这一条改走软解，
+            // 不要把全局配置钉死在硬解或软解上。
             "--network-caching=3000",
         ),
     )
@@ -55,6 +58,19 @@ class VlcVideoPlayerEngine(
     private var released: Boolean = false
     private var playing: Boolean = false
     private var speed: Float = 1f
+
+    /**
+     * 硬解失败后只对当前媒体改走 FFmpeg 软解。
+     *
+     * 手机硬解只覆盖 8-bit H.264/HEVC，Hi10P（H.264 High 10）、10-bit HEVC
+     * 这类编码触发 EncounteredError 时，VLC 不一定能自己回退，表现为
+     * “LibVLC 无法播放该视频”且时长 0。这里主动用软件解码重试一次。
+     */
+    private var softwareDecodeOnly = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** 直连被 CDN 拒绝后是否已经尝试过服务端中转，避免来回重试。 */
+    private var proxyAttempted = false
 
     /** 轨道 id 的默认值：用于「自动」清晰度/音轨。 */
     private var defaultVideoId: Int? = null
@@ -115,10 +131,62 @@ class VlcVideoPlayerEngine(
                 }
 
                 MediaPlayer.Event.EncounteredError -> {
-                    DiagnosticsLog.e("Player", "LibVLC 播放失败")
+                    val media = pendingMedia
+                    val stats = runCatching { mediaPlayer.media?.stats }.getOrNull()
+                    val noData = (stats?.readBytes ?: 0) <= 0 && (stats?.demuxReadBytes ?: 0) <= 0
+                    // 一个字节都没读到，基本是 CDN 403/404 或链接过期。改走服务端
+                    // 同源转发（服务端到 CDN 的线路通常可用），不要在这里硬试软解。
+                    if (!proxyAttempted && media?.proxyUrl != null && noData) {
+                        proxyAttempted = true
+                        val resume = positionMs().takeIf { it > 0L } ?: pendingStartMs
+                        DiagnosticsLog.w(
+                            "Player",
+                            "LibVLC 直连未读到数据，改走服务端中转 host=${mediaHost(media.url)}",
+                        )
+                        val proxied = media.copy(url = media.proxyUrl, proxyUrl = null)
+                        pendingMedia = proxied
+                        listener?.onBufferingChanged(true)
+                        listener?.onPlaybackStateChanged(EnginePlaybackState.BUFFERING)
+                        listener?.onMediaReloaded()
+                        mainHandler.post {
+                            if (!released) load(proxied, resume, pendingAutoPlay)
+                        }
+                        return@setEventListener
+                    }
+                    // 第一次失败先怀疑硬解：常见于 Hi10P 这类没有硬件解码器的编码。
+                    // 只对当前媒体改走 FFmpeg 软解重试一次，不把结论写死到全局。
+                    if (!softwareDecodeOnly && media != null) {
+                        softwareDecodeOnly = true
+                        val resume = positionMs().takeIf { it > 0L } ?: pendingStartMs
+                        DiagnosticsLog.w(
+                            "Player",
+                            "LibVLC 硬解失败，改用软件解码重试 host=${mediaHost(media.url)} " +
+                                "read=${stats?.readBytes ?: -1} demux=${stats?.demuxReadBytes ?: -1} " +
+                                "decoded=${stats?.decodedVideo ?: -1}",
+                        )
+                        playing = false
+                        listener?.onBufferingChanged(true)
+                        listener?.onPlaybackStateChanged(EnginePlaybackState.BUFFERING)
+                        listener?.onMediaReloaded()
+                        mainHandler.post {
+                            if (!released) load(media, resume, pendingAutoPlay)
+                        }
+                        return@setEventListener
+                    }
+                    DiagnosticsLog.e(
+                        "Player",
+                        "LibVLC 播放失败（软解） " +
+                            "host=${media?.let { mediaHost(it.url) }.orEmpty()} " +
+                            "read=${stats?.readBytes ?: -1} demux=${stats?.demuxReadBytes ?: -1} " +
+                            "decoded=${stats?.decodedVideo ?: -1}",
+                    )
                     playing = false
                     listener?.onError(
-                        message = "LibVLC 无法播放该视频",
+                        message = if (softwareDecodeOnly) {
+                            "LibVLC 无法播放该视频（已尝试软件解码）"
+                        } else {
+                            "LibVLC 无法播放该视频"
+                        },
                         decodeRelated = false,
                     )
                 }
@@ -153,6 +221,13 @@ class VlcVideoPlayerEngine(
 
     override fun setMedia(media: EngineMedia, startPositionMs: Long, autoPlay: Boolean) {
         if (released) return
+        // 换集/换地址时重新从硬解开始尝试；同一集重试则沿用上次的软解结论。
+        if (media.mediaId != pendingMedia?.mediaId || media.url != pendingMedia?.url) {
+            softwareDecodeOnly = false
+        }
+        if (media.mediaId != pendingMedia?.mediaId) {
+            proxyAttempted = false
+        }
         pendingMedia = media
         pendingStartMs = startPositionMs.coerceAtLeast(0L)
         pendingAutoPlay = autoPlay
@@ -165,9 +240,18 @@ class VlcVideoPlayerEngine(
 
     private fun load(media: EngineMedia, startPositionMs: Long, autoPlay: Boolean) {
         runCatching { mediaPlayer.stop() }
+        DiagnosticsLog.i(
+            "Player",
+            "LibVLC 打开 host=${mediaHost(media.url)} 软解=$softwareDecodeOnly",
+        )
         val libVlcMedia = Media(libVlc, Uri.parse(media.url)).apply {
-            // 先尝试硬件解码，失败时 VLC 会自动回退到 FFmpeg 软解。
-            setHWDecoderEnabled(true, false)
+            if (softwareDecodeOnly) {
+                // 硬解已经失败过一次：这一条媒体强制走 FFmpeg 软解。
+                setHWDecoderEnabled(false, false)
+                addOption(":avcodec-hw=none")
+            } else {
+                setHWDecoderEnabled(true, false)
+            }
             addOption(":network-caching=3000")
             // 115 直链绑定换取时的 UA：服务端 /api/playback/{id}/info 预置的
             // 直链是按 App 统一 UA 换的，LibVLC 默认 UA 会被 CDN 403。
@@ -175,10 +259,17 @@ class VlcVideoPlayerEngine(
         }
         mediaPlayer.media = libVlcMedia
         libVlcMedia.release()
-        // 有 ASS 轨道时默认选中它：用户切到 LibVLC 通常就是为了看原始样式。
-        val preferredIndex = media.subtitles
-            .indexOfFirst { it.assUrl != null }
-            .takeIf { it >= 0 } ?: 0
+        // 按用户偏好选一条默认字幕：ASS 原文件优先用 libass 渲染，
+        // 其余外挂字幕按「中文/英文/日文优先」匹配；关闭自动加载时一条都不选。
+        // 「跟随片源」保持旧行为：优先挑一条 ASS，让 libass 还原原始样式。
+        val preferred = when {
+            !media.subtitlePreference.autoLoad -> null
+            media.subtitlePreference.priority == SubtitlePriority.FOLLOW_SOURCE ->
+                media.subtitles.firstOrNull { it.assUrl != null } ?: media.subtitles.firstOrNull()
+
+            else -> SubtitleSelector.choose(media.subtitles, media.subtitlePreference)
+        }
+        val preferredIndex = preferred?.let { media.subtitles.indexOf(it) } ?: -1
         media.subtitles.forEachIndexed { index, subtitle ->
             // ASS/SSA 优先用原文件地址：libVLC 的 libass 会保留字体、颜色、
             // 描边、定位与特效；服务端转出的 WebVTT 已经把这些信息剥掉了。
@@ -358,6 +449,10 @@ class VlcVideoPlayerEngine(
 
         listener?.onTracksChanged(EngineTracks(video = video, audio = audio, text = text))
     }
+
+    /** 只记录主机名，避免把带签名的完整直链写进日志。 */
+    private fun mediaHost(url: String): String =
+        runCatching { Uri.parse(url).host }.getOrNull().orEmpty()
 
     private companion object {
         const val TAG = "VlcVideoEngine"

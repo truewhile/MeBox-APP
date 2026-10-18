@@ -323,4 +323,49 @@ class ReaderApiTest {
         assertEquals("/api/reader/comments/open", request.path)
         assertTrue(request.body.readUtf8().contains("\"book_id\":\"b1\""))
     }
+
+    @Test
+    fun `book info and toc can be read before adding to shelf`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"name":"长夜","author":"作者","kind":"玄幻","word_count":"120 万字",
+                   "latest_chapter":"第 120 章","intro":"简介","cover_url":"https://img/1.jpg",
+                   "toc_url":"https://source/toc/1","book_url":"https://source/book/1"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"chapters":[{"index":0,"title":"第一章","url":"https://source/c/1"},
+                                 {"index":1,"title":"第二章","url":"https://source/c/2"}]}""",
+            ),
+        )
+
+        val info = client.readerBookInfo("token", "s1", "https://source", "https://source/book/1")
+        val toc = client.readerToc(
+            "token",
+            sourceUrl = "https://source",
+            bookUrl = "https://source/book/1",
+            tocUrl = "https://source/book/1",
+            sourceId = "s1",
+        )
+
+        assertTrue(info is ApiResult.Success)
+        val detail = (info as ApiResult.Success).value
+        assertEquals("长夜", detail.name)
+        assertEquals("第 120 章", detail.latestChapter)
+        assertEquals("https://source/toc/1", detail.tocUrl)
+        assertTrue(toc is ApiResult.Success)
+        assertEquals(2, (toc as ApiResult.Success).value.chapters.orEmpty().size)
+
+        val infoRequest = server.takeRequest()
+        assertEquals("/api/reader/book-info", infoRequest.requestUrl?.encodedPath)
+        assertEquals("s1", infoRequest.requestUrl?.queryParameter("source_id"))
+        assertEquals("https://source", infoRequest.requestUrl?.queryParameter("source_url"))
+        assertEquals("https://source/book/1", infoRequest.requestUrl?.queryParameter("book_url"))
+
+        val tocRequest = server.takeRequest()
+        assertEquals("/api/reader/toc", tocRequest.requestUrl?.encodedPath)
+        assertEquals("s1", tocRequest.requestUrl?.queryParameter("source_id"))
+        assertEquals("https://source/book/1", tocRequest.requestUrl?.queryParameter("toc_url"))
+    }
 }

@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,20 +24,16 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -389,7 +384,10 @@ internal fun ReaderSearchContent(
                     SearchResultRow(
                         book = book,
                         origin = origin,
-                        onClick = { viewModel.openSearchDetail(book) },
+                        onClick = {
+                            keyboard?.hide()
+                            viewModel.openSearchDetail(book)
+                        },
                     )
                 }
                 item {
@@ -418,15 +416,6 @@ internal fun ReaderSearchContent(
                 }
             }
         }
-    }
-
-    state.searchDetail?.let { detail ->
-        SearchDetailDialog(
-            detail = detail,
-            state = state,
-            origin = origin,
-            viewModel = viewModel,
-        )
     }
 }
 
@@ -494,103 +483,6 @@ private fun SearchResultRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-    }
-}
-
-@Composable
-private fun SearchDetailDialog(
-    detail: ReaderSearchBookDto,
-    state: ReaderUiState,
-    origin: String,
-    viewModel: ReaderViewModel,
-) {
-    val existing = state.books.firstOrNull { saved ->
-        saved.bookUrl == detail.bookUrl ||
-            (saved.name == detail.name && saved.author == detail.author)
-    }
-    AlertDialog(
-        onDismissRequest = viewModel::dismissSearchDetail,
-        shape = RoundedCornerShape(16.dp),
-        title = { Text(detail.name, style = MaterialTheme.typography.titleMedium) },
-        text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 440.dp)
-                    .verticalScroll(rememberScrollState()),
-            ) {
-                Row {
-                    Box(
-                        modifier = Modifier
-                            .width(84.dp)
-                            .height(112.dp)
-                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp)),
-                    ) {
-                        ReaderCover(
-                            url = detail.coverUrl,
-                            origin = origin,
-                            title = detail.name,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        InfoLine("作者", detail.author.ifBlank { "未知作者" })
-                        InfoLine("类型", detail.kind.ifBlank { "未分类" })
-                        if (detail.wordCount.isNotBlank()) InfoLine("字数", detail.wordCount)
-                        if (detail.latestChapter.isNotBlank()) InfoLine("最新", detail.latestChapter)
-                        InfoLine("书源", "${detail.origins?.size ?: 0} 个")
-                    }
-                }
-                if (detail.intro.isNotBlank()) {
-                    Spacer(Modifier.height(12.dp))
-                    Text(detail.intro, style = MaterialTheme.typography.bodySmall)
-                }
-                state.addBookError?.let { error ->
-                    Spacer(Modifier.height(12.dp))
-                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        },
-        confirmButton = {
-            if (existing != null) {
-                MeBoxButton(onClick = {
-                    viewModel.dismissSearchDetail()
-                    viewModel.openBook(existing)
-                }) {
-                    Text("开始阅读")
-                }
-            } else {
-                MeBoxButton(onClick = viewModel::addSearchBookToShelf, enabled = !state.addingBook) {
-                    if (state.addingBook) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                        )
-                    } else {
-                        Text("加入书架")
-                    }
-                }
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = viewModel::dismissSearchDetail, enabled = !state.addingBook) {
-                Text("关闭")
-            }
-        },
-    )
-}
-
-@Composable
-private fun InfoLine(label: String, value: String) {
-    Row(modifier = Modifier.padding(vertical = 2.dp)) {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(40.dp),
-        )
-        Text(value, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 

@@ -8,6 +8,7 @@ import app.mebox.android.core.model.AccountScope
 import app.mebox.android.core.network.ApiResult
 import app.mebox.android.core.network.ReaderBookDto
 import app.mebox.android.core.network.ReaderBookGroupDto
+import app.mebox.android.core.network.ReaderBookInfoDto
 import app.mebox.android.core.network.ReaderBrowserPageDto
 import app.mebox.android.core.network.ReaderBrowserXhrResponseDto
 import app.mebox.android.core.network.ReaderChapterContentDto
@@ -21,6 +22,7 @@ import app.mebox.android.core.network.ReaderSearchOriginDto
 import app.mebox.android.core.network.ReaderSearchSkippedDto
 import app.mebox.android.core.network.ReaderSourceDto
 import app.mebox.android.core.network.ReaderSourceLoginDto
+import app.mebox.android.core.network.ReaderTocChapterDto
 import app.mebox.android.core.reader.ReaderAudioEngine
 import app.mebox.android.core.reader.ReaderAudioState
 import app.mebox.android.core.reader.ReaderAudioTuning
@@ -46,6 +48,9 @@ import kotlinx.coroutines.withContext
 sealed interface ReaderScreen {
     data object Shelf : ReaderScreen
     data object Search : ReaderScreen
+
+    /** 搜索结果的书源详情（仿 legado 书籍信息页），加入书架前就能看目录和章数。 */
+    data object BookDetail : ReaderScreen
     data object Reading : ReaderScreen
 }
 
@@ -75,6 +80,19 @@ data class ReaderUiState(
     val searchDetail: ReaderSearchBookDto? = null,
     val addingBook: Boolean = false,
     val addBookError: String? = null,
+
+    // 书籍详情（搜索结果 → 详情页，加入书架前即可查看目录与章数）
+    val detailOrigin: ReaderSearchOriginDto? = null,
+    val detailInfo: ReaderBookInfoDto? = null,
+    val detailInfoLoading: Boolean = false,
+    val detailInfoError: String? = null,
+    val detailChapters: List<ReaderTocChapterDto> = emptyList(),
+    val detailChaptersLoading: Boolean = false,
+    val detailChaptersError: String? = null,
+    val detailOriginPickerOpen: Boolean = false,
+    val detailOriginLoading: Boolean = false,
+    val detailOriginError: String? = null,
+    val detailOrigins: List<ReaderSearchOriginDto> = emptyList(),
 
     // 阅读
     val book: ReaderBookDto? = null,
@@ -135,7 +153,44 @@ data class ReaderUiState(
 
     val hasNextChapter: Boolean
         get() = ReaderChapters.nextReadable(chapters, chapterIndex) != null
+
+    /**
+     * 详情页当前书源对应的书架记录。换源前先按「书源 + 书本地址」精确匹配；
+     * 只有缺少书源地址时才退回书名 + 作者，避免把另一个源的书当成同一本。
+     */
+    val detailShelfBook: ReaderBookDto?
+        get() {
+            val detail = searchDetail ?: return null
+            val origin = detailOrigin
+            if (origin != null && origin.bookUrl.isNotBlank()) {
+                books.firstOrNull {
+                    it.bookUrl == origin.bookUrl &&
+                        (origin.origin.isBlank() || it.origin == origin.origin)
+                }?.let { return it }
+                return null
+            }
+            return books.firstOrNull {
+                it.bookUrl == detail.bookUrl ||
+                    (it.name == detail.name && it.author == detail.author)
+            }
+        }
 }
+
+/** 清空搜索结果详情相关的临时状态，离开详情页或回到书架时复用。 */
+private fun ReaderUiState.clearDetail(): ReaderUiState = copy(
+    searchDetail = null,
+    detailOrigin = null,
+    detailInfo = null,
+    detailInfoLoading = false,
+    detailInfoError = null,
+    detailChapters = emptyList(),
+    detailChaptersLoading = false,
+    detailChaptersError = null,
+    detailOriginPickerOpen = false,
+    detailOriginLoading = false,
+    detailOriginError = null,
+    detailOrigins = emptyList(),
+)
 
 /**
  * 阅读模块状态机：书架 → 正文 → 目录/设置 → 退出恢复。
@@ -158,10 +213,14 @@ class ReaderViewModel(
 
     private var contentJob: Job? = null
     private var searchJob: Job? = null
+    private var detailJob: Job? = null
     private var progressJob: Job? = null
     private var profileSaveJob: Job? = null
     private var browserPollJob: Job? = null
     private var cacheJob: Job? = null
+    private var detailTocToken = 0
+    private var pendingChapterUrl: String? = null
+    private var pendingChapterIndex: Int? = null
     private var loadToken = 0L
     private var currentPage = 0
     private var styleTouched = false
@@ -336,17 +395,20 @@ class ReaderViewModel(
     // ── 搜索 ──
 
     fun openSearch() {
+        detailJob?.cancel()
+        detailTocToken += 1
         _state.update {
-            it.copy(screen = ReaderScreen.Search, searchError = null, addBookError = null)
+            it.clearDetail().copy(screen = ReaderScreen.Search, searchError = null, addBookError = null)
         }
     }
 
     fun closeSearch() {
         searchJob?.cancel()
+        detailJob?.cancel()
+        detailTocToken += 1
         _state.update {
-            it.copy(
+            it.clearDetail().copy(
                 screen = ReaderScreen.Shelf,
-                searchDetail = null,
                 addBookError = null,
                 searchLoading = false,
                 searchLoadingMore = false,
@@ -428,39 +490,141 @@ class ReaderViewModel(
         }
     }
 
+    // ── 书籍详情（搜索结果，仿 legado BookInfoActivity） ──
+
+    /**
+     * 打开书籍详情：不加入书架也能看封面、简介、最新章节和完整目录。
+     * 详情规则和目录并行抓取；详情返回的 tocUrl 与书本地址不同时再拉一次目录。
+     */
     fun openSearchDetail(book: ReaderSearchBookDto) {
-        _state.update { it.copy(searchDetail = book, addBookError = null) }
+        ensureShelfLoaded()
+        val origin = book.origins?.firstOrNull { it.originType == 0 }
+            ?: book.origins?.firstOrNull()
+        detailJob?.cancel()
+        detailTocToken += 1
+        _state.update {
+            it.clearDetail().copy(
+                screen = ReaderScreen.BookDetail,
+                searchDetail = book,
+                addBookError = null,
+                detailOrigin = origin,
+                detailInfoLoading = origin != null,
+                detailChaptersLoading = origin != null,
+                detailChaptersError = if (origin == null) "该书没有可用书源，请换一个结果" else null,
+            )
+        }
+        if (origin != null) startDetailLoad(book, origin)
     }
 
     fun dismissSearchDetail() {
         if (_state.value.addingBook) return
-        _state.update { it.copy(searchDetail = null, addBookError = null) }
+        detailJob?.cancel()
+        detailTocToken += 1
+        _state.update {
+            it.clearDetail().copy(screen = ReaderScreen.Search, addBookError = null)
+        }
     }
 
-    fun addSearchBookToShelf() {
+    /** 详情页右上角刷新：重抓详情与目录，保留当前书源。 */
+    fun refreshSearchDetail() {
         val current = _state.value
-        val detail = current.searchDetail ?: return
+        val book = current.searchDetail ?: return
+        val origin = current.detailOrigin ?: return
+        detailJob?.cancel()
+        _state.update {
+            it.copy(
+                detailInfoLoading = true,
+                detailInfoError = null,
+                detailChaptersLoading = true,
+                detailChaptersError = null,
+            )
+        }
+        startDetailLoad(book, origin)
+    }
+
+    fun closeDetailOriginPicker() {
+        if (_state.value.addingBook) return
+        _state.update { it.copy(detailOriginPickerOpen = false) }
+    }
+
+    /** 换源候选：按书名重新搜索，列出手机其它书源（与阅读页换源一致）。 */
+    fun openDetailOriginPicker() {
+        val current = _state.value
+        val book = current.searchDetail ?: return
+        if (current.detailOriginLoading) return
+        _state.update {
+            it.copy(
+                detailOriginPickerOpen = true,
+                detailOriginLoading = true,
+                detailOrigins = emptyList(),
+                detailOriginError = null,
+            )
+        }
+        viewModelScope.launch {
+            when (val result = repo.search(book.name, page = 1)) {
+                is ApiResult.Success -> {
+                    val author = (_state.value.detailInfo?.author ?: book.author).trim()
+                    val hit = result.value.books.firstOrNull {
+                        it.name.trim() == book.name.trim() && author.isNotEmpty() && it.author == author
+                    } ?: result.value.books.firstOrNull { it.name.trim() == book.name.trim() }
+                    val selected = _state.value.detailOrigin
+                    val candidates = hit?.origins.orEmpty()
+                        .filterNot {
+                            selected != null &&
+                                it.origin == selected.origin &&
+                                it.bookUrl == selected.bookUrl
+                        }
+                        .distinctBy { "${it.origin}\u0000${it.bookUrl}" }
+                    _state.update {
+                        it.copy(
+                            detailOriginLoading = false,
+                            detailOrigins = candidates,
+                            detailOriginError = if (candidates.isEmpty()) {
+                                "没有找到其他可用书源"
+                            } else {
+                                null
+                            },
+                        )
+                    }
+                }
+                is ApiResult.Failure -> _state.update {
+                    it.copy(detailOriginLoading = false, detailOriginError = readerError(result))
+                }
+                is ApiResult.NetworkError -> _state.update {
+                    it.copy(detailOriginLoading = false, detailOriginError = "网络不可用，请稍后重试")
+                }
+                ApiResult.Stale -> _state.update { it.copy(detailOriginLoading = false) }
+            }
+        }
+    }
+
+    /**
+     * 详情页换源：已在书架的书走服务端换源（保留进度、清空旧源缓存），
+     * 没上架的书只切换详情页展示的书源。
+     */
+    fun selectDetailOrigin(origin: ReaderSearchOriginDto) {
+        val current = _state.value
+        val book = current.searchDetail ?: return
         if (current.addingBook) return
-        val origin = detail.origins
-            ?.firstOrNull { it.originType == 0 }
-            ?: detail.origins?.firstOrNull()
-        if (origin == null) {
-            _state.update { it.copy(addBookError = "该书没有可用书源，请换一个结果") }
+        val shelf = current.detailShelfBook
+        _state.update { it.copy(detailOriginPickerOpen = false, detailOriginError = null) }
+        if (shelf == null) {
+            applyDetailOrigin(book, origin)
             return
         }
         _state.update { it.copy(addingBook = true, addBookError = null) }
         viewModelScope.launch {
-            when (val result = repo.addBook(origin, detail.name, detail.author, detail.coverUrl)) {
+            when (val result = repo.switchOrigin(shelf.id, origin)) {
                 is ApiResult.Success -> {
                     val saved = result.value
+                    withContext(Dispatchers.IO) { cache.clear(scope, shelf.id) }
                     _state.update {
                         it.copy(
                             addingBook = false,
-                            searchDetail = null,
-                            books = it.books.filterNot { book -> book.id == saved.id } + saved,
+                            books = it.books.map { item -> if (item.id == saved.id) saved else item },
                         )
                     }
-                    openBook(saved)
+                    applyDetailOrigin(book, origin)
                 }
                 is ApiResult.Failure -> _state.update {
                     it.copy(addingBook = false, addBookError = readerError(result))
@@ -473,20 +637,239 @@ class ReaderViewModel(
         }
     }
 
-    fun openExistingBook(book: ReaderSearchBookDto): ReaderBookDto? =
-        _state.value.books.firstOrNull { saved ->
-            saved.bookUrl == book.bookUrl || (saved.name == book.name && saved.author == book.author)
+    /** 加入书架但不跳转阅读（详情页的「加入书架」）。 */
+    fun addDetailBookToShelf() {
+        addDetailBook(startReading = false, chapter = null)
+    }
+
+    /** 已在书架的书再点「加入书架」（电视端旧入口）直接进入阅读。 */
+    fun addSearchBookToShelf() {
+        startReadingFromDetail()
+    }
+
+    /**
+     * 从详情页开始阅读：没上架就先加入书架；带 chapter 时按章节地址跳到该章。
+     */
+    fun startReadingFromDetail(chapter: ReaderTocChapterDto? = null) {
+        val current = _state.value
+        val shelf = current.detailShelfBook
+        if (shelf != null) {
+            detailJob?.cancel()
+            openBook(
+                shelf,
+                startChapterUrl = chapter?.takeIf { !it.isVolume }?.url,
+                startChapterIndex = chapter?.takeIf { !it.isVolume }?.index,
+            )
+            return
         }
+        addDetailBook(startReading = true, chapter = chapter)
+    }
+
+    /** 从详情页移出书架，页面停留在详情，按钮随即变回「加入书架」。 */
+    fun removeDetailBookFromShelf() {
+        val current = _state.value
+        val saved = current.detailShelfBook ?: return
+        if (current.addingBook) return
+        _state.update { it.copy(addingBook = true, addBookError = null) }
+        viewModelScope.launch {
+            when (val result = repo.removeBook(saved.id)) {
+                is ApiResult.Success -> {
+                    withContext(Dispatchers.IO) { cache.clear(scope, saved.id) }
+                    _state.update {
+                        it.copy(
+                            addingBook = false,
+                            books = it.books.filterNot { book -> book.id == saved.id },
+                            shelfNotice = "《${saved.name}》已移出书架",
+                        )
+                    }
+                }
+                is ApiResult.Failure -> _state.update {
+                    it.copy(addingBook = false, addBookError = readerError(result))
+                }
+                is ApiResult.NetworkError -> _state.update {
+                    it.copy(addingBook = false, addBookError = "网络不可用，请稍后重试")
+                }
+                ApiResult.Stale -> _state.update { it.copy(addingBook = false) }
+            }
+        }
+    }
+
+    private fun applyDetailOrigin(book: ReaderSearchBookDto, origin: ReaderSearchOriginDto) {
+        detailJob?.cancel()
+        detailTocToken += 1
+        _state.update {
+            it.copy(
+                screen = ReaderScreen.BookDetail,
+                searchDetail = book,
+                detailOrigin = origin,
+                detailInfo = null,
+                detailInfoLoading = true,
+                detailInfoError = null,
+                detailChapters = emptyList(),
+                detailChaptersLoading = true,
+                detailChaptersError = null,
+                detailOriginPickerOpen = false,
+            )
+        }
+        startDetailLoad(book, origin)
+    }
+
+    private fun startDetailLoad(book: ReaderSearchBookDto, origin: ReaderSearchOriginDto) {
+        detailJob?.cancel()
+        detailJob = viewModelScope.launch {
+            launch { loadDetailInfo(book, origin) }
+            launch { loadDetailChapters(origin, origin.bookUrl) }
+        }
+    }
+
+    private suspend fun loadDetailInfo(book: ReaderSearchBookDto, origin: ReaderSearchOriginDto) {
+        _state.update { it.copy(detailInfoLoading = true, detailInfoError = null) }
+        when (val result = repo.bookInfo(origin.sourceId, origin.origin, origin.bookUrl)) {
+            is ApiResult.Success -> {
+                _state.update {
+                    it.copy(
+                        detailInfoLoading = false,
+                        detailInfo = result.value,
+                        detailInfoError = null,
+                    )
+                }
+                val tocUrl = result.value.tocUrl.trim()
+                // 详情里的目录地址更准确：与书本地址不同时用它重新拉一次目录。
+                if (tocUrl.isNotEmpty() && tocUrl != origin.bookUrl) {
+                    loadDetailChapters(origin, tocUrl)
+                }
+            }
+            is ApiResult.Failure -> _state.update {
+                DiagnosticsLog.w(
+                    "Reader",
+                    "书籍详情失败 book=${book.name} HTTP ${result.status} ${result.code}",
+                )
+                // 旧服务端没有 /book-info 时返回 404：搜索信息已经够用，不打断用户。
+                it.copy(
+                    detailInfoLoading = false,
+                    detailInfoError = if (result.status == 404) null else readerError(result),
+                )
+            }
+            is ApiResult.NetworkError -> _state.update {
+                it.copy(detailInfoLoading = false, detailInfoError = "网络不可用，请稍后重试")
+            }
+            ApiResult.Stale -> _state.update { it.copy(detailInfoLoading = false) }
+        }
+    }
+
+    private suspend fun loadDetailChapters(origin: ReaderSearchOriginDto, tocUrl: String) {
+        detailTocToken += 1
+        val token = detailTocToken
+        _state.update { it.copy(detailChaptersLoading = true, detailChaptersError = null) }
+        when (val result = repo.toc(origin.origin, origin.bookUrl, tocUrl, origin.sourceId)) {
+            is ApiResult.Success -> if (token == detailTocToken) {
+                _state.update {
+                    it.copy(
+                        detailChaptersLoading = false,
+                        detailChapters = result.value,
+                        detailChaptersError = null,
+                    )
+                }
+            }
+            is ApiResult.Failure -> if (token == detailTocToken) {
+                DiagnosticsLog.w(
+                    "Reader",
+                    "详情目录失败 origin=${origin.originName} HTTP ${result.status} ${result.code}",
+                )
+                _state.update {
+                    it.copy(detailChaptersLoading = false, detailChaptersError = readerError(result))
+                }
+            }
+            is ApiResult.NetworkError -> if (token == detailTocToken) {
+                _state.update {
+                    it.copy(detailChaptersLoading = false, detailChaptersError = "网络不可用，请稍后重试")
+                }
+            }
+            ApiResult.Stale -> if (token == detailTocToken) {
+                _state.update { it.copy(detailChaptersLoading = false) }
+            }
+        }
+    }
+
+    private fun addDetailBook(startReading: Boolean, chapter: ReaderTocChapterDto?) {
+        val current = _state.value
+        val detail = current.searchDetail ?: return
+        if (current.addingBook) return
+        val origin = current.detailOrigin
+            ?: detail.origins?.firstOrNull { it.originType == 0 }
+            ?: detail.origins?.firstOrNull()
+        if (origin == null) {
+            _state.update { it.copy(addBookError = "该书没有可用书源，请换一个结果") }
+            return
+        }
+        val info = current.detailInfo
+        val name = info?.name?.takeIf { it.isNotBlank() } ?: detail.name
+        val author = info?.author?.takeIf { it.isNotBlank() } ?: detail.author
+        val cover = info?.coverUrl?.takeIf { it.isNotBlank() } ?: detail.coverUrl
+        _state.update { it.copy(addingBook = true, addBookError = null) }
+        viewModelScope.launch {
+            when (val result = repo.addBook(origin, name, author, cover)) {
+                is ApiResult.Success -> {
+                    val saved = result.value
+                    _state.update { state ->
+                        // 详情页已经有目录时，顺手把章数写进本地书架记录，
+                        // 回到书架不必等后台预热完成才显示「共 N 章」。
+                        val merged = saved.copy(
+                            totalChapterNum = maxOf(saved.totalChapterNum, state.detailChapters.size),
+                            latestChapterTitle = saved.latestChapterTitle.ifBlank {
+                                state.detailInfo?.latestChapter.orEmpty()
+                            },
+                        )
+                        state.copy(
+                            addingBook = false,
+                            addBookError = null,
+                            books = state.books.filterNot { book -> book.id == saved.id } + merged,
+                            shelfNotice = if (startReading) {
+                                state.shelfNotice
+                            } else {
+                                "《${saved.name}》已加入书架"
+                            },
+                        )
+                    }
+                    if (startReading) {
+                        detailJob?.cancel()
+                        openBook(
+                            saved,
+                            startChapterUrl = chapter
+                                ?.takeIf { !it.isVolume && it.url.isNotBlank() }
+                                ?.url,
+                            startChapterIndex = chapter
+                                ?.takeIf { !it.isVolume }
+                                ?.index,
+                        )
+                    }
+                }
+                is ApiResult.Failure -> _state.update {
+                    it.copy(addingBook = false, addBookError = readerError(result))
+                }
+                is ApiResult.NetworkError -> _state.update {
+                    it.copy(addingBook = false, addBookError = "网络不可用，请稍后重试")
+                }
+                ApiResult.Stale -> _state.update { it.copy(addingBook = false) }
+            }
+        }
+    }
 
     // ── 正文 ──
 
-    fun openBook(book: ReaderBookDto) {
+    fun openBook(
+        book: ReaderBookDto,
+        startChapterUrl: String? = null,
+        startChapterIndex: Int? = null,
+    ) {
         loadToken += 1
         val token = loadToken
+        pendingChapterUrl = startChapterUrl
+        pendingChapterIndex = startChapterIndex
         contentJob?.cancel()
         cacheJob?.cancel()
         _state.update {
-            it.copy(
+            it.clearDetail().copy(
                 screen = ReaderScreen.Reading,
                 book = book,
                 chapters = emptyList(),
@@ -535,8 +918,19 @@ class ReaderViewModel(
         }
         withContext(Dispatchers.IO) { cache.saveChapters(scope, book.id, loaded.chapters) }
         audio.updateChapters(loaded.chapters)
-        val index = ReaderChapters.initialIndex(book, loaded.chapters)
-        val page = if (index == book.durChapterIndex) book.durChapterPos else 0
+        // 详情页目录点章：优先按章节地址定位，地址找不到时按详情目录序号，最后回到书架进度。
+        val requestedUrl = pendingChapterUrl
+        val requestedHint = pendingChapterIndex
+        pendingChapterUrl = null
+        pendingChapterIndex = null
+        val urlIndex = requestedUrl
+            ?.let { url -> loaded.chapters.indexOfFirst { it.url == url && !it.isVolume } }
+            ?.takeIf { it >= 0 }
+        val hintIndex = requestedHint
+            ?.takeIf { it in loaded.chapters.indices && !loaded.chapters[it].isVolume }
+        val requestedIndex = urlIndex ?: hintIndex
+        val index = requestedIndex ?: ReaderChapters.initialIndex(book, loaded.chapters)
+        val page = if (index == book.durChapterIndex && requestedIndex == null) book.durChapterPos else 0
         _state.update {
             it.copy(
                 chapters = loaded.chapters,

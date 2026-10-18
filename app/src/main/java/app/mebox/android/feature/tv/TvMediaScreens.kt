@@ -65,6 +65,8 @@ import app.mebox.android.core.network.MediaDto
 import app.mebox.android.core.network.SeriesCardDto
 import app.mebox.android.core.network.WatchHistoryDto
 import app.mebox.android.core.player.PlayerEngineKind
+import app.mebox.android.core.player.SubtitlePreference
+import app.mebox.android.core.player.SubtitlePriority
 import app.mebox.android.feature.AppUiState
 import app.mebox.android.feature.diagnostics.rememberLogExport
 import app.mebox.android.feature.media.EpisodeThumbnail
@@ -661,14 +663,18 @@ fun TvDetailScreen(
         return
     }
 
-    val seasons = remember(state.episodes, media.id) { MediaBrowseFormat.seasons(state.episodes) }
-    val defaultSeason = media.seasonNum.takeIf { it in seasons } ?: seasons.firstOrNull() ?: 0
+    val seasonGroups = remember(state.episodes, media.id) { MediaBrowseFormat.seasonGroups(state.episodes) }
+    val defaultSeason = MediaBrowseFormat.seasonOf(media)
+        .takeIf { season -> seasonGroups.any { it.season == season } }
+        ?: seasonGroups.firstOrNull()?.season
+        ?: 0
     var selectedSeason by rememberSaveable(media.id) { mutableIntStateOf(defaultSeason) }
-    val visibleEpisodes = if (seasons.size > 1) {
-        state.episodes.filter { it.seasonNum == selectedSeason }
-    } else {
-        state.episodes
-    }
+    // 重新加载后原来的分季可能不存在（例如整季被删除），回落到默认季。
+    val currentSeason = selectedSeason
+        .takeIf { season -> seasonGroups.any { it.season == season } }
+        ?: defaultSeason
+    val visibleEpisodes = seasonGroups.firstOrNull { it.season == currentSeason }?.episodes
+        ?: state.episodes
     val showEpisodes = state.episodes.size > 1 || state.episodes.any { it.id != media.id }
     val duration = media.durationSec * 1000L
     val resumeMs = state.detailResumeMs.takeIf {
@@ -860,17 +866,17 @@ fun TvDetailScreen(
                     )
                 }
             }
-            if (seasons.size > 1) {
+            if (seasonGroups.size > 1) {
                 item(key = "seasons") {
                     LazyRow(
                         modifier = Modifier.padding(horizontal = 32.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        items(seasons) { season ->
+                        items(seasonGroups, key = { "season-${it.season}" }) { group ->
                             TvActionButton(
-                                text = "第 $season 季",
-                                onClick = { selectedSeason = season },
-                                primary = selectedSeason == season,
+                                text = MediaBrowseFormat.seasonLabel(group.season),
+                                onClick = { selectedSeason = group.season },
+                                primary = currentSeason == group.season,
                             )
                         }
                     }
@@ -1146,6 +1152,9 @@ fun TvProfileScreen(
     account: AppUiState.Account,
     engine: PlayerEngineKind,
     onSelectEngine: (PlayerEngineKind) -> Unit,
+    subtitlePreference: SubtitlePreference,
+    onToggleSubtitlesAutoLoad: (Boolean) -> Unit,
+    onSelectSubtitlePriority: (SubtitlePriority) -> Unit,
     onOpenFavorites: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenPhoneInput: () -> Unit,
@@ -1315,6 +1324,121 @@ fun TvProfileScreen(
                             color = MaterialTheme.colorScheme.primary,
                             fontSize = 12.sp,
                         )
+                    }
+                }
+            }
+        }
+
+        item(key = "profile-subtitle-title") {
+            Spacer(Modifier.height(8.dp))
+            TvSectionHeader(title = "字幕", modifier = Modifier.padding(horizontal = 0.dp))
+            Spacer(Modifier.height(2.dp))
+        }
+        item(key = "profile-subtitle-auto") {
+            TvFocusableSurface(
+                onClick = { onToggleSubtitlesAutoLoad(!subtitlePreference.autoLoad) },
+                modifier = Modifier.fillMaxWidth(),
+                focusedScale = 1.01f,
+                shape = RoundedCornerShape(14.dp),
+            ) { focused ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            if (focused) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.surface
+                            },
+                            RoundedCornerShape(14.dp),
+                        )
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "自动加载字幕",
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            "开播时按优先语言自动选中一条字幕",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    Text(
+                        if (subtitlePreference.autoLoad) "已开启" else "已关闭",
+                        color = if (subtitlePreference.autoLoad) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        fontSize = 13.sp,
+                    )
+                }
+            }
+        }
+        if (subtitlePreference.autoLoad) {
+            items(SubtitlePriority.entries, key = { "subtitle-${it.key}" }) { priority ->
+                TvFocusableSurface(
+                    onClick = { onSelectSubtitlePriority(priority) },
+                    modifier = Modifier.fillMaxWidth(),
+                    focusedScale = 1.01f,
+                    shape = RoundedCornerShape(14.dp),
+                ) { focused ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                if (focused) {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                } else {
+                                    MaterialTheme.colorScheme.surface
+                                },
+                                RoundedCornerShape(14.dp),
+                            )
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(18.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(
+                                    if (priority == subtitlePreference.priority) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    },
+                                ),
+                        )
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                priority.label,
+                                color = if (priority == subtitlePreference.priority) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Text(
+                                priority.description,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 12.sp,
+                            )
+                        }
+                        if (priority == subtitlePreference.priority) {
+                            Text(
+                                "当前",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 12.sp,
+                            )
+                        }
                     }
                 }
             }

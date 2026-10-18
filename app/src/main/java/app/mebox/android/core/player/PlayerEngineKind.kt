@@ -40,5 +40,31 @@ enum class PlayerEngineKind(
         /** 读取持久化值时容错：未知或空值一律回落到默认内核。 */
         fun fromKey(key: String?): PlayerEngineKind =
             entries.firstOrNull { it.key == key } ?: default
+
+        /**
+         * 系统解码失败时应当自动换成哪个内核；没有可用备选时返回 null。
+         *
+         * 只走 ExoPlayer → LibVLC 一条路：ExoPlayer 用的系统 MediaCodec 在手机上
+         * 通常只有 8-bit H.264/HEVC 硬解，Hi10P（H.264 High 10）这类编码既没有
+         * 硬解、系统软解也不支持，只能交给 LibVLC 内置的 FFmpeg。
+         */
+        fun automaticFallback(current: PlayerEngineKind): PlayerEngineKind? =
+            when (current) {
+                EXO -> VLC
+                VLC -> null
+            }
+
+        /**
+         * 是否要在这次错误后自动换内核。
+         *
+         * @param decodeRelated 播放器判定为解码/格式不支持，而不是网络问题。
+         * @param alreadyAttempted 本次播放已经自动切换过一次，避免来回循环。
+         */
+        fun shouldAutoFallback(
+            current: PlayerEngineKind,
+            decodeRelated: Boolean,
+            alreadyAttempted: Boolean,
+        ): Boolean =
+            decodeRelated && !alreadyAttempted && automaticFallback(current) != null
     }
 }

@@ -18,6 +18,8 @@ import app.mebox.android.core.network.ServerAddressResult
 import app.mebox.android.core.network.ServerCompatibility
 import app.mebox.android.core.network.ServerInfo
 import app.mebox.android.core.player.PlayerEngineKind
+import app.mebox.android.core.player.SubtitlePreference
+import app.mebox.android.core.player.SubtitlePriority
 import app.mebox.android.di.AppContainer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -74,17 +76,41 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
     )
     val playerEngine: StateFlow<PlayerEngineKind> = _playerEngine.asStateFlow()
 
-    /** 电视端手机扫码输入服务；手机端不启动，但保留同一个入口方便共用 ViewModel。 */
-    val phoneInput get() = container.phoneInput
-
-    /** 日志局域网下载服务，由「我的 → 诊断与日志」打开。 */
-    val logShare get() = container.logShare
+    /**
+     * 字幕自动加载与优先语言。播放页起播时按它自动选一条字幕；
+     * 结果同样只保存在本机，不上传服务端。
+     */
+    private val _subtitlePreference = MutableStateFlow(loadSubtitlePreference())
+    val subtitlePreference: StateFlow<SubtitlePreference> = _subtitlePreference.asStateFlow()
 
     fun selectPlayerEngine(kind: PlayerEngineKind) {
         container.preferences.playerEngine = kind.key
         _playerEngine.value = kind
         DiagnosticsLog.i("Play", "切换播放内核为 ${kind.key}")
     }
+
+    fun setSubtitlesAutoLoad(enabled: Boolean) {
+        container.preferences.subtitlesAutoLoad = enabled
+        _subtitlePreference.value = _subtitlePreference.value.copy(autoLoad = enabled)
+        DiagnosticsLog.i("Play", "字幕自动加载: $enabled")
+    }
+
+    fun setSubtitlePriority(priority: SubtitlePriority) {
+        container.preferences.subtitlePriority = priority.key
+        _subtitlePreference.value = _subtitlePreference.value.copy(priority = priority)
+        DiagnosticsLog.i("Play", "字幕优先语言: ${priority.key}")
+    }
+
+    private fun loadSubtitlePreference(): SubtitlePreference = SubtitlePreference(
+        autoLoad = container.preferences.subtitlesAutoLoad,
+        priority = SubtitlePriority.fromKey(container.preferences.subtitlePriority),
+    )
+
+    /** 电视端手机扫码输入服务；手机端不启动，但保留同一个入口方便共用 ViewModel。 */
+    val phoneInput get() = container.phoneInput
+
+    /** 日志局域网下载服务，由「我的 → 诊断与日志」打开。 */
+    val logShare get() = container.logShare
 
     private var repository: MobileSessionRepository? = null
 
