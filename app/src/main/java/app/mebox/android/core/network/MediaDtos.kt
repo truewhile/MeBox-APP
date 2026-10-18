@@ -18,6 +18,27 @@ data class LibraryDto(
     val cards: List<SeriesCardDto> = emptyList(),
 )
 
+/**
+ * `/api/me/pinned-libraries`：当前用户置顶的媒体库 ID，顺序即置顶优先级。
+ * 与网页端共用同一份用户偏好。
+ */
+@Serializable
+data class PinnedLibrariesDto(
+    @SerialName("library_ids") val libraryIds: List<String> = emptyList(),
+)
+
+/** 用户自定义的媒体库标签分组，一个媒体库同时只属于一个标签。 */
+@Serializable
+data class LibraryTagDto(
+    val name: String = "",
+    @SerialName("library_ids") val libraryIds: List<String> = emptyList(),
+)
+
+@Serializable
+data class LibraryTagsDto(
+    val tags: List<LibraryTagDto> = emptyList(),
+)
+
 @Serializable
 data class MediaDto(
     val id: String,

@@ -301,6 +301,23 @@ class ReaderViewModel(
         updateStyle(_state.value.style.copy(shelfSort = sort))
     }
 
+    /** 书架布局：与服务端 `shelf_layout` 共用，网页端改过这里也会跟着变。 */
+    fun setShelfLayout(layout: String) {
+        updateStyle(_state.value.style.copy(shelfLayout = layout))
+    }
+
+    fun setShelfGridColumns(columns: Int) {
+        updateStyle(_state.value.style.copy(shelfGridColumns = columns))
+    }
+
+    fun setShelfShowUnread(show: Boolean) {
+        updateStyle(_state.value.style.copy(shelfShowUnread = show))
+    }
+
+    fun setShelfShowUpdateTime(show: Boolean) {
+        updateStyle(_state.value.style.copy(shelfShowUpdateTime = show))
+    }
+
     private fun loadShelf() {
         if (_state.value.shelfLoading) return
         _state.update { it.copy(shelfLoading = true, shelfError = null) }
@@ -417,7 +434,17 @@ class ReaderViewModel(
     }
 
     fun resetStyle() {
-        updateStyle(ReaderStyle.DEFAULT.copy(shelfSort = _state.value.style.shelfSort))
+        // 「恢复默认」只重置阅读排版；书架布局/排序/显示项是独立偏好，保持不动。
+        val shelf = _state.value.style
+        updateStyle(
+            ReaderStyle.DEFAULT.copy(
+                shelfLayout = shelf.shelfLayout,
+                shelfGridColumns = shelf.shelfGridColumns,
+                shelfSort = shelf.shelfSort,
+                shelfShowUnread = shelf.shelfShowUnread,
+                shelfShowUpdateTime = shelf.shelfShowUpdateTime,
+            ),
+        )
     }
 
     // ── 搜索 ──

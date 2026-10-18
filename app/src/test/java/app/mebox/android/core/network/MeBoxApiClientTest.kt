@@ -319,4 +319,44 @@ class MeBoxApiClientTest {
         assertEquals("42", request.requestUrl?.queryParameter("episodeId"))
         assertEquals("Bearer access-token", request.getHeader("Authorization"))
     }
+
+    @Test
+    fun `pinned libraries and tags use the shared user profile endpoints`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"library_ids":["lib-2","lib-1"]}"""
+            )
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """
+                {
+                  "tags":[
+                    {"name":"动画","library_ids":["lib-1"]},
+                    {"name":"电影","library_ids":["lib-2","lib-3"]}
+                  ]
+                }
+                """.trimIndent()
+            )
+        )
+
+        val pinned = client.pinnedLibraries("access-token")
+        val tags = client.libraryTags("access-token")
+
+        assertTrue(pinned is ApiResult.Success)
+        assertEquals(listOf("lib-2", "lib-1"), (pinned as ApiResult.Success).value.libraryIds)
+        assertTrue(tags is ApiResult.Success)
+        val parsedTags = (tags as ApiResult.Success).value.tags
+        assertEquals(2, parsedTags.size)
+        assertEquals("动画", parsedTags[0].name)
+        assertEquals(listOf("lib-1"), parsedTags[0].libraryIds)
+        assertEquals(listOf("lib-2", "lib-3"), parsedTags[1].libraryIds)
+
+        val pinnedRequest = server.takeRequest()
+        assertEquals("/api/me/pinned-libraries", pinnedRequest.requestUrl?.encodedPath)
+        assertEquals("Bearer access-token", pinnedRequest.getHeader("Authorization"))
+        val tagsRequest = server.takeRequest()
+        assertEquals("/api/me/library-tags", tagsRequest.requestUrl?.encodedPath)
+        assertEquals("Bearer access-token", tagsRequest.getHeader("Authorization"))
+    }
 }

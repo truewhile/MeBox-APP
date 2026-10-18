@@ -39,10 +39,11 @@ class ReaderStyleTest {
     }
 
     @Test
-    fun `merge into profile keeps fields owned by the web client`() {
+    fun `merge into profile keeps audio fields and writes shelf settings`() {
         val base = ReaderProfileDto(
             audioSpeed = 1.5,
             audioTimerMinutes = 30,
+            pageMode = "page",
             shelfLayout = "list",
             shelfGridColumns = 3,
             shelfShowUnread = false,
@@ -54,7 +55,11 @@ class ReaderStyleTest {
             fontSize = 22f,
             lineHeight = 2.1f,
             paragraphSpacing = 14,
+            shelfLayout = "compact",
+            shelfGridColumns = 4,
             shelfSort = "name",
+            shelfShowUnread = true,
+            shelfShowUpdateTime = false,
         )
 
         val merged = style.mergeInto(base)
@@ -65,11 +70,48 @@ class ReaderStyleTest {
         assertEquals(2.1, merged.lineHeight, 0.001)
         assertEquals(14, merged.paragraphSpacing)
         assertEquals("name", merged.shelfSort)
+        assertEquals("compact", merged.shelfLayout)
+        assertEquals(4, merged.shelfGridColumns)
+        assertEquals(true, merged.shelfShowUnread)
+        assertEquals(false, merged.shelfShowUpdateTime)
+        // 本客户端没暴露的字段保持服务端原值。
         assertEquals(1.5, merged.audioSpeed, 0.001)
         assertEquals(30, merged.audioTimerMinutes)
-        assertEquals("list", merged.shelfLayout)
-        assertEquals(3, merged.shelfGridColumns)
-        assertEquals(false, merged.shelfShowUnread)
+        assertEquals("page", merged.pageMode)
+    }
+
+    @Test
+    fun `profile projection restores shelf settings`() {
+        val style = ReaderStyle.fromProfile(
+            ReaderProfileDto(
+                shelfLayout = "list",
+                shelfGridColumns = 5,
+                shelfSort = "author",
+                shelfShowUnread = false,
+                shelfShowUpdateTime = false,
+            ),
+        )
+
+        assertEquals("list", style.shelfLayout)
+        assertEquals(5, style.shelfGridColumns)
+        assertEquals("author", style.shelfSort)
+        assertEquals(false, style.shelfShowUnread)
+        assertEquals(false, style.shelfShowUpdateTime)
+    }
+
+    @Test
+    fun `sanitize clamps shelf settings`() {
+        val style = ReaderStyle(
+            shelfLayout = "unknown",
+            shelfGridColumns = 99,
+            shelfShowUnread = false,
+            shelfShowUpdateTime = false,
+        ).sanitized()
+
+        assertEquals(ReaderShelf.DEFAULT_LAYOUT, style.shelfLayout)
+        assertEquals(ReaderStyle.GRID_COLUMNS_MAX, style.shelfGridColumns)
+        assertEquals(false, style.shelfShowUnread)
+        assertEquals(false, style.shelfShowUpdateTime)
     }
 
     @Test

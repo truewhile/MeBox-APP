@@ -340,6 +340,7 @@ private fun TabsScaffold(
                     onOpenLibrary = mediaViewModel::openLibrary,
                     onOpenHistory = mediaViewModel::openHistory,
                     onOpenMediaTab = { mediaViewModel.selectTab(MainTab.MEDIA) },
+                    onSelectTag = mediaViewModel::selectLibraryTag,
                     onLoadMoreSections = mediaViewModel::loadMoreHomeSections,
                     onRefresh = mediaViewModel::refreshHome,
                 )
@@ -353,6 +354,7 @@ private fun TabsScaffold(
                     onOpenMedia = mediaViewModel::openMedia,
                     onOpenFavorites = mediaViewModel::openFavorites,
                     onOpenHistory = mediaViewModel::openHistory,
+                    onSelectTag = mediaViewModel::selectLibraryTag,
                 )
                 MainTab.READER -> ReaderShelfContent(
                     state = readerState,
@@ -379,11 +381,14 @@ private fun HomeScreen(
     onOpenLibrary: (LibraryDto) -> Unit,
     onOpenHistory: () -> Unit,
     onOpenMediaTab: () -> Unit,
+    onSelectTag: (String?) -> Unit,
     onLoadMoreSections: () -> Unit,
     onRefresh: () -> Unit,
 ) {
+    val visibleLibraries = state.visibleLibraries
     val hasContent = state.continueItems.isNotEmpty() ||
         state.recentItems.isNotEmpty() ||
+        state.libraries.isNotEmpty() ||
         state.carouselItems.isNotEmpty() ||
         state.librarySections.isNotEmpty()
     if (state.homeLoading && !hasContent) {
@@ -444,11 +449,20 @@ private fun HomeScreen(
                 }
             }
         }
-        if (state.libraries.isNotEmpty()) {
+        if (state.libraryTagTabs.size > 1) {
+            item {
+                LibraryTagBar(
+                    tabs = state.libraryTagTabs,
+                    selectedTag = state.selectedLibraryTag,
+                    onSelect = onSelectTag,
+                )
+            }
+        }
+        if (visibleLibraries.isNotEmpty()) {
             item {
                 MediaSection(
                     title = "媒体库",
-                    subtitle = "${state.libraries.size} 个库",
+                    subtitle = "${visibleLibraries.size} 个库",
                     actionLabel = "全部",
                     onAction = onOpenMediaTab,
                 ) {
@@ -456,16 +470,26 @@ private fun HomeScreen(
                         contentPadding = PaddingValues(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        items(state.libraries, key = { it.id }) { library ->
+                        items(visibleLibraries, key = { it.id }) { library ->
                             LibrarySpotlightCard(
                                 library = library,
                                 origin = origin,
                                 modifier = Modifier.width(214.dp),
+                                pinned = library.id in state.pinnedLibraryIds,
                                 onClick = { onOpenLibrary(library) },
                             )
                         }
                     }
                 }
+            }
+        } else if (state.selectedLibraryTag != null) {
+            item {
+                Text(
+                    "「${state.selectedLibraryTag}」标签下还没有媒体库，可在网页端「管理标签」里归类。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
             }
         }
         if (state.librarySections.isNotEmpty()) {
@@ -510,7 +534,7 @@ private fun HomeScreen(
 }
 
 private fun homeSubtitle(state: MediaUiState): String? {
-    val libraries = state.libraries.size
+    val libraries = state.visibleLibraries.size
     val recent = state.recentItems.size
     return when {
         libraries > 0 && recent > 0 -> "$libraries 个媒体库 · $recent 部最近更新"
@@ -534,7 +558,7 @@ private fun HomeCardRail(
             MediaPosterCard(
                 title = seriesCardTitle(card),
                 subtitle = seriesCardSubtitle(card),
-                posterUrl = MediaImageUrls.poster(origin, card.rep.posterUrl),
+                posterUrl = seriesCardPoster(origin, card),
                 rating = card.rep.rating,
                 badge = card.count.takeIf { it > 1 }?.let { "$it 集" },
                 modifier = Modifier.width(MediaDimens.PosterWidth),
@@ -895,11 +919,16 @@ private fun MediaTabScreen(
     onOpenMedia: (MediaDto) -> Unit,
     onOpenFavorites: () -> Unit,
     onOpenHistory: () -> Unit,
+    onSelectTag: (String?) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         MeBoxTopBar(
             title = "影视",
-            subtitle = if (state.libraries.isNotEmpty()) "${state.libraries.size} 个媒体库" else null,
+            subtitle = if (state.visibleLibraries.isNotEmpty()) {
+                "${state.visibleLibraries.size} 个媒体库"
+            } else {
+                null
+            },
             actions = {
                 MeBoxIconButton(
                     icon = Icons.Default.Favorite,
@@ -922,7 +951,7 @@ private fun MediaTabScreen(
             modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 12.dp),
         )
         when {
-            state.searchQuery.isBlank() -> LibraryIndex(state, origin, onOpenLibrary)
+            state.searchQuery.isBlank() -> LibraryIndex(state, origin, onOpenLibrary, onSelectTag)
             state.searchLoading && state.searchResults.isEmpty() -> {
                 Spacer(Modifier.height(8.dp))
                 MediaGridSkeleton(columns = 3, rows = 3)
@@ -971,7 +1000,7 @@ private fun MediaTabScreen(
                         MediaPosterCard(
                             title = media.title,
                             subtitle = media.displayEpisode.ifBlank { cardYear(media) },
-                            posterUrl = MediaImageUrls.poster(origin, media.posterUrl),
+                            posterUrl = mediaPosterImage(origin, media),
                             rating = media.rating,
                             onClick = { onOpenMedia(media) },
                         )
@@ -1000,7 +1029,9 @@ private fun LibraryIndex(
     state: MediaUiState,
     origin: String,
     onOpenLibrary: (LibraryDto) -> Unit,
+    onSelectTag: (String?) -> Unit,
 ) {
+    val libraries = state.visibleLibraries
     if (state.libraries.isEmpty()) {
         when {
             state.homeLoading -> {
@@ -1017,6 +1048,17 @@ private fun LibraryIndex(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
+        if (state.libraryTagTabs.size > 1) {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "library-tags") {
+                LibraryTagBar(
+                    tabs = state.libraryTagTabs,
+                    selectedTag = state.selectedLibraryTag,
+                    onSelect = onSelectTag,
+                    modifier = Modifier.padding(bottom = 2.dp),
+                    contentPadding = PaddingValues(0.dp),
+                )
+            }
+        }
         item(span = { GridItemSpan(maxLineSpan) }) {
             Row(
                 modifier = Modifier
@@ -1027,24 +1069,42 @@ private fun LibraryIndex(
                 Column(Modifier.weight(1f)) {
                     Text("媒体库", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        "选择一个库开始浏览",
+                        if (state.selectedLibraryTag == null) {
+                            "选择一个库开始浏览"
+                        } else {
+                            "「${state.selectedLibraryTag}」标签下的媒体库"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Text(
-                    "${state.libraries.size} 个",
+                    "${libraries.size} 个",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
-        items(state.libraries, key = { it.id }) { library ->
-            LibrarySpotlightCard(
-                library = library,
-                origin = origin,
-                onClick = { onOpenLibrary(library) },
-            )
+        if (libraries.isEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Text(
+                    "「${state.selectedLibraryTag}」标签下还没有媒体库，可在网页端「管理标签」里归类。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 24.dp),
+                )
+            }
+        } else {
+            items(libraries, key = { it.id }) { library ->
+                LibrarySpotlightCard(
+                    library = library,
+                    origin = origin,
+                    pinned = library.id in state.pinnedLibraryIds,
+                    onClick = { onOpenLibrary(library) },
+                )
+            }
         }
     }
 }
@@ -1181,7 +1241,7 @@ private fun LibraryScreen(
                             MediaPosterCard(
                                 title = seriesCardTitle(card),
                                 subtitle = cardYear(card.rep),
-                                posterUrl = MediaImageUrls.poster(origin, card.rep.posterUrl),
+                                posterUrl = seriesCardPoster(origin, card),
                                 rating = card.rep.rating,
                                 badge = card.count.takeIf { it > 1 }?.let { "$it 集" },
                                 onClick = { onOpenCard(card) },
@@ -1442,7 +1502,7 @@ private fun FavoriteCard(
     MediaPosterCard(
         title = media.title,
         subtitle = subtitle,
-        posterUrl = MediaImageUrls.poster(origin, media.posterUrl),
+        posterUrl = mediaPosterImage(origin, media),
         rating = media.rating,
         action = {
             Surface(

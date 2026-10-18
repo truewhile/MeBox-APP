@@ -44,6 +44,18 @@ interface MobileApi {
         @Query("include_total") includeTotal: Boolean?,
     ): Response<List<LibraryDto>>
 
+    /** 当前用户置顶的媒体库；与网页端共用同一份用户偏好。 */
+    @GET("api/me/pinned-libraries")
+    suspend fun pinnedLibraries(
+        @Header("Authorization") authorization: String,
+    ): Response<PinnedLibrariesDto>
+
+    /** 当前用户的媒体库标签分组；与网页端共用同一份用户偏好。 */
+    @GET("api/me/library-tags")
+    suspend fun libraryTags(
+        @Header("Authorization") authorization: String,
+    ): Response<LibraryTagsDto>
+
     @GET("api/libraries/{id}/series")
     suspend fun librarySeries(
         @Header("Authorization") authorization: String,

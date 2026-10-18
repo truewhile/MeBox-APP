@@ -292,7 +292,7 @@ private fun TvConnectionScreen(
             }
             Spacer(Modifier.height(18.dp))
             Text(
-                "账号密码只用于本次登录，不会写入电视存储。",
+                "服务器地址和登录状态会保存在电视上，下次开机自动恢复；只有密码不会保存。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
@@ -474,7 +474,7 @@ private fun TvLoginScreen(
             }
             Spacer(Modifier.height(18.dp))
             Text(
-                "密码只用于本次登录，不会保存在电视上。",
+                "登录成功后会保存登录状态，下次开机自动恢复；密码本身不会保存。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
                 textAlign = TextAlign.Start,

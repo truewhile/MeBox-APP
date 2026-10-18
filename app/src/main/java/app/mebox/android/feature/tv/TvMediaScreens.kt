@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.mebox.android.core.media.LibraryArtwork
 import app.mebox.android.core.media.MediaBrowseFormat
+import app.mebox.android.core.media.MediaImageUrls
 import app.mebox.android.core.media.PlaybackPlan
 import app.mebox.android.core.network.ContinueWatchingDto
 import app.mebox.android.core.network.LibraryDto
@@ -78,7 +79,8 @@ import app.mebox.android.feature.media.continueWatchingSubtitle
 import app.mebox.android.feature.media.episodeArtworkImage
 import app.mebox.android.feature.media.libraryTypeName
 import app.mebox.android.feature.media.mediaArtworkImage
-import app.mebox.android.feature.media.seriesCardImage
+import app.mebox.android.feature.media.mediaPosterImage
+import app.mebox.android.feature.media.seriesCardPoster
 import app.mebox.android.feature.media.seriesCardSubtitle
 import app.mebox.android.feature.media.seriesCardTitle
 
@@ -93,10 +95,12 @@ fun TvHomeScreen(
     onOpenLibrary: (LibraryDto) -> Unit,
     onOpenHistory: () -> Unit,
     onOpenMediaTab: () -> Unit,
+    onSelectTag: (String?) -> Unit,
     onRefresh: () -> Unit,
 ) {
     val hasContent = state.continueItems.isNotEmpty() ||
         state.recentItems.isNotEmpty() ||
+        state.libraries.isNotEmpty() ||
         state.carouselItems.isNotEmpty() ||
         state.librarySections.isNotEmpty()
 
@@ -175,6 +179,17 @@ fun TvHomeScreen(
             }
         }
 
+        if (state.libraryTagTabs.size > 1) {
+            item(key = "library-tags") {
+                Spacer(Modifier.height(20.dp))
+                TvLibraryTagRow(
+                    tabs = state.libraryTagTabs,
+                    selectedTag = state.selectedLibraryTag,
+                    onSelect = onSelectTag,
+                )
+            }
+        }
+
         state.librarySections.forEach { section ->
             item(key = "bar-${section.library.id}") {
                 Spacer(Modifier.height(22.dp))
@@ -199,7 +214,7 @@ fun TvHomeScreen(
                         },
                     ) { _, card ->                        TvPosterCard(
                             title = seriesCardTitle(card),
-                            posterUrl = seriesCardImage(origin, card),
+                            posterUrl = seriesCardPoster(origin, card),
                             subtitle = seriesCardSubtitle(card),
                             onClick = { onOpenCard(card) },
                         )
@@ -233,7 +248,7 @@ fun TvHomeScreen(
                     ) { _, card ->
                         TvPosterCard(
                             title = seriesCardTitle(card),
-                            posterUrl = seriesCardImage(origin, card),
+                            posterUrl = seriesCardPoster(origin, card),
                             subtitle = seriesCardSubtitle(card),
                             onClick = { onOpenCard(card) },
                         )
@@ -270,7 +285,10 @@ private fun TvHero(
     onContinue: (() -> Unit)?,
     onOpenMediaTab: () -> Unit,
 ) {
-    val image = seriesCardImage(origin, card)
+    val image = MediaImageUrls.backdropHero(
+        origin = origin,
+        remote = card.rep.backdropUrl.ifBlank { card.rep.posterUrl },
+    )
     val background = MaterialTheme.colorScheme.background
     Box(
         modifier = Modifier
@@ -375,6 +393,7 @@ fun TvMediaTabScreen(
     onOpenHistory: () -> Unit,
     onLoadMoreSearch: () -> Unit,
     onOpenPhoneSearch: () -> Unit,
+    onSelectTag: (String?) -> Unit,
 ) {
     val searching = state.searchQuery.isNotBlank()
     Column(Modifier.fillMaxSize()) {
@@ -383,7 +402,7 @@ fun TvMediaTabScreen(
             subtitle = if (searching) {
                 "“${state.searchQuery}” · ${state.searchTotal} 个结果"
             } else {
-                "${state.libraries.size} 个媒体库"
+                "${state.visibleLibraries.size} 个媒体库"
             },
             actions = {
                 TvActionButton(
@@ -425,6 +444,15 @@ fun TvMediaTabScreen(
             },
         )
 
+        if (!searching && state.libraryTagTabs.size > 1) {
+            TvLibraryTagRow(
+                tabs = state.libraryTagTabs,
+                selectedTag = state.selectedLibraryTag,
+                onSelect = onSelectTag,
+            )
+            Spacer(Modifier.height(12.dp))
+        }
+
         when {
             searching && state.searchLoading && state.searchResults.isEmpty() ->
                 TvLoading("正在搜索…")
@@ -446,7 +474,7 @@ fun TvMediaTabScreen(
                     items(state.searchResults, key = { it.id }) { media ->
                         TvPosterCard(
                             title = media.title,
-                            posterUrl = tvPoster(origin, media.posterUrl.ifBlank { media.backdropUrl }),
+                            posterUrl = mediaPosterImage(origin, media),
                             subtitle = listOfNotNull(
                                 media.displayEpisode.ifBlank { null },
                                 media.year.takeIf { it > 0 }?.toString(),
@@ -468,12 +496,18 @@ fun TvMediaTabScreen(
                         }
                     }
                 } else {
-                    if (state.libraries.isEmpty()) {
+                    if (state.visibleLibraries.isEmpty()) {
                         item(span = { GridItemSpan(maxLineSpan) }) {
-                            TvMessage("没有可见的媒体库")
+                            TvMessage(
+                                if (state.selectedLibraryTag == null) {
+                                    "没有可见的媒体库"
+                                } else {
+                                    "「${state.selectedLibraryTag}」标签下还没有媒体库"
+                                },
+                            )
                         }
                     } else {
-                        items(state.libraries, key = { it.id }) { library ->
+                        items(state.visibleLibraries, key = { it.id }) { library ->
                             TvLibraryTile(
                                 library = library,
                                 origin = origin,
@@ -611,7 +645,7 @@ fun TvLibraryScreen(
                 ) { _, card ->
                     TvPosterCard(
                         title = seriesCardTitle(card),
-                        posterUrl = seriesCardImage(origin, card),
+                        posterUrl = seriesCardPoster(origin, card),
                         subtitle = seriesCardSubtitle(card),
                         onClick = { onOpenCard(card) },
                     )
@@ -699,7 +733,10 @@ fun TvDetailScreen(
                     .height(300.dp),
             ) {
                 MediaArtwork(
-                    url = tvBackdrop(origin, media.backdropUrl.ifBlank { media.posterUrl }),
+                    url = MediaImageUrls.backdropHero(
+                        origin = origin,
+                        remote = media.backdropUrl.ifBlank { media.posterUrl },
+                    ),
                     title = media.title,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -998,7 +1035,7 @@ fun TvFavoritesScreen(
                 items(state.favorites, key = { it.id }) { media ->
                     TvPosterCard(
                         title = media.title,
-                        posterUrl = tvPoster(origin, media.posterUrl.ifBlank { media.backdropUrl }),
+                        posterUrl = mediaPosterImage(origin, media),
                         subtitle = listOfNotNull(
                             media.displayEpisode.ifBlank { null },
                             media.year.takeIf { it > 0 }?.toString(),

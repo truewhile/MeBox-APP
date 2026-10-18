@@ -152,6 +152,22 @@ Android 手机/平板、推荐 minSdk 26、单活动服务器、根路径部署�
 
 ## 7. 变更历史
 
+### 2026-10-18 / App 书架设置对齐网页端
+
+安卓（仓库 `D:\project\MeBox-APP`，未提交）：
+
+- 网页端书架设置已按用户持久化在服务端 `reader/profile`：`shelf_layout`、
+  `shelf_grid_columns`、`shelf_sort`、`shelf_show_unread`、`shelf_show_update_time`。
+  App 现在读写同一组字段，网页端改过的布局/排序/显示项打开 App 即可生效。
+- `ReaderStyle` 补齐书架字段，`mergeInto` 写回服务端；本地首屏缓存
+  （`ReaderPreferences`）从 6 段扩展到 10 段，旧的 6 段缓存按默认值兼容读取。
+- 书架页新增「书架设置」弹层：网格 / 列表 / 紧凑列表、网格列数
+  （自适应或 2–6 列）、六种排序，以及未读章数、更新时间开关；网格与两种列表
+  按选择渲染，未读章数算法与网页端 `bookshelfModel` 一致。
+- 设置改动走既有的 1.2 秒防抖写回 `/reader/profile`；「恢复默认」只重置阅读排版，
+  不再覆盖书架偏好。电视端书架仍使用大屏自适应网格，但排序沿用同一份设置。
+- 新增/更新 `ReaderShelfTest`、`ReaderStyleTest`；`:app:testDebugUnitTest` 全部通过。
+
 ### 2026-10-18 / 修复听书连跳章节
 
 安卓（仓库 `D:\project\MeBox-APP`）：

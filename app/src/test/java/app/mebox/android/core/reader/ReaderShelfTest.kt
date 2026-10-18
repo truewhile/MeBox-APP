@@ -94,5 +94,47 @@ class ReaderShelfTest {
     fun `sort labels fall back to recent`() {
         assertEquals("最近阅读", ReaderShelf.sortLabel("unknown"))
         assertEquals("最近更新", ReaderShelf.sortLabel("update"))
+        assertEquals("按书名", ReaderShelf.sortLabel("name"))
+    }
+
+    @Test
+    fun `layout labels fall back to grid`() {
+        assertEquals("网格", ReaderShelf.layoutLabel("unknown"))
+        assertEquals("列表", ReaderShelf.layoutLabel("list"))
+        assertEquals("紧凑列表", ReaderShelf.layoutLabel("compact"))
+        assertEquals("自适应", ReaderShelf.gridColumnsLabel(0))
+        assertEquals("4 列", ReaderShelf.gridColumnsLabel(4))
+    }
+
+    @Test
+    fun `unread chapters mirror the web bookshelf`() {
+        // 目录未缓存：不显示徽标。
+        assertEquals(null, ReaderShelf.unreadChapters(book("a", "A", total = 0)))
+        // 未开始阅读：整本未读。
+        assertEquals(10, ReaderShelf.unreadChapters(book("a", "A", total = 10)))
+        // 读到第 4 章（索引 3）：还剩 6 章。
+        assertEquals(
+            6,
+            ReaderShelf.unreadChapters(
+                book("a", "A", total = 10, durChapterTime = 100, durChapterIndex = 3),
+            ),
+        )
+        // 已读到最后一章：未读为 0，界面显示「已读完」。
+        assertEquals(
+            0,
+            ReaderShelf.unreadChapters(
+                book("a", "A", total = 10, durChapterTime = 100, durChapterIndex = 9),
+            ),
+        )
+    }
+
+    @Test
+    fun `relative time falls back to date after thirty days`() {
+        val now = 1_700_000_000_000L
+        assertEquals("刚刚", ReaderShelf.formatRelativeTime(now - 10_000, now))
+        assertEquals("5 分钟前", ReaderShelf.formatRelativeTime(now - 5 * 60_000, now))
+        assertEquals("2 小时前", ReaderShelf.formatRelativeTime(now - 2 * 3_600_000, now))
+        assertEquals("3 天前", ReaderShelf.formatRelativeTime(now - 3L * 86_400_000, now))
+        assertEquals("", ReaderShelf.formatRelativeTime(0, now))
     }
 }

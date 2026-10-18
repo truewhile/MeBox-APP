@@ -22,6 +22,8 @@ import app.mebox.android.core.player.PlayerEngineKind
 import app.mebox.android.core.player.SubtitlePreference
 import app.mebox.android.core.player.SubtitlePriority
 import app.mebox.android.di.AppContainer
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -130,6 +132,9 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
 
     private var repository: MobileSessionRepository? = null
 
+    /** 冷启动网络失败后的自动重试任务；同一时间只保留一个。 */
+    private var restoreRetryJob: Job? = null
+
     init {
         viewModelScope.launch { restoreSession() }
         viewModelScope.launch {
@@ -191,6 +196,9 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             return
         }
         val address = (parsed as ServerAddressResult.Valid).address
+        // 先记下地址再发起网络请求：电视端首次连接常因 Wi-Fi 还没就绪而失败，
+        // 地址如果只在成功后保存，用户下次启动又得重新输入。
+        container.preferences.lastAddress = address.origin
         if (address.isCleartext && !container.preferences.cleartextRiskAccepted) {
             _state.value = current.copy(pendingCleartext = address, error = null)
             return
@@ -234,6 +242,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                 is ApiResult.Success -> {
                     DiagnosticsLog.i("Auth", "登录成功 user=$username")
                     val scope = AccountScope(repo.serverInfo.serverId, result.value.user.id)
+                    container.preferences.lastUsername = username
                     container.preferences.saveAccount(scope.serverId, scope.userId)
                     showAccount(current.address, repo, scope, result.value.user, fallbackDevice = Build.MODEL)
                 }
@@ -269,6 +278,8 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             container.readerAudio.stop()
             container.readerCache.clearAccount(current.scope)
             container.preferences.clearAccount()
+            // 主动退出时不再在登录页带出用户名。
+            container.preferences.lastUsername = null
             // 缓存里可能还有上一个账号的媒体列表与详情。
             container.clearHttpCache()
             val unconfirmed = remote is ApiResult.Failure || remote is ApiResult.NetworkError
@@ -297,7 +308,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
-    private suspend fun restoreSession() {
+    private suspend fun restoreSession(retryAttempt: Int = 0) {
         DiagnosticsLog.i("Session", "恢复上次会话")
         val savedAddress = container.preferences.lastAddress
         if (savedAddress.isNullOrBlank()) {
@@ -360,6 +371,9 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                     addressText = address.origin,
                     notice = "暂时无法连接服务器，登录状态已保留",
                 )
+                // 电视端开机时应用常比 Wi-Fi 先就绪：这里自动重试几次，
+                // 网络恢复后不需要用户按任何键就能回到账号界面。
+                scheduleRestoreRetry(retryAttempt + 1)
                 return
             }
             ApiResult.Stale -> {
@@ -390,7 +404,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             container.credentialStore.clear(AccountScope(serverId, userId))
             container.preferences.clearAccount()
             container.clearHttpCache()
-            _state.value = AppUiState.Login(address, info, error = "服务器实例已变化，请重新登录")
+            _state.value = loginState(address, info, error = "服务器实例已变化，请重新登录")
             return
         }
         val scope = AccountScope(serverId, userId)
@@ -423,9 +437,9 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                     container.watchProgress.clear(scope)
                     container.preferences.clearAccount()
                     container.clearHttpCache()
-                    _state.value = AppUiState.Login(
+                    _state.value = loginState(
                         address = address,
-                        serverInfo = info,
+                        info = info,
                         error = "登录已失效，请重新登录",
                     )
                 } else {
@@ -445,10 +459,36 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                     addressText = address.origin,
                     notice = "暂时无法连接，登录状态已保留，请稍后重试",
                 )
+                scheduleRestoreRetry(retryAttempt + 1)
             }
             ApiResult.Stale -> {
                 _state.value = AppUiState.Connection(addressText = address.origin)
             }
+        }
+    }
+
+    /**
+     * 冷启动网络失败后的自动重试。
+     *
+     * 电视端应用经常比 Wi-Fi 先启动；只在「本机存有账号 + 界面仍停在同一个
+     * 已保存地址的连接页」时重跑恢复，避免打断用户手动输入或覆盖登录页。
+     */
+    private fun scheduleRestoreRetry(attempt: Int) {
+        if (attempt > MAX_RESTORE_RETRIES) return
+        if (container.preferences.accountUserId.isNullOrBlank()) return
+        restoreRetryJob?.cancel()
+        restoreRetryJob = viewModelScope.launch {
+            delay(RESTORE_RETRY_DELAY_MS)
+            val current = _state.value
+            val saved = container.preferences.lastAddress
+            if (current !is AppUiState.Connection ||
+                saved.isNullOrBlank() ||
+                current.addressText.trim() != saved.trim()
+            ) {
+                return@launch
+            }
+            DiagnosticsLog.i("Session", "网络恢复后自动重试 $attempt/$MAX_RESTORE_RETRIES")
+            restoreSession(retryAttempt = attempt)
         }
     }
 
@@ -492,9 +532,9 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                         container.credentialStore.clear(AccountScope(serverId, userId))
                         container.preferences.clearAccount()
                         container.clearHttpCache()
-                        _state.value = AppUiState.Login(
-                            address,
-                            result.value,
+                        _state.value = loginState(
+                            address = address,
+                            info = result.value,
                             error = "服务器实例已变化，请重新登录",
                         )
                         return@launch
@@ -549,9 +589,17 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                         return@launch
                     }
                     container.preferences.lastAddress = address.origin
-                    repository = MobileSessionRepository(info, api, container.credentialStore)
+                    saveServerInfoSnapshot(address, info)
+                    val repo = MobileSessionRepository(info, api, container.credentialStore)
+                    repository = repo
                     if (showLoginOnSuccess) {
-                        _state.value = AppUiState.Login(address, info)
+                        // 地址可达时先尝试恢复本机已有会话。
+                        //
+                        // 电视端冷启动经常遇到「网络还没就绪 → 恢复失败 → 回到连接页」，
+                        // 如果这里无条件跳到登录页，用户即使本机凭证仍然有效也要
+                        // 重新输入账号密码；这正是「电视每次都要重新登录」的来源。
+                        _state.value = resumeSavedSession(address, info, repo)
+                            ?: loginState(address, info)
                     }
                 }
                 is ApiResult.Failure -> {
@@ -579,6 +627,73 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                     _state.value = AppUiState.Connection(addressText = address.origin)
                 }
             }
+        }
+    }
+
+    /**
+     * 登录页的状态构造函数：自动带出上次登录的用户名（不保存密码）。
+     * 电视端恢复会话失败时，用户至少不用再输一遍用户名。
+     */
+    private fun loginState(
+        address: ServerAddress,
+        info: ServerInfo,
+        error: String? = null,
+    ): AppUiState.Login = AppUiState.Login(
+        address = address,
+        serverInfo = info,
+        username = container.preferences.lastUsername.orEmpty(),
+        error = error,
+    )
+
+    /**
+     * 连接成功且本机存有该服务器的账号时，直接恢复会话。
+     *
+     * 返回 `null` 表示没有可用会话、需要用户手动登录。网络错误不在这里
+     * 清除凭证；只有服务端明确返回 401 才清理并要求重新登录。
+     */
+    private suspend fun resumeSavedSession(
+        address: ServerAddress,
+        info: ServerInfo,
+        repo: MobileSessionRepository,
+    ): AppUiState? {
+        val serverId = container.preferences.accountServerId?.takeIf { it.isNotBlank() }
+            ?: return null
+        val userId = container.preferences.accountUserId?.takeIf { it.isNotBlank() }
+            ?: return null
+        // 地址指向了另一台实例：旧凭证不属于它。这里不清除，用户退回原地址
+        // 时仍可以恢复。
+        if (info.serverId != serverId) return null
+        val scope = AccountScope(serverId, userId)
+        return when (val session = repo.loadSession(scope)) {
+            is ApiResult.Success -> {
+                DiagnosticsLog.i(
+                    "Session",
+                    "连接后恢复会话 user=${session.value.user.username}",
+                )
+                AppUiState.Account(
+                    address = address,
+                    serverInfo = info,
+                    scope = scope,
+                    user = session.value.user,
+                    deviceLabel = session.value.session?.deviceName
+                        ?.takeIf { it.isNotBlank() } ?: "Android",
+                )
+            }
+            is ApiResult.Failure -> {
+                if (session.status == 401) {
+                    DiagnosticsLog.w("Session", "本机会话已失效，需要重新登录")
+                    repo.coordinator.onAccountChanged()
+                    container.credentialStore.clear(scope)
+                    container.watchProgress.clear(scope)
+                    container.preferences.clearAccount()
+                    container.clearHttpCache()
+                    loginState(address, info, error = "登录已失效，请重新登录")
+                } else {
+                    null
+                }
+            }
+            is ApiResult.NetworkError -> null
+            ApiResult.Stale -> null
         }
     }
 
@@ -664,5 +779,11 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             }
             return MainViewModel(container) as T
         }
+    }
+
+    private companion object {
+        /** 冷启动网络失败时最多自动重试几次（每次间隔见 [RESTORE_RETRY_DELAY_MS]）。 */
+        const val MAX_RESTORE_RETRIES = 3
+        const val RESTORE_RETRY_DELAY_MS = 4_000L
     }
 }

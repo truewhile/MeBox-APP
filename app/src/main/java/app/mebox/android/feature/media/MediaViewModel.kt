@@ -10,8 +10,10 @@ import app.mebox.android.core.media.DeviceCodecSupport
 import app.mebox.android.core.media.DanmakuComment
 import app.mebox.android.core.media.DanmakuParser
 import app.mebox.android.core.media.LibraryFilter
+import app.mebox.android.core.media.LibraryGrouping
 import app.mebox.android.core.media.LibrarySort
 import app.mebox.android.core.media.LibrarySortSelection
+import app.mebox.android.core.media.LibraryTagTab
 import app.mebox.android.core.media.MediaRepository
 import app.mebox.android.core.media.PlaybackPlan
 import app.mebox.android.core.media.PlaybackUrls
@@ -24,6 +26,7 @@ import app.mebox.android.core.network.DanmakuAnimeDto
 import app.mebox.android.core.network.DanmakuSettingsPatchDto
 import app.mebox.android.core.network.LibraryDto
 import app.mebox.android.core.network.LibraryFacetsDto
+import app.mebox.android.core.network.LibraryTagDto
 import app.mebox.android.core.network.MediaDto
 import app.mebox.android.core.network.SeriesCardDto
 import app.mebox.android.core.network.SubtitleTrackDto
@@ -33,6 +36,7 @@ import app.mebox.android.feature.ErrorMessages
 import coil.ImageLoader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -158,6 +162,12 @@ data class MediaUiState(
     val tab: MainTab = MainTab.HOME,
     val screen: MediaScreen = MediaScreen.Tabs,
     val libraries: List<LibraryDto> = emptyList(),
+    /** 当前用户置顶的媒体库 ID；置顶库整体排在首页与媒体库索引的最前。 */
+    val pinnedLibraryIds: List<String> = emptyList(),
+    /** 当前用户的媒体库标签分组（与网页端共用）。 */
+    val libraryTags: List<LibraryTagDto> = emptyList(),
+    /** 选中的标签；`null` 表示「全部」。 */
+    val selectedLibraryTag: String? = null,
     val librarySections: List<LibrarySection> = emptyList(),
     val carouselItems: List<SeriesCardDto> = emptyList(),
     val continueItems: List<ContinueWatchingDto> = emptyList(),
@@ -203,7 +213,15 @@ data class MediaUiState(
     val danmaku: DanmakuUiState = DanmakuUiState(),
     val playerReturn: MediaScreen = MediaScreen.Tabs,
     val detailReturn: MediaScreen = MediaScreen.Tabs,
-)
+) {
+    /** 标签栏：首项「全部」，其后是用户维护的标签；没有标签时只有「全部」。 */
+    val libraryTagTabs: List<LibraryTagTab>
+        get() = LibraryGrouping.tabs(libraries, libraryTags)
+
+    /** 当前标签下参与展示的媒体库（已按置顶排好序）。 */
+    val visibleLibraries: List<LibraryDto>
+        get() = LibraryGrouping.filterByTag(libraries, libraryTags, selectedLibraryTag)
+}
 
 /**
  * 影视模块状态。所有播放地址都在这里统一拼装：
@@ -278,14 +296,47 @@ class MediaViewModel(
         }
     }
 
+    /**
+     * 首页媒体库列表与用户偏好（置顶、标签）并行加载：置顶决定哪些库排在最前，
+     * 标签决定标签栏内容。两个偏好接口都是单表读取，通常与库列表同一轮到达；
+     * 旧服务端没有这些接口时按空偏好处理，首页仍能正常显示。
+     */
     private suspend fun loadHomeLibraries(requestId: Long) {
-        when (val result = repo.libraries()) {
+        val (librariesResult, pinnedResult, tagsResult) = coroutineScope {
+            val libraries = async { repo.libraries() }
+            val pinned = async { repo.pinnedLibraries() }
+            val tags = async { repo.libraryTags() }
+            Triple(libraries.await(), pinned.await(), tags.await())
+        }
+        when (librariesResult) {
             is ApiResult.Success -> {
                 if (requestId != homeRequestId) return
-                _state.update { it.copy(libraries = result.value) }
-                loadHomeSections(requestId, result.value)
+                val pinnedIds = if (pinnedResult is ApiResult.Success) {
+                    pinnedResult.value
+                } else {
+                    emptyList()
+                }
+                val tags = if (tagsResult is ApiResult.Success) {
+                    tagsResult.value
+                } else {
+                    emptyList()
+                }
+                val ordered = LibraryGrouping.orderByPinned(librariesResult.value, pinnedIds)
+                _state.update { current ->
+                    current.copy(
+                        libraries = ordered,
+                        pinnedLibraryIds = pinnedIds,
+                        libraryTags = tags,
+                        // 标签被网页端删除后，本地选中的旧标签要回落到「全部」。
+                        selectedLibraryTag = LibraryGrouping.resolveTag(
+                            tags,
+                            current.selectedLibraryTag,
+                        ),
+                    )
+                }
+                loadHomeSections(requestId, ordered)
             }
-            is ApiResult.Failure -> reportHomeError(requestId, ErrorMessages.action(result))
+            is ApiResult.Failure -> reportHomeError(requestId, ErrorMessages.action(librariesResult))
             is ApiResult.NetworkError -> reportHomeError(requestId, "网络不可用，请稍后重试")
             ApiResult.Stale -> Unit
         }
@@ -336,11 +387,38 @@ class MediaViewModel(
      */
     private fun loadHomeSections(requestId: Long, libraries: List<LibraryDto>) {
         homeSectionsJob?.cancel()
-        homeSectionLibraries = libraries.filter { it.enabled }
+        // 标签只筛选参与展示的库，不改变置顶/手动顺序。
+        homeSectionLibraries = LibraryGrouping.filterByTag(
+            libraries.filter { it.enabled },
+            _state.value.libraryTags,
+            _state.value.selectedLibraryTag,
+        )
         homeSectionLoadedCount = 0
         _state.update { it.copy(homeSectionsRemaining = homeSectionLibraries.size) }
         if (homeSectionLibraries.isEmpty()) return
         loadNextHomeSections(requestId, initial = true)
+    }
+
+    /**
+     * 切换标签栏。清空当前滑轨与轮播后按新标签重新加载首批预览，
+     * 避免短暂显示旧标签下的内容。
+     */
+    fun selectLibraryTag(name: String?) {
+        val current = _state.value
+        val resolved = LibraryGrouping.resolveTag(current.libraryTags, name)
+        if (resolved == current.selectedLibraryTag) return
+        homeSectionsJob?.cancel()
+        homeSectionLoadedCount = 0
+        homeSectionLibraries = emptyList()
+        _state.update {
+            it.copy(
+                selectedLibraryTag = resolved,
+                librarySections = emptyList(),
+                carouselItems = emptyList(),
+                homeSectionsRemaining = 0,
+            )
+        }
+        loadHomeSections(homeRequestId, current.libraries)
     }
 
     /** 滚动到首页底部时加载下一批滑轨。 */
@@ -387,7 +465,12 @@ class MediaViewModel(
                 } else {
                     emptyList()
                 }
-                val fallbackCarousel = previewCards(current.recentItems, limit = CAROUSEL_MAX_ITEMS)
+                val fallbackCarousel = if (current.selectedLibraryTag == null) {
+                    previewCards(current.recentItems, limit = CAROUSEL_MAX_ITEMS)
+                } else {
+                    // 选中标签时「最近添加」可能来自其它标签，不能拿来补轮播。
+                    emptyList()
+                }
                 current.copy(
                     carouselItems = carousel.ifEmpty { fallbackCarousel }.ifEmpty { current.carouselItems },
                     librarySections = merged.values.toList(),

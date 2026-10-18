@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -21,6 +22,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -63,7 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import app.mebox.android.core.input.QrCodes
-import app.mebox.android.core.media.MediaImageUrls
+import app.mebox.android.core.media.LibraryTagTab
 import app.mebox.android.core.ui.MeBoxTheme
 import app.mebox.android.feature.media.MediaArtwork
 
@@ -186,6 +189,33 @@ fun TvActionButton(
                     else -> MaterialTheme.colorScheme.onSurface
                 },
                 maxLines = 1,
+            )
+        }
+    }
+}
+
+/**
+ * 电视端媒体库标签栏：与手机端共用 `MediaUiState` 里的标签筛选，
+ * 选中项用主色按钮表示，方向键左右切换。
+ */
+@Composable
+fun TvLibraryTagRow(
+    tabs: List<LibraryTagTab>,
+    selectedTag: String?,
+    onSelect: (String?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (tabs.size <= 1) return
+    LazyRow(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 32.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        items(tabs, key = { it.name ?: "__all__" }) { tab ->
+            TvActionButton(
+                text = if (tab.count > 0) "${tab.label} ${tab.count}" else tab.label,
+                onClick = { onSelect(tab.name) },
+                primary = tab.name == selectedTag,
             )
         }
     }
@@ -888,13 +918,6 @@ fun TvConfirmDialog(
         }
     }
 }
-
-/** 媒体图片地址的电视尺寸封装，避免各页面重复拼参数。 */
-internal fun tvPoster(origin: String, remote: String?): String? =
-    MediaImageUrls.poster(origin, remote, width = 480, height = 720)
-
-internal fun tvBackdrop(origin: String, remote: String?): String? =
-    MediaImageUrls.backdrop(origin, remote, width = 1280, height = 720)
 
 private val TV_CONFIRM_KEYS = setOf(
     KeyEvent.KEYCODE_DPAD_CENTER,

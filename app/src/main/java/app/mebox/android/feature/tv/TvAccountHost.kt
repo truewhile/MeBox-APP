@@ -380,6 +380,7 @@ private fun TvMainScaffold(
                     onOpenLibrary = mediaViewModel::openLibrary,
                     onOpenHistory = mediaViewModel::openHistory,
                     onOpenMediaTab = { mediaViewModel.selectTab(MainTab.MEDIA) },
+                    onSelectTag = mediaViewModel::selectLibraryTag,
                     onRefresh = mediaViewModel::refreshHome,
                 )
 
@@ -392,6 +393,7 @@ private fun TvMainScaffold(
                     onOpenHistory = mediaViewModel::openHistory,
                     onLoadMoreSearch = mediaViewModel::loadMoreSearch,
                     onOpenPhoneSearch = { onOpenPhoneSearch(PhonePurpose.MEDIA_SEARCH) },
+                    onSelectTag = mediaViewModel::selectLibraryTag,
                 )
 
                 MainTab.READER -> TvReaderShelfScreen(

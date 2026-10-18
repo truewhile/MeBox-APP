@@ -44,6 +44,12 @@ class MeBoxApiClient(
             )
         }
 
+    suspend fun pinnedLibraries(accessToken: String): ApiResult<PinnedLibrariesDto> =
+        call { api.pinnedLibraries(bearer(accessToken)) }
+
+    suspend fun libraryTags(accessToken: String): ApiResult<LibraryTagsDto> =
+        call { api.libraryTags(bearer(accessToken)) }
+
     suspend fun librarySeries(
         accessToken: String,
         libraryId: String,

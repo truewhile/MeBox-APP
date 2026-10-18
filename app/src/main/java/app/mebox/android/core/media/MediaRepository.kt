@@ -11,6 +11,7 @@ import app.mebox.android.core.network.FavoriteDto
 import app.mebox.android.core.network.FavoriteListDto
 import app.mebox.android.core.network.LibraryDto
 import app.mebox.android.core.network.LibraryFacetsDto
+import app.mebox.android.core.network.LibraryTagDto
 import app.mebox.android.core.network.MediaDto
 import app.mebox.android.core.network.MediaListDto
 import app.mebox.android.core.network.MediaPageDto
@@ -44,6 +45,26 @@ class MediaRepository(
             previewLimit = previewLimit,
             includeTotal = includeTotal,
         )
+    }
+
+    /** 当前用户置顶的媒体库 ID（与网页端共用）。 */
+    suspend fun pinnedLibraries(): ApiResult<List<String>> = authorized { token ->
+        when (val result = api.pinnedLibraries(token)) {
+            is ApiResult.Success -> ApiResult.Success(result.value.libraryIds)
+            is ApiResult.Failure -> result
+            is ApiResult.NetworkError -> result
+            ApiResult.Stale -> ApiResult.Stale
+        }
+    }
+
+    /** 当前用户的媒体库标签分组（与网页端共用）。 */
+    suspend fun libraryTags(): ApiResult<List<LibraryTagDto>> = authorized { token ->
+        when (val result = api.libraryTags(token)) {
+            is ApiResult.Success -> ApiResult.Success(result.value.tags)
+            is ApiResult.Failure -> result
+            is ApiResult.NetworkError -> result
+            ApiResult.Stale -> ApiResult.Stale
+        }
     }
 
     suspend fun librarySeries(

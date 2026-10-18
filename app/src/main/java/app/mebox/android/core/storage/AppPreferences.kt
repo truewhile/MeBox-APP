@@ -10,19 +10,41 @@ class AppPreferences(context: Context) {
 
     var lastAddress: String?
         get() = prefs.getString(KEY_ADDRESS, null)
-        set(value) = prefs.edit().putString(KEY_ADDRESS, value).apply()
+        // 服务器地址、账号分区这些「下次启动要靠它恢复」的键用同步写入：
+        // 电视盒子经常直接断电/被系统强杀，apply() 的异步落盘有丢数据的可能。
+        set(value) {
+            prefs.edit().putString(KEY_ADDRESS, value).commit()
+        }
+
+    /**
+     * 上次登录成功的用户名（不保存密码）。
+     *
+     * 电视端冷启动时如果恢复会话失败，登录页可以直接带出用户名，
+     * 用户只需要补密码或用手机扫码，不用重新输入整段信息。
+     */
+    var lastUsername: String?
+        get() = prefs.getString(KEY_USERNAME, null)
+        set(value) {
+            prefs.edit().putString(KEY_USERNAME, value).commit()
+        }
 
     var accountServerId: String?
         get() = prefs.getString(KEY_ACCOUNT_SERVER, null)
-        set(value) = prefs.edit().putString(KEY_ACCOUNT_SERVER, value).apply()
+        set(value) {
+            prefs.edit().putString(KEY_ACCOUNT_SERVER, value).commit()
+        }
 
     var accountUserId: String?
         get() = prefs.getString(KEY_ACCOUNT_USER, null)
-        set(value) = prefs.edit().putString(KEY_ACCOUNT_USER, value).apply()
+        set(value) {
+            prefs.edit().putString(KEY_ACCOUNT_USER, value).commit()
+        }
 
     var cleartextRiskAccepted: Boolean
         get() = prefs.getBoolean(KEY_CLEARTEXT, false)
-        set(value) = prefs.edit().putBoolean(KEY_CLEARTEXT, value).apply()
+        set(value) {
+            prefs.edit().putBoolean(KEY_CLEARTEXT, value).commit()
+        }
 
     /**
      * 上次确认过的服务器身份（`/api/v1/server-info` 的原始 JSON）。
@@ -40,14 +62,14 @@ class AppPreferences(context: Context) {
         prefs.edit()
             .putString(KEY_SERVER_SNAPSHOT_ADDRESS, address)
             .putString(KEY_SERVER_SNAPSHOT_INFO, infoJson)
-            .apply()
+            .commit()
     }
 
     fun clearServerInfoSnapshot() {
         prefs.edit()
             .remove(KEY_SERVER_SNAPSHOT_ADDRESS)
             .remove(KEY_SERVER_SNAPSHOT_INFO)
-            .apply()
+            .commit()
     }
 
     /** 播放内核的持久化键；具体取值见 PlayerEngineKind.key。 */
@@ -76,7 +98,9 @@ class AppPreferences(context: Context) {
     fun deviceId(): String {
         prefs.getString(KEY_DEVICE_ID, null)?.let { return it }
         val generated = UUID.randomUUID().toString()
-        prefs.edit().putString(KEY_DEVICE_ID, generated).apply()
+        // 设备 ID 变了会被服务端当成新设备，登录会话也可能因此失效，
+        // 所以这里同样同步落盘。
+        prefs.edit().putString(KEY_DEVICE_ID, generated).commit()
         return generated
     }
 
@@ -84,19 +108,20 @@ class AppPreferences(context: Context) {
         prefs.edit()
             .putString(KEY_ACCOUNT_SERVER, serverId)
             .putString(KEY_ACCOUNT_USER, userId)
-            .apply()
+            .commit()
     }
 
     fun clearAccount() {
         prefs.edit()
             .remove(KEY_ACCOUNT_SERVER)
             .remove(KEY_ACCOUNT_USER)
-            .apply()
+            .commit()
     }
 
     private companion object {
         const val NAME = "mebox_app"
         const val KEY_ADDRESS = "last_address"
+        const val KEY_USERNAME = "last_username"
         const val KEY_ACCOUNT_SERVER = "account_server_id"
         const val KEY_ACCOUNT_USER = "account_user_id"
         const val KEY_CLEARTEXT = "cleartext_risk_accepted"

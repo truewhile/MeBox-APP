@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -22,6 +23,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -50,12 +53,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.mebox.android.core.media.LibraryArtwork
+import app.mebox.android.core.media.LibraryTagTab
 import app.mebox.android.core.media.MediaBrowseFormat
 import app.mebox.android.core.media.MediaImageUrls
 import app.mebox.android.core.network.ContinueWatchingDto
 import app.mebox.android.core.network.LibraryDto
 import app.mebox.android.core.network.MediaDto
 import app.mebox.android.core.network.SeriesCardDto
+import app.mebox.android.core.ui.MeBoxChip
 import coil.compose.AsyncImage
 
 /**
@@ -347,6 +352,7 @@ fun LibrarySpotlightCard(
     library: LibraryDto,
     origin: String,
     modifier: Modifier = Modifier,
+    pinned: Boolean = false,
     onClick: () -> Unit,
 ) {
     val cover = LibraryArtwork.cover(origin, library)
@@ -386,6 +392,22 @@ fun LibrarySpotlightCard(
                 modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
             )
         }
+        if (pinned) {
+            Surface(
+                color = Color(0xCC000000),
+                contentColor = Color(0xFFFFD166),
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(10.dp),
+            ) {
+                Text(
+                    "置顶",
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                )
+            }
+        }
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -403,6 +425,36 @@ fun LibrarySpotlightCard(
                 library.total.takeIf { it > 0 }?.let { "$it 项内容" } ?: "浏览媒体库",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0xFFDDDDDD),
+            )
+        }
+    }
+}
+
+/**
+ * 媒体库标签栏：首项「全部」，其后是用户在网页端维护的标签。
+ *
+ * 只负责切换筛选，不修改服务端标签；没有标签时整栏不显示，避免多出一行
+ * 无意义的「全部」。
+ */
+@Composable
+fun LibraryTagBar(
+    tabs: List<LibraryTagTab>,
+    selectedTag: String?,
+    onSelect: (String?) -> Unit,
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp),
+) {
+    if (tabs.size <= 1) return
+    LazyRow(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = contentPadding,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(tabs, key = { it.name ?: "__all__" }) { tab ->
+            MeBoxChip(
+                text = if (tab.count > 0) "${tab.label} ${tab.count}" else tab.label,
+                selected = tab.name == selectedTag,
+                onClick = { onSelect(tab.name) },
             )
         }
     }
@@ -566,6 +618,26 @@ internal fun seriesCardImage(origin: String, card: SeriesCardDto): String? =
     MediaImageUrls.backdrop(
         origin = origin,
         remote = card.rep.backdropUrl.ifBlank { card.rep.posterUrl },
+    )
+
+/**
+ * 2:3 海报卡的封面：优先 `poster_url`，没有海报时才退回剧照。
+ *
+ * 网页端和手机端的海报卡都以 `poster_url` 为主图；电视端此前用了
+ * [seriesCardImage]（剧照），同一部作品在电视上是横图裁成竖图，看起来
+ * 和手机/网页不是同一张封面。所有端统一走这里，保证选图顺序和尺寸档位一致。
+ */
+internal fun seriesCardPoster(origin: String, card: SeriesCardDto): String? =
+    MediaImageUrls.poster(
+        origin = origin,
+        remote = card.rep.posterUrl.ifBlank { card.rep.backdropUrl },
+    )
+
+/** 与 [seriesCardPoster] 相同，用于只有媒体行的收藏/搜索列表。 */
+internal fun mediaPosterImage(origin: String, media: MediaDto): String? =
+    MediaImageUrls.poster(
+        origin = origin,
+        remote = media.posterUrl.ifBlank { media.backdropUrl },
     )
 
 internal fun mediaArtworkImage(origin: String, media: MediaDto): String? =
