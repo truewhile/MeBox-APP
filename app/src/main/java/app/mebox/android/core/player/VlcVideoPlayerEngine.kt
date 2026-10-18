@@ -11,6 +11,7 @@ import android.widget.FrameLayout
 import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.media.SubtitleLabel
 import app.mebox.android.core.network.APP_USER_AGENT
+import java.io.File
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
@@ -37,6 +38,13 @@ class VlcVideoPlayerEngine(
 
     override var listener: VideoPlayerEngineListener? = null
 
+    /**
+     * libVLC 的运行日志。VLC 的网络栈不经过 OkHttp，出问题时 App 日志里
+     * 只有 `read=0`，看不到原因；把 VLC 自己的日志落到缓存目录，失败时
+     * 摘一段进诊断日志，下一次就能直接看到 DNS/建连/HTTP 状态。
+     */
+    private val vlcLogFile = File(context.cacheDir, "mebox-vlc.log")
+
     private val libVlc = LibVLC(
         context.applicationContext,
         arrayListOf(
@@ -47,8 +55,11 @@ class VlcVideoPlayerEngine(
             // 硬解由每条 Media 单独控制：失败后可以只对这一条改走软解，
             // 不要把全局配置钉死在硬解或软解上。
             "--network-caching=3000",
+            "--verbose=2",
+            "--file-logging",
+            "--logfile=${vlcLogFile.absolutePath}",
         ),
-    )
+    ).also { truncateVlcLog() }
 
     private val mediaPlayer = MediaPlayer(libVlc)
 
@@ -234,9 +245,14 @@ class VlcVideoPlayerEngine(
         runCatching { mediaPlayer.stop() }
         playing = false
         userPaused = false
+        truncateVlcLog()
+        // 系统代理：手机挂代理（fake-IP）时，VLC 直连解析出来的地址是不通的，
+        // 必须和 OkHttp 一样把请求交给系统代理。
+        val systemProxy = systemHttpProxyFor(media.url)
         DiagnosticsLog.i(
             "Player",
-            "LibVLC 打开 host=${mediaHost(media.url)} 软解=$softwareDecodeOnly",
+            "LibVLC 打开 host=${mediaHost(media.url)} 软解=$softwareDecodeOnly " +
+                "代理=${systemProxy?.substringAfter("://") ?: "无"}",
         )
         val libVlcMedia = Media(libVlc, Uri.parse(media.url)).apply {
             when {
@@ -253,6 +269,7 @@ class VlcVideoPlayerEngine(
                 else -> setHWDecoderEnabled(true, false)
             }
             addOption(":network-caching=3000")
+            if (systemProxy != null) addOption(":http-proxy=$systemProxy")
             // 115 直链绑定换取时的 UA：服务端 /api/playback/{id}/info 预置的
             // 直链是按 App 统一 UA 换的，LibVLC 默认 UA 会被 CDN 403。
             addOption(":http-user-agent=${APP_USER_AGENT}")
@@ -334,6 +351,9 @@ class VlcVideoPlayerEngine(
         val detail = "host=${media?.let { mediaHost(it.url) }.orEmpty()} " +
             "read=${stats?.readBytes ?: -1} demux=${stats?.demuxReadBytes ?: -1} " +
             "decoded=${stats?.decodedVideo ?: -1}"
+        // 把 VLC 自己的日志一起留下来：网络失败时只有它能说明是 DNS、
+        // 建连还是 HTTP 状态码的问题。
+        dumpVlcLog(reason, detail)
         when {
             noData && !proxyAttempted && media?.proxyUrl != null -> {
                 switchToProxy(media, reason, detail)
@@ -526,6 +546,7 @@ class VlcVideoPlayerEngine(
         host?.removeOnLayoutChangeListener(hostLayoutListener)
         videoLayout?.removeOnLayoutChangeListener(layoutGuardListener)
         slaveLabels = emptyList()
+        truncateVlcLog()
         runCatching { mediaPlayer.stop() }
         runCatching { mediaPlayer.detachViews() }
         (videoLayout?.parent as? android.view.ViewGroup)?.removeView(videoLayout)
@@ -617,10 +638,36 @@ class VlcVideoPlayerEngine(
     private fun mediaHost(url: String): String =
         runCatching { Uri.parse(url).host }.getOrNull().orEmpty()
 
+    /** 清空 VLC 日志，避免 verbose 日志无限增长。 */
+    private fun truncateVlcLog() {
+        runCatching { if (vlcLogFile.length() > 0) vlcLogFile.writeText("") }
+    }
+
+    /**
+     * 把 VLC 日志的尾部写进诊断日志。
+     *
+     * `--verbose=2` 里能直接看到 `[http]`/`[access]` 模块的报错（DNS 失败、
+     * 建连超时、HTTP 403 等），比 `read=0` 有意义得多；只取最后 16 KB。
+     */
+    private fun dumpVlcLog(reason: String, detail: String) {
+        runCatching {
+            if (!vlcLogFile.exists()) return
+            val bytes = vlcLogFile.readBytes()
+            if (bytes.isEmpty()) return
+            val from = (bytes.size - VLC_LOG_TAIL_BYTES).coerceAtLeast(0)
+            val tail = String(bytes, from, bytes.size - from, Charsets.UTF_8)
+            DiagnosticsLog.w("VlcLog", "$reason $detail\n$tail")
+            truncateVlcLog()
+        }
+    }
+
     private companion object {
         const val TAG = "VlcVideoEngine"
 
         /** 起播超过这个时间还没进入 Playing，就按打开失败处理。 */
         const val STALL_TIMEOUT_MS = 10_000L
+
+        /** 失败时最多摘取这么多 VLC 日志（约 16 KB）。 */
+        const val VLC_LOG_TAIL_BYTES = 16 * 1024
     }
 }
