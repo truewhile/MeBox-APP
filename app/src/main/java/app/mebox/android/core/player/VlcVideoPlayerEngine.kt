@@ -4,7 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
@@ -13,6 +13,11 @@ import app.mebox.android.core.media.SubtitleLabel
 import app.mebox.android.core.network.APP_USER_AGENT
 import java.io.File
 import java.net.InetAddress
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import okhttp3.OkHttpClient
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
@@ -33,6 +38,8 @@ class VlcVideoPlayerEngine(
     private val context: Context,
     /** 解码方式：自动 / 强制硬件 / 强制软件。 */
     private val decoderMode: DecoderMode = DecoderMode.AUTO,
+    /** 字幕复用 App 的代理、TLS、连接池；不再让 VLC 同步打开远程字幕。 */
+    httpClient: OkHttpClient? = null,
 ) : VideoPlayerEngine {
 
     override val kind: PlayerEngineKind = PlayerEngineKind.VLC
@@ -96,6 +103,33 @@ class VlcVideoPlayerEngine(
      */
     private var softwareDecodeOnly = decoderMode == DecoderMode.SOFTWARE
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val subtitleScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val subtitleDownloader = SubtitleDownloader(
+        httpClient ?: OkHttpClient(), File(context.cacheDir, "vlc-subtitles"),
+    )
+    private val subtitleLoader = PlaybackSubtitleLoader(
+        scope = subtitleScope,
+        download = subtitleDownloader::download,
+        attach = { subtitle, file, select ->
+            val added = !released && mediaPlayer.addSlave(IMedia.Slave.Type.Subtitle, Uri.fromFile(file), select)
+            if (added) {
+                slaveLabels = slaveLabels + subtitle.label
+                DiagnosticsLog.d("Player", "LibVLC 本地字幕已挂载 selected=$select")
+            }
+            added
+        },
+        onFailure = { _, error ->
+            // 异常文本可能携带带 token 的 URL，只记录类型，字幕失败不升级成视频失败。
+            DiagnosticsLog.w("Player", "LibVLC 外挂字幕加载失败，视频继续播放 type=${error.javaClass.simpleName}")
+        },
+    )
+
+    /** 每轮装载独立计时；重试已排队时忽略同一轮的重复错误。 */
+    private var startupWatchdog = PlaybackStartupWatchdog(SystemClock.elapsedRealtime())
+    private var startupComplete = false
+    private var lastBufferPercent = 0f
+    private var loadGeneration = 0
+    private var recoveryScheduled = false
 
     /** 直连被 CDN 拒绝后是否已经尝试过服务端中转，避免来回重试。 */
     private var proxyAttempted = false
@@ -104,8 +138,8 @@ class VlcVideoPlayerEngine(
     private var httpAttempted = false
 
     /**
-     * 起播看门狗：LibVLC 在硬解初始化失败时可能既不报错也不进入 Playing，
-     * 表现为一直转圈。超过 [STALL_TIMEOUT_MS] 仍未起播就按失败处理。
+     * 起播看门狗：LibVLC 出错时可能既不报错也不进入 Playing。
+     * 根据轨道、缓冲和读取的进展判断停滞，并设置整体等待上限。
      */
     private var stallToken = 0
 
@@ -116,7 +150,7 @@ class VlcVideoPlayerEngine(
     private var defaultVideoId: Int? = null
     private var defaultAudioId: Int? = null
 
-    init {
+    private fun installPlayerListener() {
         mediaPlayer.setEventListener { event ->
             if (released) return@setEventListener
             when (event.type) {
@@ -127,6 +161,10 @@ class VlcVideoPlayerEngine(
                 }
 
                 MediaPlayer.Event.Buffering -> {
+                    if (event.buffering > lastBufferPercent) {
+                        lastBufferPercent = event.buffering
+                        startupWatchdog.recordProgress(SystemClock.elapsedRealtime())
+                    }
                     val buffering = event.buffering < 100f
                     listener?.onBufferingChanged(buffering)
                     listener?.onPlaybackStateChanged(
@@ -136,6 +174,7 @@ class VlcVideoPlayerEngine(
 
                 MediaPlayer.Event.Playing -> {
                     playing = true
+                    startupComplete = true
                     DiagnosticsLog.i("Player", "LibVLC 事件 Playing")
                     // 已起播，作废还在等待的起播看门狗。
                     stallToken++
@@ -149,8 +188,10 @@ class VlcVideoPlayerEngine(
                         mediaPlayer.setTime(pendingSeekMs)
                         pendingSeekMs = 0L
                     }
-                    if (!pendingAutoPlay) mediaPlayer.pause()
+                    if (!pendingAutoPlay || userPaused) mediaPlayer.pause()
                     refreshTracks()
+                    // 先有画面，再异步准备外挂字幕；VLC 永远不在起播时等待远端字幕。
+                    subtitleLoader.onPlaying()
                 }
 
                 MediaPlayer.Event.Paused -> {
@@ -176,7 +217,7 @@ class VlcVideoPlayerEngine(
                 }
 
                 MediaPlayer.Event.EncounteredError -> {
-                    val stats = runCatching { mediaPlayer.media?.stats }.getOrNull()
+                    val stats = readMediaStats()
                     DiagnosticsLog.w("Player", "LibVLC 事件 EncounteredError")
                     handleOpenFailure(pendingMedia, stats, "LibVLC 播放失败")
                 }
@@ -187,12 +228,19 @@ class VlcVideoPlayerEngine(
                 // 视频输出建立后才知道画面尺寸：拿到宽高比重新算一次画面框。
                 MediaPlayer.Event.Vout,
                 -> {
+                    if (event.type == MediaPlayer.Event.ESAdded ||
+                        (event.type == MediaPlayer.Event.Vout && event.voutCount > 0)
+                    ) {
+                        startupWatchdog.recordProgress(SystemClock.elapsedRealtime())
+                    }
                     DiagnosticsLog.d("Player", "LibVLC 事件 type=${event.type}")
                     refreshTracks()
                 }
 
                 MediaPlayer.Event.LengthChanged -> {
-                    listener?.onPlaybackStateChanged(EnginePlaybackState.READY)
+                    if (event.lengthChanged > 0L) startupWatchdog.recordProgress(SystemClock.elapsedRealtime())
+                    // 识别到时长不等于已起播，保持缓冲状态，直到 Playing。
+                    if (startupComplete) listener?.onPlaybackStateChanged(EnginePlaybackState.READY)
                 }
             }
         }
@@ -257,9 +305,23 @@ class VlcVideoPlayerEngine(
     }
 
     private fun load(media: EngineMedia, startPositionMs: Long, autoPlay: Boolean) {
+        loadGeneration++
+        stallToken++
+        recoveryScheduled = false
+        startupComplete = false
+        startupWatchdog = PlaybackStartupWatchdog(SystemClock.elapsedRealtime())
+        lastBufferPercent = 0f
+        // setEventListener(null) 也会清空 VLC Java Handler 已排队的旧事件。
+        // 否则上一轮迟到的 Playing/Stopped 可能改写新媒体的起播状态。
+        mediaPlayer.setEventListener(null)
         runCatching { mediaPlayer.stop() }
+        pendingMedia = media
+        pendingStartMs = startPositionMs.coerceAtLeast(0L)
         playing = false
-        userPaused = false
+        userPaused = !autoPlay
+        videoAspect = null
+        defaultVideoId = null
+        defaultAudioId = null
         truncateVlcLog()
         // 系统代理：手机挂代理（fake-IP）时，VLC 直连解析出来的地址是不通的，
         // 必须和 OkHttp 一样把请求交给系统代理。
@@ -291,43 +353,13 @@ class VlcVideoPlayerEngine(
         }
         mediaPlayer.media = libVlcMedia
         libVlcMedia.release()
-        // 按用户偏好选一条默认字幕：ASS 原文件优先用 libass 渲染，
-        // 其余外挂字幕按「中文/英文/日文优先」匹配；关闭自动加载时一条都不选。
-        // 「跟随片源」保持旧行为：优先挑一条 ASS，让 libass 还原原始样式。
-        val preferred = when {
-            !media.subtitlePreference.autoLoad -> null
-            media.subtitlePreference.priority == SubtitlePriority.FOLLOW_SOURCE ->
-                media.subtitles.firstOrNull { it.assUrl != null } ?: media.subtitles.firstOrNull()
-
-            else -> SubtitleSelector.choose(media.subtitles, media.subtitlePreference)
-        }
-        val preferredIndex = preferred?.let { media.subtitles.indexOf(it) } ?: -1
-        // LibVLC 3 没有给外挂字幕起名的接口，面板里只会显示「Track N」。
-        // 记住实际挂上去的字幕顺序，等 VLC 报出轨道后用这些名字覆盖。
-        val addedLabels = mutableListOf<String>()
-        media.subtitles.forEachIndexed { index, subtitle ->
-            // ASS/SSA 优先用原文件地址：libVLC 的 libass 会保留字体、颜色、
-            // 描边、定位与特效；服务端转出的 WebVTT 已经把这些信息剥掉了。
-            // 只自动选中一条，其余留给字幕面板手动切换。
-            val source = subtitle.assUrl ?: subtitle.url
-            runCatching {
-                mediaPlayer.addSlave(
-                    IMedia.Slave.Type.Subtitle,
-                    Uri.parse(source),
-                    index == preferredIndex,
-                )
-            }.onSuccess { added ->
-                if (added) {
-                    addedLabels += subtitle.label.ifBlank { "字幕 ${index + 1}" }
-                }
-            }.onFailure { error ->
-                Log.w(TAG, "add subtitle failed: $source", error)
-                DiagnosticsLog.w("Player", "LibVLC 加载字幕失败", error)
-            }
-        }
-        slaveLabels = addedLabels
+        // 远程字幕不挂进初始媒体：它们曾在 VLC 输入线程逐条拉取，拖住 Playing。
+        // prepare() 只登记列表，Playing 后才用 OkHttp 下载并挂载本地字幕。
+        slaveLabels = emptyList()
+        subtitleLoader.prepare(media)
         pendingSeekMs = startPositionMs.coerceAtLeast(0L)
         pendingAutoPlay = autoPlay
+        installPlayerListener()
         mediaPlayer.play()
         armStallWatchdog()
     }
@@ -338,17 +370,29 @@ class VlcVideoPlayerEngine(
      */
     private fun armStallWatchdog() {
         val token = ++stallToken
-        mainHandler.postDelayed({
-            if (released || token != stallToken || userPaused) return@postDelayed
-            if (playing || runCatching { mediaPlayer.isPlaying }.getOrDefault(false)) return@postDelayed
-            val stats = runCatching { mediaPlayer.media?.stats }.getOrNull()
-            handleOpenFailure(
-                media = pendingMedia,
-                stats = stats,
-                reason = "LibVLC ${STALL_TIMEOUT_MS / 1000} 秒未起播",
-            )
-        }, STALL_TIMEOUT_MS)
+        mainHandler.postDelayed(object : Runnable {
+            override fun run() {
+                if (released || token != stallToken || userPaused || startupComplete || recoveryScheduled) return
+                if (playing || runCatching { mediaPlayer.isPlaying }.getOrDefault(false)) return
+                val stats = readMediaStats()
+                val now = SystemClock.elapsedRealtime()
+                startupWatchdog.observeBytes(
+                    now, stats?.readBytes?.toLong() ?: -1L, stats?.demuxReadBytes?.toLong() ?: -1L,
+                )
+                if (startupWatchdog.hasTimedOut(now)) {
+                    handleOpenFailure(pendingMedia, stats, "LibVLC 起播超时（持续无进展或达到等待上限）")
+                } else {
+                    mainHandler.postDelayed(this, STARTUP_POLL_MS)
+                }
+            }
+        }, STARTUP_POLL_MS)
     }
+
+    /** getMedia() 会 retain，统计读取后必须 release，避免每秒泄漏一个原生引用。 */
+    private fun readMediaStats(): IMedia.Stats? = runCatching {
+        val media = mediaPlayer.media ?: return@runCatching null
+        try { media.stats } finally { media.release() }
+    }.getOrNull()
 
     /**
      * 打开/起播失败后的三级降级：
@@ -362,10 +406,18 @@ class VlcVideoPlayerEngine(
         stats: IMedia.Stats?,
         reason: String,
     ) {
-        val noData = (stats?.readBytes ?: 0) <= 0 && (stats?.demuxReadBytes ?: 0) <= 0
+        if (released || recoveryScheduled) return
+        recoveryScheduled = true
+        stallToken++
+        startupWatchdog.observeBytes(
+            SystemClock.elapsedRealtime(), stats?.readBytes?.toLong() ?: -1L,
+            stats?.demuxReadBytes?.toLong() ?: -1L,
+        )
+        // 字节统计在 Opening 阶段不可靠；只要解析过轨道/缓冲推进，就不能说没读到数据。
+        val noData = !startupWatchdog.hasProgress
         val detail = "host=${media?.let { mediaHost(it.url) }.orEmpty()} " +
             "read=${stats?.readBytes ?: -1} demux=${stats?.demuxReadBytes ?: -1} " +
-            "decoded=${stats?.decodedVideo ?: -1}"
+            "decoded=${stats?.decodedVideo ?: -1} progress=${startupWatchdog.hasProgress}"
         // 把 VLC 自己的日志一起留下来：网络失败时只有它能说明是 DNS、
         // 建连还是 HTTP 状态码的问题。
         logDnsAddresses(media?.url)
@@ -380,30 +432,33 @@ class VlcVideoPlayerEngine(
             noData && !proxyAttempted && media?.proxyUrl != null -> {
                 switchToProxy(media, reason, detail)
             }
-            !softwareDecodeOnly && decoderMode != DecoderMode.HARDWARE && media != null -> {
+            !noData && !softwareDecodeOnly && decoderMode != DecoderMode.HARDWARE && media != null -> {
                 retryWithSoftware(media, reason, detail)
             }
             !proxyAttempted && media?.proxyUrl != null -> {
                 switchToProxy(media, reason, detail)
             }
             else -> {
-                DiagnosticsLog.e("Player", "$reason（软解+中转均失败） $detail")
+                DiagnosticsLog.e("Player", "$reason（可用回退已用尽） $detail")
                 playing = false
+                startupComplete = false
+                mediaPlayer.setEventListener(null)
+                runCatching { mediaPlayer.stop() }
+                subtitleLoader.close()
+                listener?.onPlayingChanged(false)
+                listener?.onBufferingChanged(false)
+                listener?.onPlaybackStateChanged(EnginePlaybackState.IDLE)
                 listener?.onError(
-                    message = "LibVLC 无法播放该视频（已尝试软件解码）",
-                    decodeRelated = false,
+                    message = if (noData) "视频网络访问失败，请检查网络或重试"
+                        else "LibVLC 无法打开或解码该视频，请重试或切换内核",
+                    decodeRelated = !noData,
                 )
             }
         }
     }
 
-    /** `https://` 地址对应的明文地址；本来就是 http 或不是直链时返回 null。 */
-    private fun httpVariantOf(url: String): String? =
-        if (url.startsWith("https://", ignoreCase = true)) {
-            "http://" + url.substring("https://".length)
-        } else {
-            null
-        }
+    /** 只允许已知 115 CDN 直链的兼容重试，不降级服务器的 HTTPS 地址。 */
+    private fun httpVariantOf(url: String): String? = cdnHttpFallbackUrl(url)
 
     private fun retryWithHttp(media: EngineMedia, reason: String, detail: String) {
         val httpUrl = httpVariantOf(media.url) ?: return
@@ -416,7 +471,7 @@ class VlcVideoPlayerEngine(
         listener?.onBufferingChanged(true)
         listener?.onPlaybackStateChanged(EnginePlaybackState.BUFFERING)
         listener?.onMediaReloaded()
-        mainHandler.post { if (!released) load(plain, resume, pendingAutoPlay) }
+        postReload(plain, resume)
     }
 
     private fun switchToProxy(media: EngineMedia, reason: String, detail: String) {
@@ -430,7 +485,7 @@ class VlcVideoPlayerEngine(
         listener?.onBufferingChanged(true)
         listener?.onPlaybackStateChanged(EnginePlaybackState.BUFFERING)
         listener?.onMediaReloaded()
-        mainHandler.post { if (!released) load(proxied, resume, pendingAutoPlay) }
+        postReload(proxied, resume)
     }
 
     private fun retryWithSoftware(media: EngineMedia, reason: String, detail: String) {
@@ -441,12 +496,26 @@ class VlcVideoPlayerEngine(
         listener?.onBufferingChanged(true)
         listener?.onPlaybackStateChanged(EnginePlaybackState.BUFFERING)
         listener?.onMediaReloaded()
-        mainHandler.post { if (!released) load(media, resume, pendingAutoPlay) }
+        postReload(media, resume)
+    }
+
+    private fun postReload(media: EngineMedia, resume: Long) {
+        val generation = loadGeneration
+        mainHandler.post {
+            if (!released && generation == loadGeneration && pendingMedia?.mediaId == media.mediaId) {
+                load(media, resume, pendingAutoPlay)
+            }
+        }
     }
 
     override fun play() {
         if (released) return
         userPaused = false
+        pendingAutoPlay = true
+        if (!startupComplete && !recoveryScheduled) {
+            startupWatchdog = PlaybackStartupWatchdog(SystemClock.elapsedRealtime())
+            armStallWatchdog()
+        }
         if (ended) {
             ended = false
             runCatching { mediaPlayer.setTime(0L) }
@@ -457,6 +526,8 @@ class VlcVideoPlayerEngine(
     override fun pause() {
         if (released) return
         userPaused = true
+        pendingAutoPlay = false
+        stallToken++
         runCatching { mediaPlayer.pause() }
     }
 
@@ -469,7 +540,7 @@ class VlcVideoPlayerEngine(
     override fun retry() {
         val media = pendingMedia ?: return
         if (released) return
-        load(media, positionMs(), true)
+        load(media, positionMs().takeIf { it > 0L } ?: pendingStartMs, true)
     }
 
     override fun setSpeed(speed: Float) {
@@ -556,13 +627,15 @@ class VlcVideoPlayerEngine(
     override fun selectTextTrack(trackId: String?) {
         if (released) return
         // -1 是 libVLC 表示“关闭字幕”的固定 id。
+        subtitleLoader.onUserSelection()
         runCatching { mediaPlayer.setSpuTrack(trackId?.toIntOrNull() ?: -1) }
         refreshTracks()
     }
 
     override fun playbackState(): EnginePlaybackState = when {
         ended -> EnginePlaybackState.ENDED
-        playing -> EnginePlaybackState.READY
+        startupComplete -> EnginePlaybackState.READY
+        !recoveryScheduled && pendingMedia != null -> EnginePlaybackState.BUFFERING
         else -> EnginePlaybackState.IDLE
     }
 
@@ -586,12 +659,18 @@ class VlcVideoPlayerEngine(
     override fun release() {
         if (released) return
         released = true
+        stallToken++
+        loadGeneration++
+        mainHandler.removeCallbacksAndMessages(null)
         listener = null
         host?.removeOnLayoutChangeListener(hostLayoutListener)
         videoLayout?.removeOnLayoutChangeListener(layoutGuardListener)
         slaveLabels = emptyList()
         truncateVlcLog()
+        mediaPlayer.setEventListener(null)
         runCatching { mediaPlayer.stop() }
+        subtitleLoader.close()
+        subtitleScope.cancel()
         runCatching { mediaPlayer.detachViews() }
         (videoLayout?.parent as? android.view.ViewGroup)?.removeView(videoLayout)
         videoLayout = null
@@ -709,13 +788,16 @@ class VlcVideoPlayerEngine(
      */
     private fun dumpVlcLog(reason: String, detail: String) {
         val lines = runCatching {
-            val process = ProcessBuilder("logcat", "-d", "-v", "brief", "-t", "8000")
+            val process = ProcessBuilder(
+                "logcat", "-d", "-v", "brief", "-t", "8000", "--pid=${android.os.Process.myPid()}",
+            )
                 .redirectErrorStream(true)
                 .start()
             val output = process.inputStream.bufferedReader().use { it.readText() }
             process.waitFor()
             output.lineSequence()
-                .filter { it.contains("VLC") || it.contains("libvlc") }
+                // 只取 native VLC tag，避免把上一次诊断快照再次嵌套进来。
+                .filter { Regex("^[VDIWEF]/VLC").containsMatchIn(it) }
                 .toList()
         }.getOrNull().orEmpty()
         truncateVlcLog()
@@ -723,20 +805,19 @@ class VlcVideoPlayerEngine(
             DiagnosticsLog.w("VlcLog", "$reason $detail（未取到 VLC 日志）")
             return
         }
-        val tail = lines.takeLast(VLC_LOG_MAX_LINES)
-            .joinToString("\n")
-            .take(VLC_LOG_MAX_CHARS)
+        val tail = redactPlaybackLog(lines.takeLast(VLC_LOG_MAX_LINES).joinToString("\n"))
+            .takeLast(VLC_LOG_MAX_CHARS)
         DiagnosticsLog.w("VlcLog", "$reason $detail\n$tail")
     }
 
     private companion object {
         const val TAG = "VlcVideoEngine"
 
-        /** 起播超过这个时间还没进入 Playing，就按打开失败处理。 */
-        const val STALL_TIMEOUT_MS = 10_000L
+        /** 定期观察进展，而不是固定十秒后中断。 */
+        const val STARTUP_POLL_MS = 1_000L
 
-        /** 失败时最多摘取这么多行 VLC 日志（约 16 KB）。 */
-        const val VLC_LOG_MAX_LINES = 250
-        const val VLC_LOG_MAX_CHARS = 16 * 1024
+        /** 留在单条诊断消息的 8 KB 上限内，并优先保留最新错误。 */
+        const val VLC_LOG_MAX_LINES = 160
+        const val VLC_LOG_MAX_CHARS = 7 * 1024
     }
 }

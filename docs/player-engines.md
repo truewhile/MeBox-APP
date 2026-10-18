@@ -39,27 +39,48 @@ FFmpeg 软件解码（`:avcodec-hw=none` + `setHWDecoderEnabled(false, false)`�
 并从原位置重载一次。手机硬解只覆盖 8-bit H.264/HEVC，Hi10P、10-bit HEVC
 这类编码经常在硬解阶段失败，而 VLC 的自动回退并不可靠。
 
-失败日志同时记录 `read/demux/decoded` 统计（`IMedia.Stats`）：
+失败日志同时记录 `read/demux/decoded` 统计（`IMedia.Stats`）和 `progress`：
 
-- `read=0 / demux=0`：基本是网络/地址问题（CDN 拒绝、链接过期等）；
-- `read>0 / demux>0 / decoded=0`：媒体读到了但解不出来，属于解码问题。
+- `progress=false` 且读取、解复用统计均为零：尚未观察到有效进展，优先按网络处理；
+- 已解析出轨道、识别出时长、缓冲推进或读取字节增加：都算有效进展，不能单凭
+  `read=0 / demux=0` 断定网络不通。VLC 在起播前可能尚未更新这些统计；
+- 有有效进展但仍打不开时，自动模式才尝试软件解码；明确的网络失败不再空转重试软解。
 
 只对当前媒体降级，换集或换地址后会重新从硬解开始尝试。
 
 ### 起播看门狗
 
-LibVLC 硬解初始化失败时并不总会抛 `EncounteredError`：表现可能是
-`Opening` 之后既不进入 `Playing` 也不报错，播放页一直转圈。现在 `load()`
-后会启动 10 秒看门狗（`STALL_TIMEOUT_MS`）：
+LibVLC 打开文件失败时并不总会抛 `EncounteredError`，所以仍保留起播看门狗，
+但不再固定十秒就重载：
 
-- 正常起播由 `Playing` 事件作废；
-- 超时仍未起播，按同一套 `handleOpenFailure` 降级：
-  1. `read=0` → 先改走服务端中转；
-  2. 读到了数据 → 先改软件解码；
-  3. 软解仍不行 → 再试中转；
-  4. 都失败才报错。
-- 用户主动暂停（`userPaused`）不会触发看门狗；内部的 `Stopped`/`Paused`
-  事件也不会作废看门狗，避免 `load()` 里 `stop()` 的异步事件把定时器误杀。
+- 每秒观察一次，读取字节增长、解析轨道、时长就绪和缓冲增长都会更新进展；
+- 连续 20 秒无进展，或单轮启动总计超过 90 秒，才进入有次数限制的回退；
+- `Playing` 后作废看门狗；用户暂停时停止计时，恢复未完成的起播时重新计时；
+- 同一轮失败只允许排队一次回退，换集/退出后旧的定时器和重载不能操作新媒体；
+- 保留 115 CDN 已有的 HTTPS → HTTP 兼容重试，但只允许已知 `.115cdn.net`
+  域名，不降级带访问令牌的服务器地址，也不改写任意第三方 HTTPS URL；
+- native 日志的查询参数值会脱敏，保留最新 HTTP 状态、Range 和错误，避免旧日志
+  重复嵌套或被单条日志长度限制截掉关键结尾。
+
+### 2026-10-18：域名播放与外挂字幕阻塞
+
+当日日志中，同一 MKV 使用域名服务器时已经获得 CDN 的 HTTP 206 并解析了轨道，
+随后 VLC 在输入线程逐条打开服务器上的远程 ASS（含弹幕 ASS）。这些 HTTPS 请求
+的冷连接耗时约 5.5 秒，而旧的十秒看门狗又将尚未刷新的零字节统计误认为网络失败，
+导致 HTTPS、HTTP、服务端中转连续重载。内网字幕请求只需十几毫秒，所以差异被掩盖。
+这与 High 10 片源需要从系统解码回退到 FFmpeg 是两个叠加的问题。
+
+修复后的视频与字幕生命周期分开：
+
+- 初始媒体不附加远程字幕，先等待 `Playing`；
+- `PlaybackSubtitleLoader` 按语言偏好优先下载默认字幕，后续字幕串行后台下载；
+- `SubtitleDownloader` 复用 App 的 OkHttp 连接池、代理与 TLS 行为，保持原始 ASS
+  字节，VLC 的 libass 只读取下载完成的本地文件，样式无需压平；
+- 单条字幕总请求期限 20 秒、最大 8 MiB；失败不重载视频，其它字幕继续尝试；
+- 用户手动切换/关闭字幕后，迟到的下载不会重新覆盖选择；换集与退出取消下载并
+  清理当前会话的临时字幕，暂停恢复不会重复下载或附加同一批字幕。
+
+这些行为有 JVM 回归测试；实际设备上的视频输出、动态字幕轨和公网链路仍需验收。
 
 ## 解码方式（硬解 / 软解）
 
@@ -94,9 +115,9 @@ LibVLC 硬解初始化失败时并不总会抛 `EncounteredError`：表现可能
 - 只在直连失败后兜底，正常播放仍走 CDN，避免把网盘流量压到服务器上；
 - 每次播放最多尝试一次，服务端中转也失败时仍显示原来的错误页。
 
-ExoPlayer 的触发条件是 `ERROR_CODE_IO_BAD_HTTP_STATUS`；LibVLC 在
-`EncounteredError` 且统计为 `read=0 / demux=0`（一个字节都没读到）时触发。
-日志里分别能看到「改走服务端中转」的提示。
+ExoPlayer 的触发条件是 `ERROR_CODE_IO_BAD_HTTP_STATUS`；LibVLC 在打开失败或
+起播超时时，结合读取字节、轨道、时长、缓冲进展决定网络回退或软解重试，
+不能只用 `read=0 / demux=0` 判定。日志里能看到「改走服务端中转」的提示。
 
 ## 解码失败自动换内核
 
@@ -121,8 +142,8 @@ ExoPlayer 的触发条件是 `ERROR_CODE_IO_BAD_HTTP_STATUS`；LibVLC 在
   `/api/subtitles/:id/ass?path=...` 地址（`PlaybackUrls.assSubtitleUrl`）。
 - ExoPlayer 用 `MimeTypes.TEXT_SSA` 加载该地址，由 Media3 的 `SsaParser`
   还原行内颜色、粗体、斜体、下划线和位置（不支持自定义字体、描边与复杂特效）。
-- LibVLC 内核把该地址作为 subtitle slave 加入，由 libass 按文件自带的字体、
-  颜色、描边、定位和淡入淡出完整渲染；有多条 ASS 时默认选中第一条。
+- LibVLC 在视频起播后用共享 OkHttp 客户端下载原始 ASS，把本地文件作为
+  subtitle slave 加入，由 libass 按原样式渲染；有多条字幕时先下载偏好匹配的一条。
 - 字幕面板在系统内核下会提示并给出「切换到 LibVLC 渲染 ASS 样式」入口。
 - 中日双语字幕属于同一时刻的两条 cue，Media3 的 `SubtitleView` 会逐条按各自
   位置绘制，两条都落在默认底部坐标时会互相重叠。App 用
@@ -181,6 +202,10 @@ ExoPlayer 的触发条件是 `ERROR_CODE_IO_BAD_HTTP_STATUS`；LibVLC 在
 - `core/player/ExoVideoPlayerEngine.kt`
 - `core/player/VlcVideoPlayerEngine.kt`
 - `core/player/VideoPlayerEngineFactory.kt`
+- `core/player/PlaybackStartupWatchdog.kt`：按进展判断起播超时（纯 Kotlin，带单元测试）
+- `core/player/PlaybackSubtitleLoader.kt`：视频起播后的字幕会话、选择与取消（带单元测试）
+- `core/player/SubtitleDownloader.kt`：有期限和大小限制的原始字幕下载（带单元测试）
+- `core/player/PlaybackNetworkFallback.kt`：CDN 回退白名单与日志脱敏（带单元测试）
 - `feature/media/player/PlayerScreen.kt`：只依赖统一接口
 - `feature/AppScreens.kt`：我的 → 播放设置 / 字幕
 - `feature/tv/TvMediaScreens.kt`：电视端「我的」的同名字幕设置
@@ -209,6 +234,10 @@ ExoPlayer 的触发条件是 `ERROR_CODE_IO_BAD_HTTP_STATUS`；LibVLC 在
 
 ## 验证状态
 
-`compileDebugKotlin`、`testDebugUnitTest`、`lintDebug`、`assembleRelease` 均通过。
-播放内核的真机行为（尤其是 LibVLC 的 HLS、外挂 WebVTT 字幕、倍速与音频直通）
-尚未在真实设备上验证，发布前需要人工过一遍。
+此前内核接入阶段已通过 `assembleRelease`。2026-10-18 本次域名起播修复重新执行
+`testDebugUnitTest`、`lintDebug`、`assembleDebug`，均通过：244 个单元测试无失败，
+Lint 为 0 错误、64 个警告、2 个提示，生成 versionCode 14 的 Debug APK。
+本次没有重新验证 Release 构建。
+
+播放内核的真机行为（尤其是域名/内网同片源对比、High 10 软解、起播后动态外挂
+ASS/WebVTT 字幕、手动关闭字幕和换集取消）仍需在真实设备上验证。
