@@ -15,6 +15,7 @@ import app.mebox.android.core.media.LibrarySortSelection
 import app.mebox.android.core.media.MediaRepository
 import app.mebox.android.core.media.PlaybackPlan
 import app.mebox.android.core.media.PlaybackUrls
+import app.mebox.android.core.media.SubtitleLabel
 import app.mebox.android.core.media.WatchProgressStore
 import app.mebox.android.core.model.AccountScope
 import app.mebox.android.core.network.ApiResult
@@ -1263,12 +1264,6 @@ class MediaViewModel(
     ): PlaybackSubtitle? {
         if (track.burnIn) return null
         if (!track.renderable || track.path.isBlank()) return null
-        val label = track.label.ifBlank { track.lang }.ifBlank { "字幕" }
-        val suffix = when (track.source) {
-            "embedded" -> "（内嵌）"
-            "external" -> "（外挂）"
-            else -> ""
-        }
         val codec = track.codec.trim().lowercase()
         // ASS/SSA 的样式只存在于原文件里：服务端的 VTT 接口会把标签全部剥掉，
         // 因此额外给出 /ass 地址，交给内置 libass 的 LibVLC 内核渲染。
@@ -1276,7 +1271,13 @@ class MediaViewModel(
             track.delivery.equals("ass", ignoreCase = true)
         return PlaybackSubtitle(
             lang = track.lang.ifBlank { "und" },
-            label = "$label$suffix" + if (assStyled) " · ASS 样式" else "",
+            // 服务端对外挂字幕只给 `chs` 这类文件名后缀，这里折成可读名称。
+            label = SubtitleLabel.display(
+                rawLabel = track.label,
+                lang = track.lang,
+                source = track.source,
+                assStyled = assStyled,
+            ),
             url = PlaybackUrls.subtitleUrl(origin, mediaId, track.path, accessToken),
             assUrl = if (assStyled) {
                 PlaybackUrls.assSubtitleUrl(origin, mediaId, track.path, accessToken)
@@ -1290,7 +1291,10 @@ class MediaViewModel(
     private fun imageSubtitleLabels(tracks: List<SubtitleTrackDto>): List<String> =
         tracks.asSequence()
             .filter { it.burnIn }
-            .map { it.label.ifBlank { it.lang }.ifBlank { "图片字幕" } }
+            .map {
+                SubtitleLabel.languageName(it.lang)
+                    ?: it.label.ifBlank { it.lang }.ifBlank { "图片字幕" }
+            }
             .distinct()
             .toList()
 

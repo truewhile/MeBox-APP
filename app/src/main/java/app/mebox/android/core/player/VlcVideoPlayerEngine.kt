@@ -5,8 +5,11 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.Gravity
+import android.view.View
 import android.widget.FrameLayout
 import app.mebox.android.core.log.DiagnosticsLog
+import app.mebox.android.core.media.SubtitleLabel
 import app.mebox.android.core.network.APP_USER_AGENT
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
@@ -52,6 +55,13 @@ class VlcVideoPlayerEngine(
     private var host: FrameLayout? = null
     private var videoLayout: VLCVideoLayout? = null
     private var resizeMode: EngineResizeMode = EngineResizeMode.FIT
+    /** 当前视频的显示宽高比；拿到轨道信息前为 null，按铺满宿主处理。 */
+    private var videoAspect: Float? = null
+    /**
+     * 当前媒体实际挂上的外挂字幕名称，顺序与 `addSlave` 一致。
+     * LibVLC 只会把外挂字幕命名为「Track N」，面板里用这个列表覆盖。
+     */
+    private var slaveLabels: List<String> = emptyList()
     private var pendingMedia: EngineMedia? = null
     private var pendingStartMs: Long = 0L
     private var pendingAutoPlay: Boolean = true
@@ -152,6 +162,8 @@ class VlcVideoPlayerEngine(
                 MediaPlayer.Event.ESAdded,
                 MediaPlayer.Event.ESDeleted,
                 MediaPlayer.Event.ESSelected,
+                // 视频输出建立后才知道画面尺寸：拿到宽高比重新算一次画面框。
+                MediaPlayer.Event.Vout,
                 -> refreshTracks()
 
                 MediaPlayer.Event.LengthChanged -> {
@@ -161,15 +173,36 @@ class VlcVideoPlayerEngine(
         }
     }
 
+    /** 宿主（Compose 给的 Framelayout）尺寸变化时重算画面框。 */
+    private val hostLayoutListener = View.OnLayoutChangeListener { _, _, _, right, bottom, _, _, oldRight, oldBottom ->
+        if (right != oldRight || bottom != oldBottom) applySurfaceBox()
+    }
+
+    /**
+     * 兜底：VLCVideoLayout 一旦重新挂到窗口，会把自己的 LayoutParams 改回
+     * MATCH_PARENT；自己身上的布局变化是无条件信号，比等宿主再布局更可靠。
+     */
+    private val layoutGuardListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        applySurfaceBox()
+    }
+
     override fun attach(host: FrameLayout) {
         if (released) return
-        this.host = host
+        if (this.host !== host) {
+            this.host?.removeOnLayoutChangeListener(hostLayoutListener)
+            host.addOnLayoutChangeListener(hostLayoutListener)
+            this.host = host
+        }
         val layout = videoLayout ?: VLCVideoLayout(context).also { created ->
             videoLayout = created
+            created.addOnLayoutChangeListener(layoutGuardListener)
             // 第三个参数为 false：字幕直接叠加在视频输出上，不需要独立字幕面。
             mediaPlayer.attachViews(created, null, false, false)
         }
         host.attachPlayerView(layout)
+        // VLCVideoLayout 挂到窗口时会把自己的 LayoutParams 改成 MATCH_PARENT，
+        // 所以每次 attach 都重新把画面框算一遍（重复调用只会比对、不会反复布局）。
+        applySurfaceBox()
         applyResizeMode()
         val media = pendingMedia
         if (media != null && !mediaPlayer.hasMedia()) {
@@ -237,6 +270,9 @@ class VlcVideoPlayerEngine(
             else -> SubtitleSelector.choose(media.subtitles, media.subtitlePreference)
         }
         val preferredIndex = preferred?.let { media.subtitles.indexOf(it) } ?: -1
+        // LibVLC 3 没有给外挂字幕起名的接口，面板里只会显示「Track N」。
+        // 记住实际挂上去的字幕顺序，等 VLC 报出轨道后用这些名字覆盖。
+        val addedLabels = mutableListOf<String>()
         media.subtitles.forEachIndexed { index, subtitle ->
             // ASS/SSA 优先用原文件地址：libVLC 的 libass 会保留字体、颜色、
             // 描边、定位与特效；服务端转出的 WebVTT 已经把这些信息剥掉了。
@@ -248,11 +284,16 @@ class VlcVideoPlayerEngine(
                     Uri.parse(source),
                     index == preferredIndex,
                 )
+            }.onSuccess { added ->
+                if (added) {
+                    addedLabels += subtitle.label.ifBlank { "字幕 ${index + 1}" }
+                }
             }.onFailure { error ->
                 Log.w(TAG, "add subtitle failed: $source", error)
                 DiagnosticsLog.w("Player", "LibVLC 加载字幕失败", error)
             }
         }
+        slaveLabels = addedLabels
         pendingSeekMs = startPositionMs.coerceAtLeast(0L)
         pendingAutoPlay = autoPlay
         mediaPlayer.play()
@@ -377,6 +418,7 @@ class VlcVideoPlayerEngine(
     override fun setResizeMode(mode: EngineResizeMode) {
         if (mode == resizeMode) return
         resizeMode = mode
+        applySurfaceBox()
         applyResizeMode()
     }
 
@@ -388,6 +430,49 @@ class VlcVideoPlayerEngine(
             EngineResizeMode.ZOOM -> MediaPlayer.ScaleType.SURFACE_FIT_SCREEN
         }
         runCatching { mediaPlayer.setVideoScale(scale) }
+    }
+
+    /**
+     * 自己决定画面在宿主里的尺寸和位置。
+     *
+     * LibVLC 3.6 的 `VideoHelper.updateVideoSurfaces()` 只把 SurfaceView 的
+     * 绝对宽高按视频比例写死，不会去纠正输出区域相对宿主的落点：宿主比
+     * 画面框宽时，画面就贴着左上角、右边留一整条黑边（软解、硬解都一样）。
+     * 所以这里按视频宽高比把 [VLCVideoLayout] 本身缩到画面框并居中，
+     * VLC 再按这个尺寸算出来的输出区域与画面框完全重合，两侧黑边等宽。
+     */
+    private fun applySurfaceBox() {
+        if (released) return
+        val layout = videoLayout ?: return
+        val host = host ?: return
+        val box = videoSurfaceBox(host.width, host.height, videoAspect, resizeMode) ?: return
+        val current = layout.layoutParams as? FrameLayout.LayoutParams
+        if (current != null &&
+            current.width == box.width &&
+            current.height == box.height &&
+            current.gravity == Gravity.CENTER
+        ) {
+            return
+        }
+        layout.layoutParams = FrameLayout.LayoutParams(box.width, box.height, Gravity.CENTER)
+    }
+
+    /** 从当前视频轨道读显示宽高比；轨道还没就绪时返回 null。 */
+    private fun refreshVideoAspect() {
+        val track = runCatching { mediaPlayer.currentVideoTrack }.getOrNull()
+        val aspect = track?.let {
+            videoDisplayAspect(
+                width = it.width,
+                height = it.height,
+                sarNum = it.sarNum,
+                sarDen = it.sarDen,
+                rotated = isQuarterTurn(it.orientation),
+            )
+        }
+        if (aspect != videoAspect) {
+            videoAspect = aspect
+            applySurfaceBox()
+        }
     }
 
     override fun selectVideoTrack(trackId: String?) {
@@ -438,6 +523,9 @@ class VlcVideoPlayerEngine(
         if (released) return
         released = true
         listener = null
+        host?.removeOnLayoutChangeListener(hostLayoutListener)
+        videoLayout?.removeOnLayoutChangeListener(layoutGuardListener)
+        slaveLabels = emptyList()
         runCatching { mediaPlayer.stop() }
         runCatching { mediaPlayer.detachViews() }
         (videoLayout?.parent as? android.view.ViewGroup)?.removeView(videoLayout)
@@ -467,16 +555,18 @@ class VlcVideoPlayerEngine(
                     selected = description.id == currentAudio,
                 )
             }
-        val text = spuDescriptions
-            .filter { it.id >= 0 }
-            .map { description ->
-                EngineTrack(
-                    id = description.id.toString(),
-                    label = description.name?.takeIf { it.isNotBlank() } ?: "字幕 ${description.id}",
-                    type = EngineTrackType.TEXT,
-                    selected = description.id == currentSpu,
-                )
-            }
+        val text = labelTextTracks(
+            spuDescriptions
+                .filter { it.id >= 0 }
+                .map { description ->
+                    EngineTrack(
+                        id = description.id.toString(),
+                        label = description.name?.takeIf { it.isNotBlank() } ?: "字幕 ${description.id}",
+                        type = EngineTrackType.TEXT,
+                        selected = description.id == currentSpu,
+                    )
+                },
+        )
         val activeVideoHeight = runCatching { mediaPlayer.currentVideoTrack?.height }
             .getOrNull() ?: 0
         val video = videoDescriptions
@@ -497,7 +587,30 @@ class VlcVideoPlayerEngine(
         if (video.isNotEmpty()) defaultVideoId = video.first().id.toIntOrNull()
         if (audio.isNotEmpty()) defaultAudioId = audio.first().id.toIntOrNull()
 
+        // 轨道就绪后才知道画面宽高比，用来收紧画面框；切清晰度也会走到这里。
+        refreshVideoAspect()
+
         listener?.onTracksChanged(EngineTracks(video = video, audio = audio, text = text))
+    }
+
+    /**
+     * 把 LibVLC 的字幕轨命名换成能看懂的名称。
+     *
+     * VLC 对内嵌轨给的是 `Track 1 - [Chinese]`，对 `addSlave` 挂上去的外挂轨
+     * 只给 `Track 2`；外挂轨永远排在内嵌轨之后，且顺序与添加顺序一致，
+     * 因此数量对得上时用 [slaveLabels] 逐个覆盖，对不上就只美化内嵌轨，
+     * 避免某条字幕加载失败时把名字张冠李戴。
+     */
+    private fun labelTextTracks(tracks: List<EngineTrack>): List<EngineTrack> {
+        // nativeTrackName 对不是「Track N」的命名会原样返回，这里可以无条件过一遍。
+        val trimmed = tracks.mapIndexed { index, track ->
+            track.copy(label = SubtitleLabel.nativeTrackName(track.label, index))
+        }
+        if (slaveLabels.isEmpty() || trimmed.size < slaveLabels.size) return trimmed
+        val firstSlave = trimmed.size - slaveLabels.size
+        return trimmed.mapIndexed { index, track ->
+            if (index >= firstSlave) track.copy(label = slaveLabels[index - firstSlave]) else track
+        }
     }
 
     /** 只记录主机名，避免把带签名的完整直链写进日志。 */

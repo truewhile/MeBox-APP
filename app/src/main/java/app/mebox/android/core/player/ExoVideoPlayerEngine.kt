@@ -35,6 +35,7 @@ import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import app.mebox.android.core.log.DiagnosticsLog
+import app.mebox.android.core.media.SubtitleLabel
 import app.mebox.android.core.network.APP_USER_AGENT
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
@@ -493,7 +494,7 @@ private fun audioLabel(format: Format, index: Int): String {
 
 private fun textLabel(format: Format, index: Int): String =
     format.label?.takeIf { it.isNotBlank() }
-        ?: format.language?.takeIf { it.isNotBlank() }
+        ?: format.language?.takeIf { it.isNotBlank() }?.let { SubtitleLabel.languageName(it) ?: it }
         ?: "字幕 ${index + 1}"
 
 private fun isDecodeError(errorCode: Int): Boolean = when (errorCode) {

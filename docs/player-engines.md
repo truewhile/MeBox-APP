@@ -15,6 +15,23 @@
 
 LibVLC 是 LGPL-2.1，通过 Maven Central 分发，不需要自行编译 native 库。
 
+### LibVLC 的画面框（黑边居中）
+
+LibVLC 3.6 的画面输出由库里的 `VideoHelper.updateVideoSurfaces()` 自己算：
+它按视频宽高比把 `SurfaceView` 的宽高写成绝对像素，但并不修正这块输出
+区域相对宿主的落点。宿主比画面框宽时（手机横向 + 16:9 片源），画面就会
+贴着左上角、右边留一整条黑边，看起来像“没有置中”，软解和硬解都一样。
+
+App 不再把定位交给这段逻辑：
+
+- `VlcVideoPlayerEngine` 从 `currentVideoTrack` 的宽高、SAR 和旋转算出显示
+  宽高比（`VideoSurfaceBox.kt`，纯 Kotlin，带单元测试）；
+- 按「适应屏幕 / 裁剪铺满 / 拉伸铺满」把 `VLCVideoLayout` 本身缩放到画面
+  框并用 `Gravity.CENTER` 居中；宿主尺寸变化、轨道/视频输出就绪时重算；
+- 画面视图和宿主同比例后，VLC 算出来的输出区域正好等于画面框，两侧黑边
+  必然等宽；`VLCVideoLayout` 挂窗口时会把 LayoutParams 改回 MATCH_PARENT，
+  所以额外挂了一个布局监听兜底。
+
 ### LibVLC 的硬解 → 软解重试
 
 LibVLC 第一次收到 `EncounteredError` 时，不直接判失败：把当前媒体改成
@@ -140,11 +157,27 @@ ExoPlayer 的触发条件是 `ERROR_CODE_IO_BAD_HTTP_STATUS`；LibVLC 在
   保持旧行为，优先选一条 ASS，交给 libass 渲染原始样式。关闭自动加载时
   不选任何外挂字幕，并关闭内嵌字幕轨。
 
+### 字幕名称
+
+字幕面板里的名称统一在 `core/media/SubtitleLabel.kt` 生成：
+
+- 服务端外挂字幕只给文件名后缀（`chs`、`chs[BilibiliID_danmu]`），这里折成
+  「简体中文（外挂）」「简体中文 · 弹幕（外挂）」；`chi` 这类未区分简繁的
+  语言标记显示为「中文」。
+- 保留服务端 label 里「（默认）」「（强制）」这类标记；ASS/SSA 追加
+  「· ASS 样式」。
+- LibVLC 3 没有给外挂字幕起名的接口，轨道名只有「Track 2」。内核记录
+  `addSlave` 的顺序，等 VLC 报出轨道后用上面的名称覆盖；内嵌轨则由
+  「Track 1 - [Chinese]」改成「内嵌字幕（中文）」。外挂轨数量与 VLC 报出的
+  轨道数对不上（某条加载失败）时只美化内嵌轨，避免名字错位。
+
 ## 相关文件
 
 - `core/player/PlayerEngineKind.kt`：枚举、持久化键与默认值（纯 Kotlin，带单元测试）
 - `core/player/SubtitlePreference.kt`：字幕自动加载/优先语言与匹配规则（纯 Kotlin，带单元测试）
 - `core/player/VideoPlayerEngine.kt`：统一接口与轨道/媒体模型
+- `core/player/VideoSurfaceBox.kt`：LibVLC 画面框的宽高比与落点计算（纯 Kotlin，带单元测试）
+- `core/media/SubtitleLabel.kt`：字幕轨可读名称（纯 Kotlin，带单元测试）
 - `core/player/ExoVideoPlayerEngine.kt`
 - `core/player/VlcVideoPlayerEngine.kt`
 - `core/player/VideoPlayerEngineFactory.kt`

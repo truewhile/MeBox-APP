@@ -81,7 +81,13 @@ class ReaderAudioEngine(
     private var loadJob: Job? = null
     private var tickerJob: Job? = null
     private var timerJob: Job? = null
-    private var endingChapter = false
+
+    /**
+     * 换章守卫。片尾跳过与「播放结束」都会触发换章，而加载新章音轨要好几秒，
+     * 这段时间里播放器仍停在旧章片尾，必须锁住，否则每秒轮询都会再跳一章。
+     */
+    private val advanceGuard = ChapterAdvanceGuard()
+
     private var startedPlayback = false
     private var stopAtChapterEnd = false
 
@@ -342,7 +348,7 @@ class ReaderAudioEngine(
         loadJob?.cancel()
         tickerJob?.cancel()
         timerJob?.cancel()
-        endingChapter = false
+        advanceGuard.reset()
         startedPlayback = false
         stopAtChapterEnd = false
         seekGuardUntilMs = 0L
@@ -373,7 +379,7 @@ class ReaderAudioEngine(
         val repository = repo ?: return
         if (chapters.getOrNull(index) == null) return
         loadJob?.cancel()
-        endingChapter = false
+        advanceGuard.beginLoad()
         _state.update {
             it.copy(
                 chapterIndex = index,
@@ -402,12 +408,7 @@ class ReaderAudioEngine(
                                 "加载音轨失败 book=${currentBook.id} index=$index " +
                                     "HTTP ${result.status} ${result.code}",
                             )
-                            _state.update {
-                                it.copy(
-                                    loading = false,
-                                    error = result.message.ifBlank { "加载音轨失败" },
-                                )
-                            }
+                            failChapterLoad(index, result.message.ifBlank { "加载音轨失败" })
                             return@launch
                         }
                     }
@@ -416,30 +417,24 @@ class ReaderAudioEngine(
                             _state.update { it.copy(notice = "网络不可用，正在播放离线缓存") }
                             cached
                         } else {
-                            _state.update {
-                                it.copy(loading = false, error = "网络不可用，请稍后重试")
-                            }
+                            failChapterLoad(index, "网络不可用，请稍后重试")
                             return@launch
                         }
                     }
                     ApiResult.Stale -> {
-                        _state.update { it.copy(loading = false) }
+                        failChapterLoad(index, null)
                         return@launch
                     }
                 }
             }
             if (content.type != "audio") {
-                _state.update {
-                    it.copy(loading = false, error = "本章不是音频内容")
-                }
+                failChapterLoad(index, "本章不是音频内容")
                 return@launch
             }
             val urls = content.tracks.orEmpty()
                 .mapNotNull { ReaderUrls.resolve(origin, it) }
             if (urls.isEmpty()) {
-                _state.update {
-                    it.copy(loading = false, error = "本章没有可播放的音轨")
-                }
+                failChapterLoad(index, "本章没有可播放的音轨")
                 return@launch
             }
             val title = chapters.getOrNull(index)?.title.orEmpty()
@@ -450,6 +445,8 @@ class ReaderAudioEngine(
                 durationMs = 0L,
             )
             ensureController { controller ->
+                // 这期间可能已经被别的章节加载取代，旧结果不能覆盖新章。
+                if (_state.value.chapterIndex != index) return@ensureController
                 val metadata = MediaMetadata.Builder()
                     .setTitle(currentBook.name)
                     .setArtist(title.ifBlank { currentBook.name })
@@ -467,6 +464,8 @@ class ReaderAudioEngine(
                 controller.prepare()
                 controller.playWhenReady = autoPlay
                 if (autoPlay) startedPlayback = true
+                // 新音轨已换上去，播放器不再停留在旧章片尾，这时才能解除换章锁。
+                advanceGuard.mediaInstalled()
                 _state.update {
                     it.copy(
                         loading = false,
@@ -479,10 +478,27 @@ class ReaderAudioEngine(
         }
     }
 
+    /**
+     * 音轨加载失败：解除换章锁，并把这一章记为已处理。
+     * 否则播放器仍停在旧章片尾，轮询会每秒再次判定「本章结束」继续往后跳。
+     */
+    private fun failChapterLoad(index: Int, message: String?) {
+        advanceGuard.loadFailed(index)
+        _state.update {
+            it.copy(loading = false, error = message ?: it.error)
+        }
+    }
+
     private fun onChapterFinished() {
-        if (endingChapter) return
-        endingChapter = true
-        if (startedPlayback) scope.launch { reportProgress() }
+        val finishedIndex = _state.value.chapterIndex
+        // 加载下一章期间或同一章重复触发时直接忽略。
+        if (!advanceGuard.tryFinish(finishedIndex)) return
+        DiagnosticsLog.i("ReaderAudio", "本章结束 index=$finishedIndex")
+        if (startedPlayback) {
+            val title = chapters.getOrNull(finishedIndex)?.title.orEmpty()
+            val position = currentPositionMs()
+            scope.launch { reportProgressFor(finishedIndex, title, position) }
+        }
         if (stopAtChapterEnd) {
             stopAtChapterEnd = false
             controller?.pause()
@@ -496,12 +512,13 @@ class ReaderAudioEngine(
             }
             return
         }
-        val nextIndex = nextReadable(chapters, _state.value.chapterIndex)
+        val nextIndex = nextReadable(chapters, finishedIndex)
         if (nextIndex == null) {
             tickerJob?.cancel()
             _state.update { it.copy(playing = false, notice = "已播放完最后一章") }
             return
         }
+        DiagnosticsLog.i("ReaderAudio", "自动播放下一章 index=$finishedIndex → $nextIndex")
         loadChapter(nextIndex, 0, autoPlay = true)
     }
 
@@ -538,15 +555,27 @@ class ReaderAudioEngine(
     }
 
     private suspend fun reportProgress(positionMs: Long = currentPositionMs()) {
+        val current = _state.value
+        reportProgressFor(current.chapterIndex, current.chapterTitle, positionMs)
+    }
+
+    /**
+     * 按指定章节上报进度。换章瞬间 [state] 里的章节号已经变成新章，
+     * 这里显式带上旧章信息，避免把没播过的新章写成 0 秒。
+     */
+    private suspend fun reportProgressFor(
+        chapterIndex: Int,
+        chapterTitle: String,
+        positionMs: Long,
+    ) {
         val currentBook = book ?: return
         val repository = repo ?: return
-        val current = _state.value
-        if (current.chapterIndex < 0) return
+        if (chapterIndex < 0) return
         repository.saveProgress(
             bookId = currentBook.id,
-            chapterIndex = current.chapterIndex,
+            chapterIndex = chapterIndex,
             pos = (positionMs / 1000).toInt().coerceAtLeast(0),
-            chapterTitle = current.chapterTitle,
+            chapterTitle = chapterTitle,
         )
     }
 
@@ -569,7 +598,9 @@ class ReaderAudioEngine(
             val connected = runCatching { future.get() }.getOrNull()
             connecting = false
             if (connected == null) {
-                _state.update { it.copy(error = "无法连接后台播放服务") }
+                // 连不上播放服务时不会有 onReady，必须在这里解除换章锁，否则会一直卡在加载态。
+                if (advanceGuard.loading) advanceGuard.loadFailed(_state.value.chapterIndex)
+                _state.update { it.copy(loading = false, error = "无法连接后台播放服务") }
                 return@addListener
             }
             connected.addListener(listener)
@@ -601,5 +632,58 @@ class ReaderAudioEngine(
     private companion object {
         /** 拖动进度条后的保护窗口，让用户能听清自己选中的位置。 */
         const val SEEK_GUARD_MS = 3_000L
+    }
+}
+
+/**
+ * 听书换章守卫。
+ *
+ * 「本章播完」有两个来源：播放器真正走到结尾，以及定时轮询里的片尾跳过判断。
+ * 判定之后要异步去拉下一章音轨，这期间播放器还停在旧章片尾，轮询每秒都会再判一次结束。
+ * 守卫负责把「加载期间」和「同一章」这两种重复都挡掉，避免一次结束连跳好几章。
+ */
+internal class ChapterAdvanceGuard {
+
+    /** 正在加载下一章音轨；加载完成或失败前不允许再次换章。 */
+    var loading: Boolean = false
+        private set
+
+    /** 已判定播完的章节号，-1 表示当前章还没结束过。 */
+    var finishedIndex: Int = -1
+        private set
+
+    /** 开始加载某一章的音轨。 */
+    fun beginLoad() {
+        loading = true
+        finishedIndex = -1
+    }
+
+    /** 新音轨已经换到播放器上，可以重新接受「本章结束」。 */
+    fun mediaInstalled() {
+        loading = false
+        finishedIndex = -1
+    }
+
+    /**
+     * 音轨加载失败。解除加载锁，同时把这一章记为已处理：
+     * 播放器还停在旧章片尾，若不标记会继续往后跳，把后面的章节一起跳掉。
+     */
+    fun loadFailed(index: Int) {
+        loading = false
+        finishedIndex = index
+    }
+
+    /** 停止播放时复位。 */
+    fun reset() {
+        loading = false
+        finishedIndex = -1
+    }
+
+    /** 某一章是否可以按「播完」处理；返回 true 表示已记录，调用方可以换章。 */
+    fun tryFinish(index: Int): Boolean {
+        if (loading) return false
+        if (finishedIndex == index) return false
+        finishedIndex = index
+        return true
     }
 }
