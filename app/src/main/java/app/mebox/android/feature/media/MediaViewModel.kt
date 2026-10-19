@@ -214,6 +214,11 @@ data class MediaUiState(
     val detailResumeMedia: MediaDto? = null,
     /** 最新观看记录是否已经看完；看完时按钮回到「播放」并从片头开始。 */
     val detailResumeCompleted: Boolean = false,
+    /**
+     * 正在确定「继续播放」目标（拉取观看历史）。加载完成前不展示代表条目
+     * 的旧进度，用户点继续播放会等结果出来再起播，避免又落到 OVA。
+     */
+    val detailResumeLoading: Boolean = false,
     val selectedVersionId: String? = null,
     val favorite: Boolean = false,
     val favoriteError: String? = null,
@@ -262,6 +267,18 @@ class MediaViewModel(
     private var danmakuSaveJob: Job? = null
     private var lastPlayedMedia: MediaDto? = null
     private var lastNextMedia: MediaDto? = null
+    /**
+     * 刚从播放页退出时置为 true：详情页的「继续播放」优先使用本地刚写入的
+     * 进度，而不是可能还没收到退出上报的服务端观看历史。
+     */
+    private var preferLastPlayedOnNextDetail = false
+    /** 详情续播解析还没完成时用户点了继续播放，结果出来后自动起播。 */
+    private var pendingDetailPlayId: String? = null
+    private var detailResumeJob: Job? = null
+    /** 最近一次进度回调，用于播放器未及时写本地缓存时兜底。 */
+    private var lastProgressMediaId: String? = null
+    private var lastProgressPositionMs = 0L
+    private var lastProgressDurationMs = 0L
     private var lastServerSyncAt = 0L
     private var playbackRequestId = 0L
     private var detailRequestId = 0L
@@ -924,6 +941,8 @@ class MediaViewModel(
 
     private fun openDetail(mediaId: String, seriesKey: String?, libraryId: String?) {
         val returnScreen = _state.value.screen
+        pendingDetailPlayId = null
+        detailResumeJob?.cancel()
         _state.update {
             it.copy(
                 screen = MediaScreen.Detail(mediaId, seriesKey, libraryId),
@@ -937,6 +956,7 @@ class MediaViewModel(
                 detailResumeMs = 0L,
                 detailResumeMedia = null,
                 detailResumeCompleted = false,
+                detailResumeLoading = true,
                 selectedVersionId = null,
             )
         }
@@ -945,14 +965,31 @@ class MediaViewModel(
 
     private fun loadDetail(mediaId: String, seriesKey: String?, libraryId: String?) {
         val requestId = ++detailRequestId
-        _state.update { it.copy(detailLoading = true, detailError = null) }
+        detailResumeJob?.cancel()
+        // 从播放页返回同一部剧时，pinLocalResumeAfterPlayback() 已经给出了
+        // 正确的本地续播目标；不要再用「加载中」把它盖住。
+        val pinnedLocal = preferLastPlayedOnNextDetail && lastPlayedMedia?.let { played ->
+            played.id == _state.value.detail?.id ||
+                _state.value.episodes.any { episode ->
+                    episode.id == played.id || episode.versions.any { it.id == played.id }
+                }
+        } == true
+        _state.update {
+            it.copy(
+                detailLoading = true,
+                detailError = null,
+                detailResumeLoading = !pinnedLocal,
+            )
+        }
         viewModelScope.launch {
             val detail = repo.mediaDetail(mediaId)
             if (requestId != detailRequestId) return@launch
             if (detail !is ApiResult.Success) {
+                pendingDetailPlayId = null
                 _state.update {
                     it.copy(
                         detailLoading = false,
+                        detailResumeLoading = false,
                         detailError = when (detail) {
                             is ApiResult.Failure -> ErrorMessages.action(detail)
                             is ApiResult.NetworkError -> "网络不可用，请稍后重试"
@@ -985,7 +1022,7 @@ class MediaViewModel(
                         }
                     }
                 }
-                launch {
+                detailResumeJob = launch {
                     // 剧集与观看历史并行请求：剧集一到就先渲染选集，历史稍后
                     // 再补「继续播放」。详情页的代表条目可能是 OVA 或特别篇，
                     // 直接读它的 /resume 会把继续播放指到一条旧记录，因此要按
@@ -1017,16 +1054,39 @@ class MediaViewModel(
                     if (requestId != detailRequestId) return@launch
                     val episodeIds = buildSet {
                         add(resolvedDetail.id)
-                        episodes.forEach { add(it.id) }
+                        episodes.forEach { episode ->
+                            add(episode.id)
+                            episode.versions.forEach { add(it.id) }
+                        }
                         resolvedDetail.versions.forEach { add(it.id) }
                     }
                     val latest = (historyResult as? ApiResult.Success)?.value?.let { history ->
                         MediaContinue.latest(history, episodeIds)
                     }
+                    // 刚退出播放页时，退出进度上报可能还没到服务端，这次历史
+                    // 响应里可能仍是上一集（例如 OVA）。本地缓存是退出时同步
+                    // 写入的，只要它属于本剧，就以本地记录为准。
+                    val preferLocal = preferLastPlayedOnNextDetail
+                    preferLastPlayedOnNextDetail = false
+                    val played = if (preferLocal) lastPlayedMedia else null
+                    val playedProgress = played?.let { progressStore.read(scope, it.id) }
                     var resumeMedia: MediaDto? = null
                     var resumePositionMs = 0L
                     var resumeCompleted = false
-                    if (latest != null) {
+                    if (played != null && played.id in episodeIds) {
+                        resumeMedia = episodes.firstOrNull { it.id == played.id } ?: played
+                        val duration = playedProgress?.durationMs
+                            ?: lastProgressDurationMs.takeIf { lastProgressMediaId == played.id }
+                            ?: 0L
+                        resumePositionMs = playedProgress?.positionMs
+                            ?: _state.value.detailResumeMs.takeIf {
+                                _state.value.detailResumeMedia?.id == played.id
+                            }
+                            ?: lastProgressPositionMs.takeIf { lastProgressMediaId == played.id }
+                            ?: 0L
+                        resumeCompleted = duration > 0L &&
+                            resumePositionMs >= duration - PlaybackPlan.FINISHED_MARGIN_MS
+                    } else if (latest != null) {
                         resumeMedia = episodes.firstOrNull { it.id == latest.mediaId }
                             ?: latest.media
                             ?: resolvedDetail
@@ -1048,9 +1108,19 @@ class MediaViewModel(
                                 detailResumeMs = resumePositionMs,
                                 detailResumeMedia = resumeMedia,
                                 detailResumeCompleted = resumeCompleted,
+                                detailResumeLoading = false,
                             )
                         } else {
                             current
+                        }
+                    }
+                    // 解析期间用户已经点过「继续播放」：现在目标确定了，直接起播。
+                    if (pendingDetailPlayId == resolvedDetail.id) {
+                        pendingDetailPlayId = null
+                        if ((_state.value.screen as? MediaScreen.Detail)?.mediaId ==
+                            resolvedDetail.id
+                        ) {
+                            playDetailNow()
                         }
                     }
                 }
@@ -1063,6 +1133,17 @@ class MediaViewModel(
     }
 
     fun playDetail() {
+        val detail = _state.value.detail ?: return
+        // 续播目标还在解析：记住这次点击，等结果出来再起播。
+        // 直接播放代表条目会又回到 OVA，这正是之前的问题。
+        if (_state.value.detailResumeLoading) {
+            pendingDetailPlayId = detail.id
+            return
+        }
+        playDetailNow()
+    }
+
+    private fun playDetailNow() {
         val detail = _state.value.detail ?: return
         // 「继续播放」指向本剧最新看的那一集，而不是详情代表条目自己。
         val resumeMedia = _state.value.detailResumeMedia
@@ -1082,6 +1163,8 @@ class MediaViewModel(
 
     private fun preparePlayback(media: MediaDto) {
         val requestId = ++playbackRequestId
+        // 用户已经明确选了某一集：取消等待中的「继续播放」自动起播。
+        pendingDetailPlayId = null
         lastPlayedMedia = media
         DiagnosticsLog.i("Play", "准备播放 ${media.id} 《${media.title}》")
         val episodes = _state.value.episodes
@@ -1514,6 +1597,9 @@ class MediaViewModel(
         force: Boolean = false,
     ) {
         if (positionMs <= 0L || mediaId.isBlank()) return
+        lastProgressMediaId = mediaId
+        lastProgressPositionMs = positionMs
+        lastProgressDurationMs = durationMs
         progressStore.save(scope, mediaId, positionMs, durationMs)
         val now = SystemClock.elapsedRealtime()
         if (!force && now - lastServerSyncAt < SERVER_SYNC_INTERVAL_MS) return
@@ -1562,16 +1648,51 @@ class MediaViewModel(
         }
     }
 
+    /**
+     * 退出播放页后立刻把「继续播放」指向刚看的那一集。
+     *
+     * 这一步不依赖服务端：播放器的 leavePlayer() 已同步写入本地进度，而
+     * 退出上报的 POST 可能比详情页的观看历史请求更晚到达。先写状态，
+     * 后续历史解析也会优先采用这条本地记录（[preferLastPlayedOnNextDetail]）。
+     */
+    private fun pinLocalResumeAfterPlayback() {
+        val played = lastPlayedMedia ?: return
+        val cached = progressStore.read(scope, played.id)
+        val positionMs = cached?.positionMs
+            ?: lastProgressPositionMs.takeIf { lastProgressMediaId == played.id }
+            ?: 0L
+        if (positionMs <= 0L) return
+        val durationMs = cached?.durationMs
+            ?: lastProgressDurationMs.takeIf { lastProgressMediaId == played.id }
+            ?: 0L
+        preferLastPlayedOnNextDetail = true
+        _state.update { current ->
+            current.copy(
+                detailResumeMedia = played,
+                detailResumeMs = positionMs,
+                detailResumeCompleted = durationMs > 0L &&
+                    positionMs >= durationMs - PlaybackPlan.FINISHED_MARGIN_MS,
+                detailResumeLoading = false,
+            )
+        }
+    }
+
     fun back() {
         val current = _state.value
         val leavingPlayer = current.screen is MediaScreen.Player
         if (leavingPlayer) {
             playbackRequestId++
             danmakuRequestId++
+            // 播放器已经在 leavePlayer() 里同步写入了本地进度；这里先把
+            // 「继续播放」目标切成刚看的那一集，详情页一出现就是对的。
+            // 服务端历史可能还在处理退出上报，不能让它抢在前面。
+            pinLocalResumeAfterPlayback()
             refreshContinueWatching()
         }
         if (current.screen is MediaScreen.Detail) {
             detailRequestId++
+            pendingDetailPlayId = null
+            detailResumeJob?.cancel()
         }
         val next = when (current.screen) {
             is MediaScreen.Player -> {

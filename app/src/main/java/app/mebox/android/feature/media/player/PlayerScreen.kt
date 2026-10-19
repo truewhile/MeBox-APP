@@ -146,9 +146,8 @@ fun PlayerScreen(
         }
     }
 
-    BackHandler { onBack() }
-
     if (request == null) {
+        BackHandler { onBack() }
         val retryFocus = remember { FocusRequester() }
         LaunchedEffect(isTv) {
             if (isTv) {
@@ -403,6 +402,20 @@ private fun PlayerSurface(
             progressCallback(request.mediaId, position, duration, force)
         }
     }
+
+    /**
+     * 离开播放页：先把当前位置强制写进本地缓存再返回详情。
+     *
+     * 详情页会立刻拉一次观看历史来决定「继续播放」。如果这里不先同步上报，
+     * 历史请求可能早于退出上报到达服务端，详情就会拿到上一集（甚至 OVA）
+     * 的旧记录。本地缓存的写入是同步的，详情随后可以优先使用它。
+     */
+    fun leavePlayer() {
+        report(force = true)
+        onBack()
+    }
+
+    BackHandler { leavePlayer() }
 
     fun seekTo(absoluteMs: Long) {
         val duration = currentDuration()
@@ -1108,7 +1121,7 @@ private fun PlayerSurface(
                 title = title,
                 subtitle = request.subtitle,
                 pictureInPictureAvailable = pipAvailable && !isTv,
-                onBack = onBack,
+                onBack = ::leavePlayer,
                 onPictureInPicture = { enterPictureInPicture() },
                 modifier = Modifier.align(Alignment.TopCenter),
             )
@@ -1295,7 +1308,7 @@ private fun PlayerSurface(
                             },
                         ) { Text("切换到 ${alternative.shortLabel}") }
                     }
-                    TextButton(onClick = onBack) { Text("返回") }
+                    TextButton(onClick = ::leavePlayer) { Text("返回") }
                 }
             }
         }
@@ -1319,7 +1332,7 @@ private fun PlayerSurface(
                     autoNextCancelled = true
                     autoNextCountdown = 0
                 },
-                onBack = onBack,
+                onBack = ::leavePlayer,
             )
         }
 

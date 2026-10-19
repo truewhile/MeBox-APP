@@ -865,10 +865,15 @@ fun TvDetailScreen(
             (resumeDuration <= 0 || it < resumeDuration - PlaybackPlan.FINISHED_MARGIN_MS)
     }
     val resumeEpisode = resumeMedia.displayEpisode.ifBlank { resumeMedia.episodeTitle }
-    val playLabel = buildString {
-        append(if (resumeMs != null) "继续播放" else "播放")
-        if (resumeEpisode.isNotBlank()) append(" · ").append(resumeEpisode)
-        if (resumeMs != null) append(" · ").append(PlaybackPlan.formatTime(resumeMs))
+    val playLabel = if (state.detailResumeLoading) {
+        // 历史还没回来时不要展示代表条目（可能是 OVA）的旧进度。
+        "正在获取续播…"
+    } else {
+        buildString {
+            append(if (resumeMs != null) "继续播放" else "播放")
+            if (resumeEpisode.isNotBlank()) append(" · ").append(resumeEpisode)
+            if (resumeMs != null) append(" · ").append(PlaybackPlan.formatTime(resumeMs))
+        }
     }
     val background = MaterialTheme.colorScheme.background
     val playFocus = remember(media.id) { FocusRequester() }
