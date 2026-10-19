@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -39,6 +41,7 @@ import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
@@ -52,6 +55,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -80,6 +85,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -781,6 +787,10 @@ fun DanmakuSettingsSheet(
     onRenderChange: (opacity: Float, fontScale: Float, area: Float) -> Unit,
     onReload: () -> Unit,
     onSelectEpisode: (Long) -> Unit,
+    onSearch: (String) -> Unit = {},
+    onResetAuto: () -> Unit = {},
+    /** 电视端没有键盘：非空时显示「手机扫码输入关键词」入口。 */
+    onOpenPhoneSearch: (() -> Unit)? = null,
     autoFocus: Boolean = false,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -856,6 +866,16 @@ fun DanmakuSettingsSheet(
                 )
             }
 
+            if (state.enabled) {
+                Spacer(Modifier.height(14.dp))
+                DanmakuManualMatch(
+                    state = state,
+                    onSearch = onSearch,
+                    onResetAuto = onResetAuto,
+                    onOpenPhoneSearch = onOpenPhoneSearch,
+                )
+            }
+
             DanmakuOptionGroup(
                 title = "字号",
                 options = listOf("小" to 0.8f, "标准" to 1f, "大" to 1.25f, "特大" to 1.5f),
@@ -900,15 +920,28 @@ fun DanmakuSettingsSheet(
                     }
                     anime.episodes.forEach { episode ->
                         if (episode.episodeId > 0L) {
-                            Text(
-                                text = episode.episodeTitle.ifBlank { "弹幕库 ${episode.episodeId}" },
-                                color = OverlayText,
-                                style = MaterialTheme.typography.bodyMedium,
+                            var focused by remember(episode.episodeId) {
+                                mutableStateOf(false)
+                            }
+                            Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .onFocusChanged { focused = it.isFocused }
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (focused) Color(0x33FFFFFF) else Color.Transparent,
+                                    )
                                     .clickable { onSelectEpisode(episode.episodeId) }
-                                    .padding(vertical = 10.dp),
-                            )
+                                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = episode.episodeTitle
+                                        .ifBlank { "弹幕库 ${episode.episodeId}" },
+                                    color = OverlayText,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            }
                         }
                     }
                 }
@@ -920,6 +953,92 @@ fun DanmakuSettingsSheet(
                 enabled = !state.loading,
             ) {
                 Text("重新加载弹幕")
+            }
+        }
+    }
+}
+
+@Composable
+private fun DanmakuManualMatch(
+    state: DanmakuUiState,
+    onSearch: (String) -> Unit,
+    onResetAuto: () -> Unit,
+    onOpenPhoneSearch: (() -> Unit)?,
+) {
+    // 只把外部关键词的变化同步回输入框；自动匹配完成时不要清掉用户正在
+    // 输入但还没提交的文字。
+    var draft by remember(state.manualKeyword) {
+        mutableStateOf(state.manualKeyword.orEmpty())
+    }
+    Text(
+        text = if (onOpenPhoneSearch != null) {
+            "手动匹配（电视上用手机扫码输入关键词）"
+        } else {
+            "手动匹配（留空则恢复自动匹配）"
+        },
+        color = OverlayMuted,
+        style = MaterialTheme.typography.labelMedium,
+    )
+    Spacer(Modifier.height(6.dp))
+    if (onOpenPhoneSearch != null) {
+        OutlinedButton(
+            onClick = onOpenPhoneSearch,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp),
+        ) {
+            Icon(
+                Icons.Default.QrCode2,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text("手机扫码输入弹幕关键词")
+        }
+    } else {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium,
+                placeholder = {
+                    Text("输入番剧或电影名", color = OverlayMuted)
+                },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { onSearch(draft) }),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedContainerColor = Color(0x1AFFFFFF),
+                    unfocusedContainerColor = Color(0x0DFFFFFF),
+                    focusedBorderColor = Accent,
+                    unfocusedBorderColor = Color(0x33FFFFFF),
+                    cursorColor = Accent,
+                    focusedPlaceholderColor = OverlayMuted,
+                    unfocusedPlaceholderColor = OverlayMuted,
+                ),
+                shape = RoundedCornerShape(10.dp),
+            )
+            Button(onClick = { onSearch(draft) }, enabled = !state.loading) {
+                Text("搜索")
+            }
+        }
+    }
+    val keyword = state.manualKeyword
+    if (!keyword.isNullOrBlank()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "当前关键词：$keyword",
+                color = OverlayMuted,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onResetAuto, enabled = !state.loading) {
+                Text("恢复自动匹配")
             }
         }
     }

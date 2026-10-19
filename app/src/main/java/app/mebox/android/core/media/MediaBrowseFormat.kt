@@ -63,6 +63,21 @@ object MediaBrowseFormat {
     fun seasons(episodes: List<MediaDto>): List<Int> =
         seasonGroups(episodes).map { it.season }
 
+    /**
+     * 详情页进入时默认展开的分季。
+     *
+     * 多季并存时优先选最小的正片季（第一季、第二季……），而不是代表条目
+     * 自身的季号：剧集卡片的代表条目可能来自 OVA、特别篇或剧场版目录，
+     * 直接沿用它会让详情页一进来就停在特殊分区。没有正片季时才退回分组
+     * 列表的第一项，保证只有 OVA/特别篇的条目也有内容可看。
+     */
+    fun defaultSeason(episodes: List<MediaDto>): Int? = defaultSeasonOf(seasonGroups(episodes))
+
+    /** [defaultSeason] 的重载：详情页已经算好分季时直接复用，避免重复分组。 */
+    fun defaultSeasonOf(groups: List<SeasonGroup>): Int? =
+        groups.firstOrNull { it.season > 0 }?.season
+            ?: groups.firstOrNull()?.season
+
     /** 单集所属季：优先按路径识别特殊分区，否则回落到 `season_num`。 */
     fun seasonOf(media: MediaDto): Int {
         specialSeason(media)?.let { return it }

@@ -87,6 +87,27 @@ class MediaBrowseFormatTest {
     }
 
     @Test
+    fun `default season prefers the first main season over specials`() {
+        val episodes = listOf(
+            MediaDto(id = "ova", seasonNum = 0, episodeNum = 1, path = "/anime/某番/OVA/01.mkv"),
+            MediaDto(id = "s2", seasonNum = 2, episodeNum = 1),
+            MediaDto(id = "s1", seasonNum = 1, episodeNum = 1),
+            MediaDto(id = "sp", seasonNum = 0, episodeNum = 1, path = "/anime/某番/Specials/01.mkv"),
+        )
+        assertEquals(1, MediaBrowseFormat.defaultSeason(episodes))
+    }
+
+    @Test
+    fun `default season falls back to the first special group`() {
+        val episodes = listOf(
+            MediaDto(id = "ova", seasonNum = 0, episodeNum = 1, path = "/anime/某番/OVA/01.mkv"),
+            MediaDto(id = "ova2", seasonNum = 0, episodeNum = 2, path = "/anime/某番/OVA/02.mkv"),
+        )
+        assertEquals(MediaBrowseFormat.OVA_SEASON, MediaBrowseFormat.defaultSeason(episodes))
+        assertEquals(null, MediaBrowseFormat.defaultSeason(emptyList()))
+    }
+
+    @Test
     fun `continue subtitle shows remaining time`() {
         assertEquals(
             "S01E02 · 剩余 30 分钟",

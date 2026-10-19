@@ -142,6 +142,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 
+/** 详情页尚未由用户手动选择分季时的占位季号。 */
+private const val NO_SEASON = Int.MIN_VALUE
+
 /**
  * 登录后的主界面：底部四个入口（首页 / 影视 / 阅读 / 我的）。
  *
@@ -225,6 +228,8 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
                     onDanmakuRenderChange = mediaViewModel::setDanmakuRenderOptions,
                     onDanmakuReload = mediaViewModel::reloadDanmaku,
                     onDanmakuSelectEpisode = mediaViewModel::selectDanmakuLibrary,
+                    onDanmakuSearch = mediaViewModel::searchDanmaku,
+                    onDanmakuResetAuto = mediaViewModel::resetDanmakuMatch,
                 )
                 is MediaScreen.Detail -> DetailScreen(
                     state = state,
@@ -1801,19 +1806,31 @@ private fun DetailScreen(
         }
         return
     }
-    val duration = media.durationSec * 1000L
+    // 「继续播放」可能指向本剧最新看的那一集，而不是详情代表条目；
+    // 时长和「是否快看完」都按那一条记录判断。
+    val resumeMedia = state.detailResumeMedia ?: media
+    val resumeDuration = resumeMedia.durationSec * 1000L
     val resumeMs = state.detailResumeMs.takeIf {
-        it > 0 && (duration <= 0 || it < duration - PlaybackPlan.FINISHED_MARGIN_MS)
+        !state.detailResumeCompleted &&
+            it > 0 &&
+            (resumeDuration <= 0 || it < resumeDuration - PlaybackPlan.FINISHED_MARGIN_MS)
+    }
+    val resumeEpisode = resumeMedia.displayEpisode.ifBlank { resumeMedia.episodeTitle }
+    val playLabel = buildString {
+        append(if (resumeMs != null) "继续播放" else "播放")
+        if (resumeEpisode.isNotBlank()) append(" · ").append(resumeEpisode)
+        if (resumeMs != null) append(" · ").append(PlaybackPlan.formatTime(resumeMs))
     }
     val seasonGroups = remember(state.episodes, media.id) { MediaBrowseFormat.seasonGroups(state.episodes) }
-    val defaultSeason = MediaBrowseFormat.seasonOf(media)
-        .takeIf { season -> seasonGroups.any { it.season == season } }
-        ?: seasonGroups.firstOrNull()?.season
-        ?: 0
-    var selectedSeason by rememberSaveable(media.id) { mutableIntStateOf(defaultSeason) }
+    // 多季并存时默认展开第一季；代表条目是 OVA/特别篇时不能沿用它自己的季号。
+    val defaultSeason = MediaBrowseFormat.defaultSeasonOf(seasonGroups) ?: 0
+    // 先不预设季号：剧集列表到达前 episodes 为空，提前写入 0 会在数据到达后
+    // 被当成「特别篇」而被选中。NO_SEASON 表示仍跟随默认季，用户点过分季才固定。
+    var selectedSeason by rememberSaveable(media.id) { mutableIntStateOf(NO_SEASON) }
     // 重新加载后原来的分季可能不存在（例如整季被删除），回落到默认季。
     val currentSeason = selectedSeason
-        .takeIf { season -> seasonGroups.any { it.season == season } }
+        .takeIf { it != NO_SEASON }
+        ?.takeIf { season -> seasonGroups.any { it.season == season } }
         ?: defaultSeason
     val visibleEpisodes = seasonGroups.firstOrNull { it.season == currentSeason }?.episodes
         ?: state.episodes
@@ -1855,11 +1872,7 @@ private fun DetailScreen(
                     )
                     Spacer(Modifier.width(7.dp))
                     Text(
-                        if (resumeMs != null) {
-                            "继续播放 · ${PlaybackPlan.formatTime(resumeMs)}"
-                        } else {
-                            "播放"
-                        },
+                        playLabel,
                         style = MaterialTheme.typography.titleSmall,
                     )
                 }

@@ -116,6 +116,10 @@ fun PlayerScreen(
     onDanmakuRenderChange: (opacity: Float, fontScale: Float, area: Float) -> Unit,
     onDanmakuReload: () -> Unit,
     onDanmakuSelectEpisode: (Long) -> Unit,
+    onDanmakuSearch: (String) -> Unit = {},
+    onDanmakuResetAuto: () -> Unit = {},
+    /** 电视端打开手机扫码输入弹幕关键词的对话框。 */
+    onOpenDanmakuPhoneInput: (() -> Unit)? = null,
 ) {
     // 进入播放页自动横屏；退出时恢复到用户当前的旋转偏好。
     // Activity 已声明 configChanges，旋转不会重建页面、不会中断播放。
@@ -230,6 +234,9 @@ fun PlayerScreen(
         onDanmakuRenderChange = onDanmakuRenderChange,
         onDanmakuReload = onDanmakuReload,
         onDanmakuSelectEpisode = onDanmakuSelectEpisode,
+        onDanmakuSearch = onDanmakuSearch,
+        onDanmakuResetAuto = onDanmakuResetAuto,
+        onOpenDanmakuPhoneInput = onOpenDanmakuPhoneInput,
     )
 }
 
@@ -284,6 +291,9 @@ private fun PlayerSurface(
     onDanmakuRenderChange: (Float, Float, Float) -> Unit,
     onDanmakuReload: () -> Unit,
     onDanmakuSelectEpisode: (Long) -> Unit,
+    onDanmakuSearch: (String) -> Unit,
+    onDanmakuResetAuto: () -> Unit,
+    onOpenDanmakuPhoneInput: (() -> Unit)?,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -1342,6 +1352,9 @@ private fun PlayerSurface(
                     onRenderChange = onDanmakuRenderChange,
                     onReload = onDanmakuReload,
                     onSelectEpisode = onDanmakuSelectEpisode,
+                    onSearch = onDanmakuSearch,
+                    onResetAuto = onDanmakuResetAuto,
+                    onOpenPhoneSearch = onOpenDanmakuPhoneInput,
                     autoFocus = isTv,
                 )
                 return@let

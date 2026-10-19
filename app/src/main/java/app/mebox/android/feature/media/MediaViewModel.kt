@@ -14,6 +14,7 @@ import app.mebox.android.core.media.LibraryGrouping
 import app.mebox.android.core.media.LibrarySort
 import app.mebox.android.core.media.LibrarySortSelection
 import app.mebox.android.core.media.LibraryTagTab
+import app.mebox.android.core.media.MediaContinue
 import app.mebox.android.core.media.MediaRepository
 import app.mebox.android.core.media.PlaybackPlan
 import app.mebox.android.core.media.PlaybackUrls
@@ -138,6 +139,11 @@ data class DanmakuUiState(
     val alternatives: List<DanmakuAnimeDto> = emptyList(),
     /** 已匹配的番剧/单集说明，如“某某番 · 第 1 话”。 */
     val matchLabel: String? = null,
+    /**
+     * 用户手动搜索弹幕时使用的关键词。为空表示当前结果来自自动匹配；
+     * 面板据此显示「恢复自动匹配」入口，并在重新匹配时沿用同一个词。
+     */
+    val manualKeyword: String? = null,
     val mergedSources: Int = 0,
     val error: String? = null,
     /** 已成功拉取过弹幕的媒体 ID，避免用户重复开关时重复请求。 */
@@ -204,6 +210,10 @@ data class MediaUiState(
     val detailLoading: Boolean = false,
     val detailError: String? = null,
     val detailResumeMs: Long = 0L,
+    /** 「继续播放」实际指向的剧集（本剧最新观看记录），可能不是详情代表条目。 */
+    val detailResumeMedia: MediaDto? = null,
+    /** 最新观看记录是否已经看完；看完时按钮回到「播放」并从片头开始。 */
+    val detailResumeCompleted: Boolean = false,
     val selectedVersionId: String? = null,
     val favorite: Boolean = false,
     val favoriteError: String? = null,
@@ -925,6 +935,8 @@ class MediaViewModel(
                 detailLoading = true,
                 detailError = null,
                 detailResumeMs = 0L,
+                detailResumeMedia = null,
+                detailResumeCompleted = false,
                 selectedVersionId = null,
             )
         }
@@ -961,24 +973,6 @@ class MediaViewModel(
             val resolvedDetail = detail.value
             coroutineScope {
                 launch {
-                    val episodes = if (seriesKey != null && libraryId != null) {
-                        repo.seriesEpisodes(libraryId, seriesKey)
-                    } else {
-                        repo.mediaEpisodes(mediaId)
-                    }
-                    if (requestId != detailRequestId) return@launch
-                    if (episodes is ApiResult.Success) {
-                        _state.update { current ->
-                            // 用户可能已经切到别的详情页：只更新同一个条目。
-                            if (current.detail?.id == resolvedDetail.id) {
-                                current.copy(episodes = episodes.value.items)
-                            } else {
-                                current
-                            }
-                        }
-                    }
-                }
-                launch {
                     val favorite = repo.favoriteStatus(mediaId)
                     if (requestId != detailRequestId) return@launch
                     if (favorite is ApiResult.Success) {
@@ -992,15 +986,71 @@ class MediaViewModel(
                     }
                 }
                 launch {
-                    val resume = repo.resume(mediaId)
+                    // 剧集与观看历史并行请求：剧集一到就先渲染选集，历史稍后
+                    // 再补「继续播放」。详情页的代表条目可能是 OVA 或特别篇，
+                    // 直接读它的 /resume 会把继续播放指到一条旧记录，因此要按
+                    // 剧集 ID 集合从历史里挑真正最新的一条。
+                    val episodesDeferred = async {
+                        if (seriesKey != null && libraryId != null) {
+                            repo.seriesEpisodes(libraryId, seriesKey)
+                        } else {
+                            repo.mediaEpisodes(mediaId)
+                        }
+                    }
+                    val historyDeferred = async {
+                        repo.watchHistory(WATCH_HISTORY_SCAN_LIMIT)
+                    }
+                    val episodesResult = episodesDeferred.await()
                     if (requestId != detailRequestId) return@launch
-                    if (resume is ApiResult.Success) {
+                    val episodes = (episodesResult as? ApiResult.Success)?.value?.items.orEmpty()
+                    if (episodesResult is ApiResult.Success) {
                         _state.update { current ->
+                            // 用户可能已经切到别的详情页：只更新同一个条目。
                             if (current.detail?.id == resolvedDetail.id) {
-                                current.copy(detailResumeMs = resume.value.positionMs)
+                                current.copy(episodes = episodes)
                             } else {
                                 current
                             }
+                        }
+                    }
+                    val historyResult = historyDeferred.await()
+                    if (requestId != detailRequestId) return@launch
+                    val episodeIds = buildSet {
+                        add(resolvedDetail.id)
+                        episodes.forEach { add(it.id) }
+                        resolvedDetail.versions.forEach { add(it.id) }
+                    }
+                    val latest = (historyResult as? ApiResult.Success)?.value?.let { history ->
+                        MediaContinue.latest(history, episodeIds)
+                    }
+                    var resumeMedia: MediaDto? = null
+                    var resumePositionMs = 0L
+                    var resumeCompleted = false
+                    if (latest != null) {
+                        resumeMedia = episodes.firstOrNull { it.id == latest.mediaId }
+                            ?: latest.media
+                            ?: resolvedDetail
+                        resumePositionMs = latest.positionMs
+                        resumeCompleted = latest.completed
+                    } else {
+                        // 历史接口不可用或本剧还没有记录时，退回代表条目自己的进度。
+                        val resume = repo.resume(mediaId)
+                        if (requestId != detailRequestId) return@launch
+                        if (resume is ApiResult.Success) {
+                            resumePositionMs = resume.value.positionMs
+                            resumeCompleted = resume.value.completed
+                            if (resumePositionMs > 0L) resumeMedia = resolvedDetail
+                        }
+                    }
+                    _state.update { current ->
+                        if (current.detail?.id == resolvedDetail.id) {
+                            current.copy(
+                                detailResumeMs = resumePositionMs,
+                                detailResumeMedia = resumeMedia,
+                                detailResumeCompleted = resumeCompleted,
+                            )
+                        } else {
+                            current
                         }
                     }
                 }
@@ -1014,7 +1064,15 @@ class MediaViewModel(
 
     fun playDetail() {
         val detail = _state.value.detail ?: return
-        val version = detail.versions.firstOrNull { it.id == _state.value.selectedVersionId } ?: detail
+        // 「继续播放」指向本剧最新看的那一集，而不是详情代表条目自己。
+        val resumeMedia = _state.value.detailResumeMedia
+        if (resumeMedia != null && resumeMedia.id != detail.id) {
+            preparePlayback(resumeMedia)
+            return
+        }
+        val version = detail.versions.firstOrNull { it.id == _state.value.selectedVersionId }
+            ?: resumeMedia
+            ?: detail
         preparePlayback(version)
     }
 
@@ -1050,6 +1108,7 @@ class MediaViewModel(
                     candidates = emptyList(),
                     alternatives = emptyList(),
                     matchLabel = null,
+                    manualKeyword = null,
                     mergedSources = 0,
                     error = null,
                     loadedMediaId = null,
@@ -1188,23 +1247,48 @@ class MediaViewModel(
 
     /**
      * 通过服务端 `/api/danmaku/:id` 识别并拉取弹幕。服务端会依次尝试
-     * 哈希匹配、元数据搜索和文件名搜索；`episodeId` 用于用户从候选里选定
-     * 具体弹幕库后直接拉取。
+     * 哈希匹配、元数据搜索和文件名搜索；[episodeId] 用于用户从候选里选定
+     * 具体弹幕库后直接拉取，[keyword] 则用于手动搜索：服务端会跳过哈希和
+     * 文件名识别，只按这个词 + 当前集数查弹幕库。
+     *
+     * [resetKeyword] 为 true 表示这次是自动匹配，要清掉面板里残留的手动词。
      */
-    private fun loadDanmaku(mediaId: String, episodeId: Long? = null) {
+    private fun loadDanmaku(
+        mediaId: String,
+        episodeId: Long? = null,
+        keyword: String? = null,
+        resetKeyword: Boolean = false,
+    ) {
         val requestId = ++danmakuRequestId
+        val manualKeyword = keyword?.trim()?.takeIf { it.isNotEmpty() }
         _state.update {
+            val replacing = episodeId != null || manualKeyword != null || resetKeyword
             it.copy(
                 danmaku = it.danmaku.copy(
                     loading = true,
                     error = null,
-                    // 手动选库时旧的候选列表立即失效，避免面板里重复点击。
-                    candidates = if (episodeId != null) emptyList() else it.danmaku.candidates,
+                    // 手动选库或换关键词时旧的候选列表立即失效，避免面板里重复点击。
+                    candidates = if (episodeId != null || manualKeyword != null) {
+                        emptyList()
+                    } else {
+                        it.danmaku.candidates
+                    },
+                    // 换关键词/换库后旧弹幕已经不对应当前匹配，先清空再加载。
+                    comments = if (replacing) emptyList() else it.danmaku.comments,
+                    alternatives = if (replacing) emptyList() else it.danmaku.alternatives,
+                    matchLabel = if (replacing) null else it.danmaku.matchLabel,
+                    mergedSources = if (replacing) 0 else it.danmaku.mergedSources,
+                    loadedMediaId = if (replacing) null else it.danmaku.loadedMediaId,
+                    manualKeyword = when {
+                        manualKeyword != null -> manualKeyword
+                        resetKeyword -> null
+                        else -> it.danmaku.manualKeyword
+                    },
                 ),
             )
         }
         viewModelScope.launch {
-            val result = repo.danmaku(mediaId, episodeId = episodeId)
+            val result = repo.danmaku(mediaId, keyword = manualKeyword, episodeId = episodeId)
             if (requestId != danmakuRequestId) return@launch
             if ((_state.value.screen as? MediaScreen.Player)?.mediaId != mediaId) return@launch
             when (result) {
@@ -1280,7 +1364,25 @@ class MediaViewModel(
     /** 重新识别并加载当前视频的弹幕（面板里的“重新加载”）。 */
     fun reloadDanmaku() {
         val mediaId = (_state.value.screen as? MediaScreen.Player)?.mediaId ?: return
-        loadDanmaku(mediaId)
+        // 手动搜索过就按同一个关键词重试，否则走自动匹配。
+        loadDanmaku(mediaId, keyword = _state.value.danmaku.manualKeyword)
+    }
+
+    /** 用用户输入的关键词重新搜索弹幕；空白输入等同于恢复自动匹配。 */
+    fun searchDanmaku(keyword: String) {
+        val mediaId = (_state.value.screen as? MediaScreen.Player)?.mediaId ?: return
+        val trimmed = keyword.trim()
+        if (trimmed.isEmpty()) {
+            resetDanmakuMatch()
+            return
+        }
+        loadDanmaku(mediaId, keyword = trimmed)
+    }
+
+    /** 清除手动关键词与手动选库，重新按视频名自动匹配。 */
+    fun resetDanmakuMatch() {
+        val mediaId = (_state.value.screen as? MediaScreen.Player)?.mediaId ?: return
+        loadDanmaku(mediaId, resetKeyword = true)
     }
 
     /** 用户从候选列表里选定一个具体弹幕库。 */
@@ -1315,7 +1417,7 @@ class MediaViewModel(
                 current.danmaku.candidates.isEmpty() &&
                 !current.danmaku.loading
             ) {
-                loadDanmaku(mediaId)
+                loadDanmaku(mediaId, keyword = current.danmaku.manualKeyword)
             }
         }
     }
@@ -1496,6 +1598,7 @@ class MediaViewModel(
                         candidates = emptyList(),
                         alternatives = emptyList(),
                         matchLabel = null,
+                        manualKeyword = null,
                         mergedSources = 0,
                         error = null,
                         loadedMediaId = null,
@@ -1508,6 +1611,13 @@ class MediaViewModel(
         // 从详情/播放返回收藏或历史时刷新，保证收藏状态和进度是最新的。
         if (next == MediaScreen.Favorites) refreshFavorites()
         if (next == MediaScreen.History) refreshHistory()
+        // 从播放页回到详情页时重新取一次续播：用户刚看完的那一集才是
+        // 新的「继续播放」目标，不能沿用进播放页之前的记录。
+        if (leavingPlayer) {
+            (next as? MediaScreen.Detail)?.let { detail ->
+                loadDetail(detail.mediaId, detail.seriesKey, detail.libraryId)
+            }
+        }
     }
 
     fun createImageLoader(context: Context): ImageLoader {
@@ -1598,6 +1708,14 @@ class MediaViewModel(
 
         /** 观看历史一次加载的条数；服务端上限为 500。 */
         const val HISTORY_LIMIT = 200
+
+        /**
+         * 详情页为「继续播放」扫描的观看历史条数。
+         *
+         * 必须覆盖用户最近看过的所有剧集，否则很久没看的剧会被误判为
+         * 「没有记录」而退回代表条目的旧进度。
+         */
+        const val WATCH_HISTORY_SCAN_LIMIT = 300
 
         /** 服务端默认弹幕字号；本地缩放比例以它为基准。 */
         const val STANDARD_DANMAKU_FONT = 24f

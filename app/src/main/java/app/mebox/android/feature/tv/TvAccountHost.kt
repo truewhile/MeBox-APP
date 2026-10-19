@@ -59,7 +59,7 @@ import app.mebox.android.feature.reader.ReaderSourcesContent
 import app.mebox.android.feature.reader.ReaderViewModel
 import coil.compose.LocalImageLoader
 
-private enum class PhonePurpose { MEDIA_SEARCH, READER_SEARCH }
+private enum class PhonePurpose { MEDIA_SEARCH, READER_SEARCH, DANMAKU_SEARCH }
 
 /**
  * 登录后的电视主界面。
@@ -122,6 +122,11 @@ fun TvAccountHost(
                     readerViewModel.onQueryChange(event.query)
                     readerViewModel.submitSearch()
                 }
+
+                PhonePurpose.DANMAKU_SEARCH -> {
+                    // 播放页的弹幕面板保持打开，搜索结果直接回到面板里。
+                    mediaViewModel.searchDanmaku(event.query)
+                }
             }
             phonePurpose = null
         }
@@ -170,6 +175,11 @@ fun TvAccountHost(
                     onDanmakuRenderChange = mediaViewModel::setDanmakuRenderOptions,
                     onDanmakuReload = mediaViewModel::reloadDanmaku,
                     onDanmakuSelectEpisode = mediaViewModel::selectDanmakuLibrary,
+                    onDanmakuSearch = mediaViewModel::searchDanmaku,
+                    onDanmakuResetAuto = mediaViewModel::resetDanmakuMatch,
+                    onOpenDanmakuPhoneInput = {
+                        phonePurpose = PhonePurpose.DANMAKU_SEARCH
+                    },
                 )
 
                 is MediaScreen.Detail -> TvDetailScreen(
@@ -230,10 +240,10 @@ fun TvAccountHost(
         val purpose = phonePurpose
         if (purpose != null) {
             TvPhoneInputDialog(
-                title = if (purpose == PhonePurpose.READER_SEARCH) {
-                    "手机输入阅读搜索"
-                } else {
-                    "手机输入影视搜索"
+                title = when (purpose) {
+                    PhonePurpose.READER_SEARCH -> "手机输入阅读搜索"
+                    PhonePurpose.DANMAKU_SEARCH -> "手机输入弹幕关键词"
+                    PhonePurpose.MEDIA_SEARCH -> "手机输入影视搜索"
                 },
                 url = phoneUrl,
                 onRefresh = onRefreshQr,
