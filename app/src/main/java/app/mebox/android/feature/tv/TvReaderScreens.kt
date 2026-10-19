@@ -37,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -49,6 +50,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -575,6 +577,10 @@ fun TvReaderReadingScreen(
         )
     }
     var chromeVisible by remember { mutableStateOf(true) }
+    // 漫画按图片序号恢复/上报进度；文本按段落换算页码。两者共用同一个列表，
+    // 用基准位置避免刚恢复就回写进度导致每次打开都偏移。
+    var baselineIndex by remember(state.chapterIndex, state.content) { mutableIntStateOf(-1) }
+    var positionReady by remember(state.chapterIndex, state.content) { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         delay(80)
@@ -592,23 +598,49 @@ fun TvReaderReadingScreen(
             viewModel.clearChapterNotice()
         }
     }
-    LaunchedEffect(state.book?.id, state.chapterIndex, state.chapterLoading) {
-        if (state.chapterLoading || state.paragraphs.isEmpty()) return@LaunchedEffect
-        val target = ReaderPaging.paragraphForPage(
-            page = state.restorePage,
-            paragraphs = state.paragraphs,
-            charsPerPage = charsPerPage,
-        )
-        runCatching { listState.scrollToItem(target.coerceIn(0, state.paragraphs.lastIndex)) }
+    LaunchedEffect(state.book?.id, state.chapterIndex, state.chapterLoading, state.content) {
+        positionReady = false
+        baselineIndex = -1
+        if (state.chapterLoading) return@LaunchedEffect
+        if (state.content?.type == "image") {
+            val images = state.content.images.orEmpty()
+            if (images.isEmpty()) return@LaunchedEffect
+            val target = state.restorePage.coerceIn(0, images.lastIndex)
+            runCatching { listState.scrollToItem(target) }
+        } else {
+            if (state.paragraphs.isEmpty()) return@LaunchedEffect
+            val target = ReaderPaging.paragraphForPage(
+                page = state.restorePage,
+                paragraphs = state.paragraphs,
+                charsPerPage = charsPerPage,
+            )
+            runCatching { listState.scrollToItem(target.coerceIn(0, state.paragraphs.lastIndex)) }
+        }
+        baselineIndex = listState.firstVisibleItemIndex
+        positionReady = true
     }
-    LaunchedEffect(listState.firstVisibleItemIndex, state.paragraphs) {
-        if (state.paragraphs.isEmpty()) return@LaunchedEffect
-        val page = ReaderPaging.pageForParagraph(
-            index = listState.firstVisibleItemIndex,
-            paragraphs = state.paragraphs,
-            charsPerPage = charsPerPage,
-        )
-        viewModel.onPageChanged(page)
+    LaunchedEffect(
+        listState.firstVisibleItemIndex,
+        positionReady,
+        state.chapterIndex,
+        state.content,
+    ) {
+        if (!positionReady || listState.firstVisibleItemIndex == baselineIndex) {
+            return@LaunchedEffect
+        }
+        if (state.content?.type == "image") {
+            val images = state.content.images.orEmpty()
+            if (images.isEmpty()) return@LaunchedEffect
+            viewModel.onPageChanged(listState.firstVisibleItemIndex.coerceIn(0, images.lastIndex))
+        } else {
+            if (state.paragraphs.isEmpty()) return@LaunchedEffect
+            val page = ReaderPaging.pageForParagraph(
+                index = listState.firstVisibleItemIndex,
+                paragraphs = state.paragraphs,
+                charsPerPage = charsPerPage,
+            )
+            viewModel.onPageChanged(page)
+        }
     }
 
     Box(
@@ -671,6 +703,39 @@ fun TvReaderReadingScreen(
                 actionLabel = "重试",
                 onAction = viewModel::retryChapter,
             )
+
+            state.content?.type == "image" -> {
+                val images = state.content.images.orEmpty()
+                if (images.isEmpty()) {
+                    TvMessage("本章没有可显示的图片")
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = 96.dp,
+                            end = 96.dp,
+                            top = if (chromeVisible) 92.dp else 40.dp,
+                            bottom = 80.dp,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        itemsIndexed(
+                            items = images,
+                            key = { index, _ -> "${state.chapterIndex}:$index" },
+                        ) { index, url ->
+                            AsyncImage(
+                                model = ReaderUrls.resolve(origin, url),
+                                contentDescription = "第 ${index + 1} 页",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp),
+                            )
+                        }
+                    }
+                }
+            }
 
             state.paragraphs.isEmpty() -> TvMessage("本章没有可显示的正文")
             else -> LazyColumn(

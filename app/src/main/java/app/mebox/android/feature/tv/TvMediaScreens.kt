@@ -1,5 +1,6 @@
 package app.mebox.android.feature.tv
 
+import android.view.KeyEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,7 +17,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -44,14 +48,19 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -83,6 +92,8 @@ import app.mebox.android.feature.media.mediaPosterImage
 import app.mebox.android.feature.media.seriesCardPoster
 import app.mebox.android.feature.media.seriesCardSubtitle
 import app.mebox.android.feature.media.seriesCardTitle
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 /* ─────────────────────────── 首页 ─────────────────────────── */
 
@@ -127,11 +138,80 @@ fun TvHomeScreen(
         return
     }
 
+    val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+    val navigationJob = remember { JobSlot() }
+
+    val hero = state.carouselItems.firstOrNull() ?: state.recentItems.firstOrNull()
+    val showContinue = state.continueItems.isNotEmpty()
+    val showTags = state.libraryTagTabs.size > 1
+    val showRecent = state.recentItems.isNotEmpty()
+    val sectionIds = state.librarySections.map { it.library.id }
+    val sectionFocus = remember(sectionIds) {
+        sectionIds.associateWith { FocusRequester() }
+    }
+    val sectionListStates = remember(sectionIds) {
+        sectionIds.associateWith { LazyListState() }
+    }
+    val continueFocus = remember { FocusRequester() }
+    val continueListState = rememberLazyListState()
+    val recentFocus = remember { FocusRequester() }
+    val recentListState = rememberLazyListState()
+    val refreshFocus = remember { FocusRequester() }
+
+    // LazyColumn 的条目序号：hero / 继续观看(标题+横排) / 标签行 / 各媒体库(标题+横排) /
+    // 最近添加(标题+横排) / 刷新。显式记录横向列表所在的序号，按下键时先滚到
+    // 目标横排再请求焦点，避免目标行尚未组合时焦点搜索落到标签或“查看全部”上。
+    var nextItemIndex = 0
+    if (hero != null) nextItemIndex += 1
+    if (showContinue) nextItemIndex += 2
+    if (showTags) nextItemIndex += 1
+    val sectionRows = state.librarySections.map { section ->
+        nextItemIndex += 1
+        val row = TvHomeRow(
+            itemIndex = nextItemIndex,
+            focus = sectionFocus.getValue(section.library.id),
+            listState = sectionListStates.getValue(section.library.id),
+        )
+        nextItemIndex += 1
+        row
+    }
+    val recentRow = if (showRecent) {
+        nextItemIndex += 1
+        val row = TvHomeRow(nextItemIndex, recentFocus, recentListState)
+        nextItemIndex += 1
+        row
+    } else {
+        null
+    }
+    val refreshRow = TvHomeRow(nextItemIndex, refreshFocus, null)
+    val firstContentRow = sectionRows.firstOrNull() ?: recentRow ?: refreshRow
+
+    fun goToRow(row: TvHomeRow) {
+        navigationJob.job?.cancel()
+        navigationJob.job = scope.launch {
+            val visible = listState.layoutInfo.visibleItemsInfo.any { it.index == row.itemIndex }
+            if (!visible) {
+                listState.scrollToItem(row.itemIndex)
+                withFrameNanos { }
+            }
+            // 目标横排可能保留着上次的水平滚动位置，先回到第一张再请求焦点。
+            runCatching { row.listState?.scrollToItem(0) }
+            if (runCatching { row.focus.requestFocus() }.isFailure) {
+                listState.scrollToItem(row.itemIndex)
+                withFrameNanos { }
+                runCatching { row.listState?.scrollToItem(0) }
+                withFrameNanos { }
+                runCatching { row.focus.requestFocus() }
+            }
+        }
+    }
+
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 32.dp),
     ) {
-        val hero = state.carouselItems.firstOrNull() ?: state.recentItems.firstOrNull()
         if (hero != null) {
             item(key = "hero-${hero.key}") {
                 TvHero(
@@ -146,7 +226,7 @@ fun TvHomeScreen(
             }
         }
 
-        if (state.continueItems.isNotEmpty()) {
+        if (showContinue) {
             item(key = "continue-header") {
                 Spacer(Modifier.height(22.dp))
                 TvSectionHeader(
@@ -158,39 +238,53 @@ fun TvHomeScreen(
             }
             item(key = "continue-rail") {
                 Spacer(Modifier.height(10.dp))
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 32.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                TvHomeRail(
+                    state = continueListState,
+                    onDown = { goToRow(firstContentRow) },
                 ) {
                     itemsIndexed(
                         state.continueItems,
                         key = { index, item -> "continue-${item.media.id}-$index" },
-                    ) { _, item ->
+                    ) { index, item ->
                         TvWideCard(
                             title = item.media.title,
                             imageUrl = mediaArtworkImage(origin, item.media),
                             subtitle = continueWatchingSubtitle(item),
                             badge = item.media.displayEpisode.ifBlank { null },
                             onClick = { onContinue(item) },
+                            focusRequester = if (index == 0) continueFocus else null,
                         )
                     }
                 }
             }
         }
 
-        if (state.libraryTagTabs.size > 1) {
+        if (showTags) {
             item(key = "library-tags") {
                 Spacer(Modifier.height(20.dp))
-                TvLibraryTagRow(
-                    tabs = state.libraryTagTabs,
-                    selectedTag = state.selectedLibraryTag,
-                    onSelect = onSelectTag,
-                )
+                Box(
+                    modifier = Modifier.onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown &&
+                            event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                        ) {
+                            goToRow(firstContentRow)
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                ) {
+                    TvLibraryTagRow(
+                        tabs = state.libraryTagTabs,
+                        selectedTag = state.selectedLibraryTag,
+                        onSelect = onSelectTag,
+                    )
+                }
             }
         }
 
-        state.librarySections.forEach { section ->
+        state.librarySections.forEachIndexed { sectionIndex, section ->
+            val row = sectionRows[sectionIndex]
             item(key = "bar-${section.library.id}") {
                 Spacer(Modifier.height(22.dp))
                 TvSectionHeader(
@@ -202,28 +296,31 @@ fun TvHomeScreen(
             }
             item(key = "bar-rail-${section.library.id}") {
                 Spacer(Modifier.height(10.dp))
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 32.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                TvHomeRail(
+                    state = sectionListStates.getValue(section.library.id),
+                    onDown = {
+                        goToRow(sectionRows.getOrNull(sectionIndex + 1) ?: recentRow ?: refreshRow)
+                    },
                 ) {
                     itemsIndexed(
                         items = section.cards,
                         key = { index, card ->
                             "${section.library.id}-${card.key.ifBlank { card.rep.id }}-$index"
                         },
-                    ) { _, card ->                        TvPosterCard(
+                    ) { index, card ->
+                        TvPosterCard(
                             title = seriesCardTitle(card),
                             posterUrl = seriesCardPoster(origin, card),
                             subtitle = seriesCardSubtitle(card),
                             onClick = { onOpenCard(card) },
+                            focusRequester = if (index == 0) row.focus else null,
                         )
                     }
                 }
             }
         }
 
-        if (state.recentItems.isNotEmpty()) {
+        if (showRecent) {
             item(key = "recent-header") {
                 Spacer(Modifier.height(22.dp))
                 TvSectionHeader(
@@ -235,22 +332,22 @@ fun TvHomeScreen(
             }
             item(key = "recent-rail") {
                 Spacer(Modifier.height(10.dp))
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 32.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                TvHomeRail(
+                    state = recentListState,
+                    onDown = { goToRow(refreshRow) },
                 ) {
                     itemsIndexed(
                         items = state.recentItems,
                         key = { index, card ->
                             "recent-${card.key.ifBlank { card.rep.id }}-$index"
                         },
-                    ) { _, card ->
+                    ) { index, card ->
                         TvPosterCard(
                             title = seriesCardTitle(card),
                             posterUrl = seriesCardPoster(origin, card),
                             subtitle = seriesCardSubtitle(card),
                             onClick = { onOpenCard(card) },
+                            focusRequester = if (index == 0) recentFocus else null,
                         )
                     }
                 }
@@ -264,6 +361,7 @@ fun TvHomeScreen(
                     text = "刷新首页",
                     onClick = onRefresh,
                     primary = false,
+                    focusRequester = refreshFocus,
                     leading = {
                         Icon(
                             Icons.Default.Refresh,
@@ -274,6 +372,49 @@ fun TvHomeScreen(
                 )
             }
         }
+    }
+}
+
+/** 首页横向列表的焦点目标：LazyColumn 条目序号 + 首张卡片 + 横向滚动状态。 */
+private data class TvHomeRow(
+    val itemIndex: Int,
+    val focus: FocusRequester,
+    val listState: LazyListState?,
+)
+
+/** 保存当前焦点跳转任务，避免连续按键时多个滚动/请求焦点协程互相覆盖。 */
+private class JobSlot {
+    var job: Job? = null
+}
+
+/**
+ * 首页横向媒体行。按下键时不再交给几何焦点搜索，否则夹在中间的标签行
+ * 或下一节的“查看全部”按钮会被选为最近目标，表现为焦点向右跳一格。
+ */
+@Composable
+private fun TvHomeRail(
+    state: LazyListState,
+    onDown: () -> Unit,
+    content: LazyListScope.() -> Unit,
+) {
+    LazyRow(
+        state = state,
+        modifier = Modifier
+            .fillMaxWidth()
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown &&
+                    event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                ) {
+                    onDown()
+                    true
+                } else {
+                    false
+                }
+            },
+        contentPadding = PaddingValues(horizontal = 32.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        content()
     }
 }
 

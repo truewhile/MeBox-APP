@@ -1153,7 +1153,7 @@ class ReaderViewModel(
             return
         }
         withContext(Dispatchers.IO) { cache.saveChapters(scope, book.id, loaded.chapters) }
-        audio.updateChapters(loaded.chapters)
+        audio.updateChapters(book.id, loaded.chapters)
         // 详情页目录点章：优先按章节地址定位，地址找不到时按详情目录序号，最后回到书架进度。
         val requestedUrl = pendingChapterUrl
         val requestedHint = pendingChapterIndex
@@ -1365,7 +1365,7 @@ class ReaderViewModel(
             autoCacheText(book, index, content)
         }
         if (content.type == "audio") {
-            audio.updateChapters(_state.value.chapters)
+            audio.updateChapters(book.id, _state.value.chapters)
             val audioState = audio.state.value
             val sameBook = audioState.bookId == book.id
             val alreadyActive = sameBook &&
@@ -2394,7 +2394,7 @@ class ReaderViewModel(
                     }
                     repo.saveChapters(book.id, chapters)
                     withContext(Dispatchers.IO) { cache.saveChapters(scope, book.id, chapters) }
-                    audio.updateChapters(chapters)
+                    audio.updateChapters(book.id, chapters)
                     if (token != loadToken) return@launch
                     val target = ReaderChapters.initialIndex(book, chapters)
                     _state.update {

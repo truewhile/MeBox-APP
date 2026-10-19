@@ -194,7 +194,16 @@ class ReaderAudioEngine(
         }
     }
 
-    fun updateChapters(chapters: List<ReaderChapterDto>) {
+    /**
+     * 更新听书章节表。
+     *
+     * 只接受引擎当前正在播放的那本书：阅读页打开漫画/文本，或目录刷新的是
+     * 另一本书时，调用方手里的章节表不属于听书。若直接替换，引擎保留的旧章节号
+     * （例如有声书第 428 章）会落到更短的目录（漫画共 400 章）之外，媒体会话
+     * 查询上一章时就会越界崩溃。
+     */
+    fun updateChapters(bookId: String, chapters: List<ReaderChapterDto>) {
+        if (book?.id != bookId) return
         this.chapters = chapters
     }
 
@@ -870,21 +879,11 @@ class ReaderAudioEngine(
         }
     }
 
-    private fun nextReadable(chapters: List<ReaderChapterDto>, from: Int): Int? {
-        if (chapters.isEmpty()) return null
-        for (index in (from + 1) until chapters.size) {
-            if (!chapters[index].isVolume) return index
-        }
-        return null
-    }
+    private fun nextReadable(chapters: List<ReaderChapterDto>, from: Int): Int? =
+        ReaderChapterNavigation.nextReadable(chapters, from)
 
-    private fun previousReadable(chapters: List<ReaderChapterDto>, from: Int): Int? {
-        if (chapters.isEmpty()) return null
-        for (index in (from - 1) downTo 0) {
-            if (!chapters[index].isVolume) return index
-        }
-        return null
-    }
+    private fun previousReadable(chapters: List<ReaderChapterDto>, from: Int): Int? =
+        ReaderChapterNavigation.previousReadable(chapters, from)
 
     private companion object {
         /** 拖动进度条后的保护窗口，让用户能听清自己选中的位置。 */
