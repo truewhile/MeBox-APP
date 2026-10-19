@@ -93,6 +93,16 @@ class AppPreferences(context: Context) {
         set(value) = prefs.edit().putString(KEY_SUBTITLE_PRIORITY, value).apply()
 
     /**
+     * 首页底部是否显示「继续阅读/收听」悬浮条。
+     *
+     * 默认开启：首页此前只有影视内容，书籍进度需要用户先进阅读 tab 才能看到。
+     * 关闭后首页不再出现悬浮条，但阅读工具本身不受影响。
+     */
+    var homeReadingBar: Boolean
+        get() = prefs.getBoolean(KEY_HOME_READING_BAR, true)
+        set(value) = prefs.edit().putBoolean(KEY_HOME_READING_BAR, value).apply()
+
+    /**
      * 听书时是否与其他应用同时出声。
      *
      * 默认开启：不申请音频焦点，切到微信/视频等应用时本应用不会被暂停。
@@ -140,6 +150,7 @@ class AppPreferences(context: Context) {
         const val KEY_DECODER_MODE = "decoder_mode"
         const val KEY_SUBTITLES_AUTO_LOAD = "subtitles_auto_load"
         const val KEY_SUBTITLE_PRIORITY = "subtitle_priority"
+        const val KEY_HOME_READING_BAR = "home_reading_bar"
         const val KEY_AUDIO_MIX = "reader_audio_mix_other_apps"
         const val KEY_SERVER_SNAPSHOT_ADDRESS = "server_snapshot_address"
         const val KEY_SERVER_SNAPSHOT_INFO = "server_snapshot_info"

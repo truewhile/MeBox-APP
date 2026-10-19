@@ -395,6 +395,7 @@ internal fun ProfileContent(
     val currentEngine by viewModel.playerEngine.collectAsStateWithLifecycle()
     val decoderMode by viewModel.decoderMode.collectAsStateWithLifecycle()
     val subtitlePreference by viewModel.subtitlePreference.collectAsStateWithLifecycle()
+    val homeReadingBar by viewModel.homeReadingBar.collectAsStateWithLifecycle()
     val exportLogs = rememberLogExport()
     var showLogShare by remember { mutableStateOf(false) }
     val logShareUrl by viewModel.logShare.url.collectAsStateWithLifecycle()
@@ -599,6 +600,41 @@ internal fun ProfileContent(
                         }
                     }
                 }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        Text(
+            "阅读",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
+        )
+        MeBoxCard {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("首页显示阅读悬浮条", style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        if (homeReadingBar) {
+                            "在首页底部显示上次阅读或在听的书，可直接继续"
+                        } else {
+                            "已关闭，首页不显示阅读悬浮条"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = homeReadingBar,
+                    onCheckedChange = viewModel::setHomeReadingBar,
+                )
             }
         }
 

@@ -96,6 +96,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -113,6 +114,7 @@ import app.mebox.android.core.network.LibraryFacetsDto
 import app.mebox.android.core.network.MediaDto
 import app.mebox.android.core.network.SeriesCardDto
 import app.mebox.android.core.network.WatchHistoryDto
+import app.mebox.android.core.reader.ReaderContinue
 import app.mebox.android.core.ui.MeBoxButton
 import app.mebox.android.core.ui.MeBoxCard
 import app.mebox.android.core.ui.MeBoxChip
@@ -302,6 +304,23 @@ private fun TabsScaffold(
         Triple(MainTab.READER, Icons.AutoMirrored.Filled.List, "阅读"),
         Triple(MainTab.PROFILE, Icons.Default.Person, "我的"),
     )
+    val readingBarEnabled by mainViewModel.homeReadingBar.collectAsStateWithLifecycle()
+    val audio = readerState.audio
+    val continueBook = remember(
+        readerState.books,
+        audio.bookId,
+        audio.playing,
+        audio.loading,
+        audio.playWhenReady,
+    ) {
+        ReaderContinue.pick(
+            books = readerState.books,
+            activeAudioBookId = audio.bookId,
+            audioActive = audio.bookId != null &&
+                (audio.playing || audio.loading || audio.playWhenReady),
+        )
+    }
+    val showReadingBar = readingBarEnabled && state.tab == MainTab.HOME
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
@@ -343,6 +362,11 @@ private fun TabsScaffold(
                     onSelectTag = mediaViewModel::selectLibraryTag,
                     onLoadMoreSections = mediaViewModel::loadMoreHomeSections,
                     onRefresh = mediaViewModel::refreshHome,
+                    bottomContentPadding = if (showReadingBar && continueBook != null) {
+                        100.dp
+                    } else {
+                        32.dp
+                    },
                 )
                 MainTab.MEDIA -> MediaTabScreen(
                     state = state,
@@ -368,6 +392,31 @@ private fun TabsScaffold(
                     onOpenHistory = mediaViewModel::openHistory,
                 )
             }
+            if (showReadingBar) {
+                continueBook?.let { book ->
+                    HomeReadingBar(
+                        book = book,
+                        origin = account.address.origin,
+                        listening = audio.bookId == book.id &&
+                            (audio.playing || audio.loading || audio.playWhenReady),
+                        chapterLabel = if (audio.bookId == book.id && audio.chapterIndex >= 0) {
+                            ReaderContinue.chapterLabel(audio.chapterIndex, audio.chapterTitle)
+                        } else {
+                            ReaderContinue.chapterLabel(book)
+                        },
+                        onClick = {
+                            if (book.isAudio) {
+                                readerViewModel.openBookAndListen(book)
+                            } else {
+                                readerViewModel.openBook(book)
+                            }
+                        },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -384,6 +433,7 @@ private fun HomeScreen(
     onSelectTag: (String?) -> Unit,
     onLoadMoreSections: () -> Unit,
     onRefresh: () -> Unit,
+    bottomContentPadding: Dp = 32.dp,
 ) {
     val visibleLibraries = state.visibleLibraries
     val hasContent = state.continueItems.isNotEmpty() ||
@@ -397,7 +447,7 @@ private fun HomeScreen(
     }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(top = 4.dp, bottom = 32.dp),
+        contentPadding = PaddingValues(top = 4.dp, bottom = bottomContentPadding),
         verticalArrangement = Arrangement.spacedBy(22.dp),
     ) {
         item {

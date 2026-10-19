@@ -95,10 +95,23 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
     private val _subtitlePreference = MutableStateFlow(loadSubtitlePreference())
     val subtitlePreference: StateFlow<SubtitlePreference> = _subtitlePreference.asStateFlow()
 
+    /**
+     * 首页底部「继续阅读/收听」悬浮条的显示开关。
+     * 与播放设置一样只保存在本机，不写入服务端账号配置。
+     */
+    private val _homeReadingBar = MutableStateFlow(container.preferences.homeReadingBar)
+    val homeReadingBar: StateFlow<Boolean> = _homeReadingBar.asStateFlow()
+
     fun selectPlayerEngine(kind: PlayerEngineKind) {
         container.preferences.playerEngine = kind.key
         _playerEngine.value = kind
         DiagnosticsLog.i("Play", "切换播放内核为 ${kind.key}")
+    }
+
+    fun setHomeReadingBar(enabled: Boolean) {
+        container.preferences.homeReadingBar = enabled
+        _homeReadingBar.value = enabled
+        DiagnosticsLog.i("Reader", "首页阅读悬浮条: $enabled")
     }
 
     fun selectDecoderMode(mode: DecoderMode) {

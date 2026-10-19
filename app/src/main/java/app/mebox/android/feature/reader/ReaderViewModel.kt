@@ -1001,6 +1001,17 @@ class ReaderViewModel(
         viewModelScope.launch { openBookInternal(book, token) }
     }
 
+    /**
+     * 首页悬浮条的有声书入口：打开播放页并直接开始播放。
+     *
+     * 这个意图要在 [openBook] 之后写入，因为 openBook 会重置 `audioPlayRequested`；
+     * 章节加载完成时 `applyChapterContent` 会读取它并自动起播。
+     */
+    fun openBookAndListen(book: ReaderBookDto) {
+        openBook(book)
+        _state.update { it.copy(audioPlayRequested = true) }
+    }
+
     private suspend fun openBookInternal(book: ReaderBookDto, token: Long) {
         val loaded = loadChapters(book)
         if (token != loadToken) return
