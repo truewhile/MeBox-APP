@@ -113,6 +113,19 @@ object ReaderShelf {
     fun updateTime(book: ReaderBookDto): Long =
         book.latestChapterTime.takeIf { it > 0 } ?: 0
 
+    /**
+     * 「移出书架」二次确认文案，与网页端 `removeFromShelf` 保持一致：
+     * 本地导入的书会删服务器文件，原地引用只解除引用，书源书只清记录与进度。
+     */
+    fun removeMessage(book: ReaderBookDto): String = when {
+        book.localExternal ->
+            "《${book.name}》是原地引用服务器上的文件，移出书架只解除引用，不会删除源文件。确定吗？"
+        book.isLocal ->
+            "《${book.name}》及其在服务器上的文件都会被删除，确定吗？"
+        else ->
+            "《${book.name}》会连同阅读进度一起从书架移除，不影响书源。确定吗？"
+    }
+
     /** 绝对时间：当天只显示时分，同年显示月日，跨年带年份。 */
     fun formatBookTime(ms: Long, now: Long = System.currentTimeMillis()): String {
         if (ms <= 0) return ""

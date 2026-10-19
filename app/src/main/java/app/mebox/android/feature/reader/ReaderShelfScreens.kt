@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -37,10 +38,14 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Bookmarks
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -55,6 +60,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TriStateCheckbox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -67,6 +73,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,6 +81,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import app.mebox.android.core.network.ReaderBookDto
 import app.mebox.android.core.network.ReaderSearchBookDto
+import app.mebox.android.core.reader.ReaderSearchScope
 import app.mebox.android.core.reader.ReaderShelf
 import app.mebox.android.core.reader.ReaderStyle
 import app.mebox.android.core.reader.ReaderUrls
@@ -263,6 +271,7 @@ internal fun ReaderShelfContent(
                                     showUnread = style.shelfShowUnread,
                                     showUpdateTime = style.shelfShowUpdateTime,
                                     onClick = { viewModel.openBook(book) },
+                                    onRemove = { viewModel.requestShelfRemove(book) },
                                 )
                             }
                         }
@@ -279,6 +288,7 @@ internal fun ReaderShelfContent(
                                     showUnread = style.shelfShowUnread,
                                     showUpdateTime = style.shelfShowUpdateTime,
                                     onClick = { viewModel.openBook(book) },
+                                    onRemove = { viewModel.requestShelfRemove(book) },
                                 )
                             }
                         }
@@ -299,6 +309,7 @@ internal fun ReaderShelfContent(
                                     origin = origin,
                                     showUnread = style.shelfShowUnread,
                                     onClick = { viewModel.openBook(book) },
+                                    onRemove = { viewModel.requestShelfRemove(book) },
                                 )
                             }
                         }
@@ -315,6 +326,68 @@ internal fun ReaderShelfContent(
             viewModel = viewModel,
         )
     }
+
+    state.shelfRemoveTarget?.let { book ->
+        ShelfRemoveDialog(state = state, book = book, viewModel = viewModel)
+    }
+}
+
+/**
+ * 移出书架确认框：本地导入 / 原地引用 / 书源书的后果不同，文案与服务端行为对齐。
+ * 失败时弹窗保持打开并展示原因，用户可以直接重试。
+ */
+@Composable
+private fun ShelfRemoveDialog(
+    state: ReaderUiState,
+    book: ReaderBookDto,
+    viewModel: ReaderViewModel,
+) {
+    AlertDialog(
+        onDismissRequest = {
+            if (!state.shelfRemoveBusy) viewModel.cancelShelfRemove()
+        },
+        title = { Text("移出书架") },
+        text = {
+            Column {
+                Text(
+                    ReaderShelf.removeMessage(book),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                state.shelfRemoveError?.let { error ->
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (state.shelfRemoveBusy) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("正在移出…", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = viewModel::confirmShelfRemove,
+                enabled = !state.shelfRemoveBusy,
+            ) {
+                Text(if (state.shelfRemoveBusy) "移出中" else "移出", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = viewModel::cancelShelfRemove,
+                enabled = !state.shelfRemoveBusy,
+            ) {
+                Text("取消")
+            }
+        },
+    )
 }
 
 @Composable
@@ -351,7 +424,9 @@ private fun ReaderBookCard(
     origin: String,
     showUnread: Boolean,
     onClick: () -> Unit,
+    onRemove: () -> Unit,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
     Column(modifier = Modifier.clickable(onClick = onClick)) {
         Box(
             modifier = Modifier
@@ -383,6 +458,37 @@ private fun ReaderBookCard(
                 ) {
                     ShelfUnreadBadge(book)
                 }
+            }
+            // 右下角操作入口：点封面进阅读，点这里打开「移出书架」。
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(6.dp),
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.45f),
+                    contentColor = Color.White,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .clickable { menuOpen = true },
+                ) {
+                    Icon(
+                        Icons.Default.MoreVert,
+                        contentDescription = "更多操作：${book.name}",
+                        modifier = Modifier
+                            .padding(4.dp)
+                            .size(15.dp),
+                    )
+                }
+                ShelfBookMenu(
+                    expanded = menuOpen,
+                    onDismiss = { menuOpen = false },
+                    onRemove = {
+                        menuOpen = false
+                        onRemove()
+                    },
+                )
             }
         }
         Spacer(Modifier.height(6.dp))
@@ -419,9 +525,11 @@ private fun ReaderBookRow(
     showUnread: Boolean,
     showUpdateTime: Boolean,
     onClick: () -> Unit,
+    onRemove: () -> Unit,
 ) {
     val readTitle = ReaderShelf.readChapterTitle(book)
     val updated = ReaderShelf.updateTime(book)
+    var menuOpen by remember { mutableStateOf(false) }
     MeBoxCard(onClick = onClick) {
         Row(
             modifier = Modifier.padding(10.dp),
@@ -497,7 +605,57 @@ private fun ReaderBookRow(
                     )
                 }
             }
+            Spacer(Modifier.width(4.dp))
+            Box {
+                MeBoxIconButton(
+                    icon = Icons.Default.MoreVert,
+                    contentDescription = "更多操作：${book.name}",
+                    onClick = { menuOpen = true },
+                )
+                ShelfBookMenu(
+                    expanded = menuOpen,
+                    onDismiss = { menuOpen = false },
+                    onRemove = {
+                        menuOpen = false
+                        onRemove()
+                    },
+                )
+            }
         }
+    }
+}
+
+/** 书架卡片的操作菜单；目前只有「移出书架」，预留后续的详情 / 分组入口。 */
+@Composable
+private fun ShelfBookMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(MeBoxDimens.PanelRadius),
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) {
+        DropdownMenuItem(
+            text = {
+                Text(
+                    "移出书架",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            },
+            leadingIcon = {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(18.dp),
+                )
+            },
+            onClick = onRemove,
+        )
     }
 }
 
@@ -761,6 +919,8 @@ internal fun ReaderSearchContent(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
         )
 
+        SearchScopeBar(state = state, viewModel = viewModel)
+
         if (state.searchSkipped.isNotEmpty()) {
             val summary = state.searchSkipped
                 .groupingBy { it.reason.ifBlank { "未知原因" } }
@@ -825,6 +985,302 @@ internal fun ReaderSearchContent(
                     }
                 }
             }
+        }
+    }
+
+    if (state.searchScopeOpen) {
+        SearchScopeSheet(state = state, viewModel = viewModel)
+    }
+}
+
+/** 搜索范围入口：显示当前范围与已启用书源数量。 */
+@Composable
+private fun SearchScopeBar(
+    state: ReaderUiState,
+    viewModel: ReaderViewModel,
+) {
+    val enabledCount = state.sources.count { it.enabled }
+    val scopeAll = ReaderSearchScope.isAll(state.searchScopeIds, state.sources)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        MeBoxChip(
+            text = "搜索范围 · ${ReaderSearchScope.label(state.searchScopeIds, state.sources)}",
+            leadingIcon = Icons.Default.Tune,
+            onClick = viewModel::openSearchScope,
+        )
+        if (scopeAll && enabledCount > 0) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "共 $enabledCount 个启用书源",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/**
+ * 搜索范围弹窗：按分组列出书源，默认全选已启用书源。
+ * 确认时若覆盖全部启用书源会存成空集合，表示「全部」，新增书源自动纳入。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SearchScopeSheet(
+    state: ReaderUiState,
+    viewModel: ReaderViewModel,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var filter by remember { mutableStateOf("") }
+    val enabledIds = remember(state.sources) {
+        ReaderSearchScope.enabledIds(state.sources).toSet()
+    }
+    // draft 为 null 表示默认全选；用户第一次切换后才变成显式集合。
+    val selected = state.searchScopeDraft ?: enabledIds
+    val groups = remember(state.sources, filter) {
+        ReaderSearchScope.groups(state.sources, filter)
+    }
+    val visibleSources = remember(groups) { groups.flatMap { it.sources } }
+    val visibleEnabled = remember(visibleSources) {
+        visibleSources.filter { it.enabled }
+    }
+    val pickedCount = visibleEnabled.count { it.id in selected }
+    val pickedTotal = enabledIds.count { it in selected }
+    val loading = state.sourcesLoading && state.sources.isEmpty()
+
+    ModalBottomSheet(
+        onDismissRequest = viewModel::closeSearchScope,
+        sheetState = sheetState,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        containerColor = MaterialTheme.colorScheme.background,
+        dragHandle = { BottomSheetDefaults.DragHandle() },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 640.dp)
+                .padding(horizontal = 20.dp)
+                .navigationBarsPadding(),
+        ) {
+            Text("搜索范围", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "默认搜索全部启用书源 · 已启用 ${enabledIds.size} 个",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = filter,
+                    onValueChange = { filter = it },
+                    singleLine = true,
+                    placeholder = { Text("过滤书源名 / 分组", style = MaterialTheme.typography.bodySmall) },
+                    textStyle = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    onClick = {
+                        viewModel.setSearchScopeDraft(
+                            ReaderSearchScope.toggleVisible(selected, visibleSources, true),
+                        )
+                    },
+                    enabled = visibleEnabled.isNotEmpty(),
+                ) {
+                    Text("全选")
+                }
+                TextButton(
+                    onClick = {
+                        viewModel.setSearchScopeDraft(
+                            ReaderSearchScope.toggleVisible(selected, visibleSources, false),
+                        )
+                    },
+                    enabled = pickedCount > 0,
+                ) {
+                    Text("清空")
+                }
+            }
+
+            when {
+                loading -> ScopeMessageBox {
+                    CircularProgressIndicator()
+                }
+                state.sources.isEmpty() && state.sourcesError != null -> ScopeMessageBox {
+                    PageMessage(
+                        state.sourcesError,
+                        action = "重试",
+                        onAction = viewModel::refreshSources,
+                    )
+                }
+                state.sources.isEmpty() -> ScopeMessageBox {
+                    PageMessage(
+                        "还没有书源，先去书源管理导入",
+                        action = "去导入",
+                        onAction = {
+                            viewModel.closeSearchScope()
+                            viewModel.openSources()
+                        },
+                    )
+                }
+                groups.isEmpty() -> ScopeMessageBox {
+                    PageMessage("没有匹配「${filter.trim()}」的书源")
+                }
+                else -> LazyColumn(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .fillMaxWidth(),
+                    contentPadding = PaddingValues(vertical = 4.dp),
+                ) {
+                    groups.forEach { group ->
+                        val groupEnabled = group.sources.filter { it.enabled }
+                        val groupChecked = groupEnabled.isNotEmpty() &&
+                            groupEnabled.all { it.id in selected }
+                        val groupPartial = !groupChecked && groupEnabled.any { it.id in selected }
+                        item(key = "group-${group.name}") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable(enabled = groupEnabled.isNotEmpty()) {
+                                        viewModel.setSearchScopeDraft(
+                                            ReaderSearchScope.toggleGroup(selected, group),
+                                        )
+                                    }
+                                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                TriStateCheckbox(
+                                    state = when {
+                                        groupChecked -> ToggleableState.On
+                                        groupPartial -> ToggleableState.Indeterminate
+                                        else -> ToggleableState.Off
+                                    },
+                                    onClick = if (groupEnabled.isEmpty()) {
+                                        null
+                                    } else {
+                                        {
+                                            viewModel.setSearchScopeDraft(
+                                                ReaderSearchScope.toggleGroup(selected, group),
+                                            )
+                                        }
+                                    },
+                                )
+                                Text(
+                                    group.name,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    "${group.sources.size}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        items(group.sources, key = { "source-${it.id}" }) { source ->
+                            val checked = source.enabled && source.id in selected
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable(enabled = source.enabled) {
+                                        viewModel.setSearchScopeDraft(
+                                            if (source.id in selected) {
+                                                selected - source.id
+                                            } else {
+                                                selected + source.id
+                                            },
+                                        )
+                                    }
+                                    .padding(start = 25.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Checkbox(
+                                    checked = checked,
+                                    onCheckedChange = if (source.enabled) {
+                                        {
+                                            viewModel.setSearchScopeDraft(
+                                                if (source.id in selected) {
+                                                    selected - source.id
+                                                } else {
+                                                    selected + source.id
+                                                },
+                                            )
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    enabled = source.enabled,
+                                )
+                                Text(
+                                    source.name.ifBlank { source.sourceUrl },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (source.enabled) {
+                                        MaterialTheme.colorScheme.onSurface
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                if (!source.enabled) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    ) {
+                                        Text(
+                                            "已禁用",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    when {
+                        enabledIds.isNotEmpty() && pickedTotal == enabledIds.size ->
+                            ReaderSearchScope.ALL_LABEL
+                        pickedTotal > 0 -> "已选 $pickedTotal / ${enabledIds.size} 个书源"
+                        else -> "未选择书源"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = viewModel::closeSearchScope) { Text("取消") }
+                MeBoxButton(
+                    onClick = viewModel::confirmSearchScope,
+                    enabled = !loading && pickedTotal > 0,
+                ) {
+                    Text("确定")
+                }
+            }
+            Spacer(Modifier.height(12.dp))
         }
     }
 }
@@ -925,6 +1381,18 @@ internal fun ReaderCover(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+@Composable
+private fun ScopeMessageBox(content: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(180.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
     }
 }
 

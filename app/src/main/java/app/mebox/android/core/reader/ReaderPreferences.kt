@@ -60,7 +60,20 @@ class ReaderPreferences(context: Context) {
         prefs.edit().remove(key(scope)).apply()
     }
 
+    /**
+     * 搜索范围（已选书源 ID）按服务器保存：与网页端一致，这是设备级偏好，
+     * 刻意不参与账号同步。空集合表示「全部启用书源」。
+     */
+    fun loadSearchScope(serverId: String): Set<String> =
+        prefs.getStringSet(searchScopeKey(serverId), null)?.toSet().orEmpty()
+
+    fun saveSearchScope(serverId: String, ids: Set<String>) {
+        prefs.edit().putStringSet(searchScopeKey(serverId), ids.toSet()).apply()
+    }
+
     private fun key(scope: AccountScope): String = "${scope.serverId}:${scope.userId}"
+
+    private fun searchScopeKey(serverId: String): String = "search_scope:$serverId"
 
     private companion object {
         const val PREFS_NAME = "mebox_reader_prefs"

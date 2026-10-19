@@ -32,6 +32,7 @@ import app.mebox.android.core.reader.ReaderCacheStore
 import app.mebox.android.core.reader.ReaderParagraph
 import app.mebox.android.core.reader.ReaderPreferences
 import app.mebox.android.core.reader.ReaderRepository
+import app.mebox.android.core.reader.ReaderSearchScope
 import app.mebox.android.core.reader.ReaderShelf
 import app.mebox.android.core.reader.ReaderStyle
 import app.mebox.android.core.reader.ReaderText
@@ -74,6 +75,11 @@ data class ReaderUiState(
     val shelfNotice: String? = null,
     val tocRefreshing: Boolean = false,
 
+    /** 书架「移出」二次确认的目标；非空时显示确认弹窗。 */
+    val shelfRemoveTarget: ReaderBookDto? = null,
+    val shelfRemoveBusy: Boolean = false,
+    val shelfRemoveError: String? = null,
+
     // 搜索
     val query: String = "",
     val searchBooks: List<ReaderSearchBookDto> = emptyList(),
@@ -82,6 +88,13 @@ data class ReaderUiState(
     val searchLoading: Boolean = false,
     val searchLoadingMore: Boolean = false,
     val searchError: String? = null,
+
+    /** 已保存的搜索范围（已选书源 ID）；空集合表示全部启用书源。 */
+    val searchScopeIds: Set<String> = emptySet(),
+    val searchScopeOpen: Boolean = false,
+    /** 弹层里的勾选；null 表示默认全选所有已启用书源。 */
+    val searchScopeDraft: Set<String>? = null,
+
     val searchDetail: ReaderSearchBookDto? = null,
     val addingBook: Boolean = false,
     val addBookError: String? = null,
@@ -239,7 +252,9 @@ class ReaderViewModel(
     private val origin: String,
 ) : ViewModel() {
 
-    private val _state = MutableStateFlow(ReaderUiState())
+    private val _state = MutableStateFlow(
+        ReaderUiState(searchScopeIds = preferences.loadSearchScope(scope.serverId)),
+    )
     val state: StateFlow<ReaderUiState> = _state.asStateFlow()
 
     private var contentJob: Job? = null
@@ -319,6 +334,62 @@ class ReaderViewModel(
 
     fun setShelfShowUpdateTime(show: Boolean) {
         updateStyle(_state.value.style.copy(shelfShowUpdateTime = show))
+    }
+
+    // ── 书架：移出书籍 ──
+
+    /** 请求移出书架：先弹二次确认，文案按本地书 / 引用书 / 书源书区分。 */
+    fun requestShelfRemove(book: ReaderBookDto) {
+        if (_state.value.shelfRemoveBusy) return
+        _state.update {
+            it.copy(shelfRemoveTarget = book, shelfRemoveError = null)
+        }
+    }
+
+    fun cancelShelfRemove() {
+        if (_state.value.shelfRemoveBusy) return
+        _state.update { it.copy(shelfRemoveTarget = null, shelfRemoveError = null) }
+    }
+
+    fun confirmShelfRemove() {
+        val current = _state.value
+        val book = current.shelfRemoveTarget ?: return
+        if (current.shelfRemoveBusy) return
+        _state.update { it.copy(shelfRemoveBusy = true, shelfRemoveError = null) }
+        viewModelScope.launch {
+            when (val result = repo.removeBook(book.id)) {
+                is ApiResult.Success -> {
+                    // 本地缓存、听书检查点和服务端进度一起清掉，重新加入时从头开始。
+                    checkpoints.clear(scope, book.id)
+                    withContext(Dispatchers.IO) { cache.clear(scope, book.id) }
+                    if (audio.state.value.bookId == book.id) audio.stop()
+                    _state.update { state ->
+                        state.copy(
+                            shelfRemoveBusy = false,
+                            shelfRemoveTarget = null,
+                            shelfRemoveError = null,
+                            books = state.books.filterNot { it.id == book.id },
+                            shelfNotice = "《${book.name}》已移出书架",
+                        )
+                    }
+                    // 服务端还会同步清理分组引用与进度，重新拉一次保持两端一致。
+                    loadShelf()
+                }
+                is ApiResult.Failure -> _state.update {
+                    DiagnosticsLog.w(
+                        "Reader",
+                        "移出书架失败 book=${book.name} HTTP ${result.status} ${result.code}",
+                    )
+                    it.copy(shelfRemoveBusy = false, shelfRemoveError = readerError(result))
+                }
+                is ApiResult.NetworkError -> _state.update {
+                    it.copy(shelfRemoveBusy = false, shelfRemoveError = "网络不可用，请稍后重试")
+                }
+                ApiResult.Stale -> _state.update {
+                    it.copy(shelfRemoveBusy = false, shelfRemoveError = "请求已失效，请重试")
+                }
+            }
+        }
     }
 
     private fun loadShelf() {
@@ -482,6 +553,8 @@ class ReaderViewModel(
         _state.update {
             it.clearDetail().copy(screen = ReaderScreen.Search, searchError = null, addBookError = null)
         }
+        // 搜索范围需要书源名与启用状态；已加载过则不会重复请求。
+        loadSources()
     }
 
     fun closeSearch() {
@@ -494,6 +567,8 @@ class ReaderViewModel(
                 addBookError = null,
                 searchLoading = false,
                 searchLoadingMore = false,
+                searchScopeOpen = false,
+                searchScopeDraft = null,
             )
         }
     }
@@ -501,6 +576,55 @@ class ReaderViewModel(
     fun onQueryChange(value: String) {
         _state.update { it.copy(query = value, searchError = null) }
     }
+
+    // ── 搜索范围（对应网页端 SearchScopeDialog） ──
+
+    fun openSearchScope() {
+        if (_state.value.searchScopeOpen) return
+        _state.update {
+            it.copy(
+                searchScopeOpen = true,
+                searchScopeDraft = ReaderSearchScope.initialSelection(
+                    it.searchScopeIds,
+                    it.sources,
+                ),
+            )
+        }
+        // 书源列表用于分组与启用状态；已加载过就不重复请求。
+        loadSources()
+    }
+
+    fun closeSearchScope() {
+        _state.update { it.copy(searchScopeOpen = false, searchScopeDraft = null) }
+    }
+
+    /** 弹层里的勾选变化；null 以外的值都是用户实际勾选的结果。 */
+    fun setSearchScopeDraft(ids: Set<String>) {
+        _state.update { it.copy(searchScopeDraft = ids) }
+    }
+
+    /** 确认范围：全部启用书源时存空集合，与服务端「空 = 全部」语义一致。 */
+    fun confirmSearchScope() {
+        val current = _state.value
+        val selected = current.searchScopeDraft
+            ?: ReaderSearchScope.enabledIds(current.sources).toSet()
+        val saved = ReaderSearchScope.confirmSelection(selected, current.sources)
+        preferences.saveSearchScope(scope.serverId, saved)
+        val rerun = current.searchPage > 0 && current.query.trim().isNotEmpty()
+        _state.update {
+            it.copy(
+                searchScopeOpen = false,
+                searchScopeDraft = null,
+                searchScopeIds = saved,
+            )
+        }
+        // 已经搜过一轮时立刻按新范围重搜，避免旧结果让人以为范围没生效。
+        if (rerun) submitSearch()
+    }
+
+    /** 当前搜索应携带的 `source_ids`；全部范围返回 null（省略字段）。 */
+    private fun searchSourceIds(state: ReaderUiState = _state.value): List<String>? =
+        ReaderSearchScope.requestIds(state.searchScopeIds, state.sources)
 
     fun submitSearch() {
         val query = _state.value.query.trim()
@@ -519,7 +643,7 @@ class ReaderViewModel(
             )
         }
         searchJob = viewModelScope.launch {
-            when (val result = repo.search(query, page = 1)) {
+            when (val result = repo.search(query, page = 1, sourceIds = searchSourceIds())) {
                 is ApiResult.Success -> _state.update {
                     it.copy(
                         searchLoading = false,
@@ -552,7 +676,7 @@ class ReaderViewModel(
         val nextPage = current.searchPage + 1
         _state.update { it.copy(searchLoadingMore = true, searchError = null) }
         viewModelScope.launch {
-            when (val result = repo.search(query, page = nextPage)) {
+            when (val result = repo.search(query, page = nextPage, sourceIds = searchSourceIds())) {
                 is ApiResult.Success -> _state.update { state ->
                     state.copy(
                         searchLoadingMore = false,

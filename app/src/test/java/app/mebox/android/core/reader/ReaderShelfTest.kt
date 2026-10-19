@@ -129,6 +129,22 @@ class ReaderShelfTest {
     }
 
     @Test
+    fun `remove message depends on how the book was added`() {
+        assertEquals(
+            "《书》会连同阅读进度一起从书架移除，不影响书源。确定吗？",
+            ReaderShelf.removeMessage(book("a", "书")),
+        )
+        assertEquals(
+            "《书》及其在服务器上的文件都会被删除，确定吗？",
+            ReaderShelf.removeMessage(book("a", "书").copy(isLocal = true)),
+        )
+        assertEquals(
+            "《书》是原地引用服务器上的文件，移出书架只解除引用，不会删除源文件。确定吗？",
+            ReaderShelf.removeMessage(book("a", "书").copy(isLocal = true, localExternal = true)),
+        )
+    }
+
+    @Test
     fun `relative time falls back to date after thirty days`() {
         val now = 1_700_000_000_000L
         assertEquals("刚刚", ReaderShelf.formatRelativeTime(now - 10_000, now))
