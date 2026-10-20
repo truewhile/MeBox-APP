@@ -208,8 +208,8 @@ class MeBoxApiClient(
 
     // ── 阅读 ──
 
-    suspend fun readerBooks(accessToken: String): ApiResult<ReaderBooksDto> =
-        call { api.readerBooks(bearer(accessToken)) }
+    suspend fun readerBooks(accessToken: String, fresh: Boolean = false): ApiResult<ReaderBooksDto> =
+        call { api.readerBooks(bearer(accessToken), if (fresh) "no-cache" else null) }
 
     suspend fun readerChapters(
         accessToken: String,

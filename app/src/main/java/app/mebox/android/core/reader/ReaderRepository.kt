@@ -33,9 +33,10 @@ class ReaderRepository(
     private val api: MeBoxApiClient,
     private val coordinator: AuthCoordinator,
     private val scope: AccountScope,
+    private val offlineOnly: Boolean = false,
 ) {
-    suspend fun shelf(): ApiResult<List<ReaderBookDto>> =
-        authorized { api.readerBooks(it) }.mapSuccess { it.books.orEmpty() }
+    suspend fun shelf(fresh: Boolean = false): ApiResult<List<ReaderBookDto>> =
+        authorized { api.readerBooks(it, fresh) }.mapSuccess { it.books.orEmpty() }
 
     suspend fun chapters(bookId: String): ApiResult<List<ReaderChapterDto>> =
         authorized { api.readerChapters(it, bookId) }.mapSuccess { it.chapters.orEmpty() }
@@ -198,7 +199,8 @@ class ReaderRepository(
         authorized { api.readerContentBatch(it, bookId, chapterIndexes) }
 
     private suspend fun <T> authorized(block: suspend (String) -> ApiResult<T>): ApiResult<T> =
-        coordinator.authorized(scope, block)
+        if (offlineOnly) ApiResult.NetworkError("离线模式仅可读取本机缓存")
+        else coordinator.authorized(scope, block)
 }
 
 data class ReaderSearchResult(

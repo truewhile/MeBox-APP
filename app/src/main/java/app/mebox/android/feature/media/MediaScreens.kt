@@ -172,7 +172,7 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
         return
     }
     val readerViewModel: ReaderViewModel = viewModel(
-        key = "reader-${account.scope.serverId}-${account.scope.userId}",
+        key = "reader-${account.scope.serverId}-${account.scope.userId}-${mainViewModel.readerSessionKey(account.scope)}",
         factory = readerFactory,
     )
     val state by mediaViewModel.state.collectAsStateWithLifecycle()

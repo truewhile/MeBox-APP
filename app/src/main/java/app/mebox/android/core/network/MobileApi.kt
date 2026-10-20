@@ -213,6 +213,7 @@ interface MobileApi {
     @GET("api/reader/books")
     suspend fun readerBooks(
         @Header("Authorization") authorization: String,
+        @Header("Cache-Control") cacheControl: String? = null,
     ): Response<ReaderBooksDto>
 
     @GET("api/reader/books/{id}/chapters")

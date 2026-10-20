@@ -523,6 +523,7 @@ fun TvReaderReadingScreen(
     origin: String,
     viewModel: ReaderViewModel,
 ) {
+    app.mebox.android.feature.reader.PersistReaderOnStop(viewModel)
     val isAudio = state.content?.type == "audio"
     if (isAudio) {
         val audioBackFocus = remember { FocusRequester() }

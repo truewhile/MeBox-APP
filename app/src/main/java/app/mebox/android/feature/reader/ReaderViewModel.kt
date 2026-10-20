@@ -29,6 +29,12 @@ import app.mebox.android.core.reader.ReaderAudioResume
 import app.mebox.android.core.reader.ReaderAudioState
 import app.mebox.android.core.reader.ReaderAudioTuning
 import app.mebox.android.core.reader.ReaderCacheStore
+import app.mebox.android.core.reader.ReaderCacheStatus
+import app.mebox.android.core.reader.ReaderProgress
+import app.mebox.android.core.reader.ReaderProgressResume
+import app.mebox.android.core.reader.ReaderProgressStore
+import app.mebox.android.core.reader.ReaderProgressSync
+import kotlinx.coroutines.CancellationException
 import app.mebox.android.core.reader.ReaderParagraph
 import app.mebox.android.core.reader.ReaderPreferences
 import app.mebox.android.core.reader.ReaderRepository
@@ -182,6 +188,10 @@ data class ReaderUiState(
     val sourceLoginNotice: String? = null,
 
     // 离线缓存
+    val offlineOnly: Boolean = false,
+    val progressNotice: String? = null,
+    val partialCachedChapters: Set<Int> = emptySet(),
+    val cacheFailedChapters: Set<Int> = emptySet(),
     val cachedChapters: Set<Int> = emptySet(),
     val cacheBytes: Long = 0,
     val cacheBusy: Boolean = false,
@@ -250,10 +260,28 @@ class ReaderViewModel(
     private val audio: ReaderAudioEngine,
     private val checkpoints: ReaderAudioCheckpointStore,
     private val origin: String,
+    private val progressStore: ReaderProgressStore,
+    private val offlineOnly: Boolean = false,
 ) : ViewModel() {
 
+    private val progressGeneration = progressStore.generation(scope)
+
+    /** 退出登录会提升缓存代次；旧任务（含自动缓存）此后不得再写盘。 */
+    private val cacheAccountGeneration = cache.generation(scope).account
+
+    private fun cacheWritable(): Boolean = cache.generation(scope).account == cacheAccountGeneration
+    private val progressSync = ReaderProgressSync(
+        progressStore, scope,
+        loadBooks = { repo.shelf(fresh = true) },
+        send = {
+            if (progressStore.generation(scope) != progressGeneration) ApiResult.Stale
+            else repo.saveProgress(it.bookId, it.chapterIndex, it.position, it.chapterTitle)
+        },
+    )
+    private var lastProgressTime = 0L
+
     private val _state = MutableStateFlow(
-        ReaderUiState(searchScopeIds = preferences.loadSearchScope(scope.serverId)),
+        ReaderUiState(searchScopeIds = preferences.loadSearchScope(scope.serverId), offlineOnly = offlineOnly),
     )
     val state: StateFlow<ReaderUiState> = _state.asStateFlow()
 
@@ -264,12 +292,14 @@ class ReaderViewModel(
     private var profileSaveJob: Job? = null
     private var browserPollJob: Job? = null
     private var cacheJob: Job? = null
+    private var cacheTaskToken = 0L
     private var detailTocToken = 0
     private var pendingChapterUrl: String? = null
     private var pendingChapterIndex: Int? = null
     private var loadToken = 0L
     private var currentPage = 0
     private var styleTouched = false
+    private var serverBooks: Map<String, ReaderBookDto> = emptyMap()
 
     init {
         preferences.load(scope)?.let { cached ->
@@ -294,7 +324,15 @@ class ReaderViewModel(
             }
         }
         loadShelf()
-        loadProfile()
+        if (!offlineOnly) {
+            loadProfile()
+            viewModelScope.launch {
+                while (isActive) {
+                    syncPendingProgress()
+                    delay(30_000L)
+                }
+            }
+        }
     }
 
     // ── 书架 ──
@@ -361,7 +399,10 @@ class ReaderViewModel(
                 is ApiResult.Success -> {
                     // 本地缓存、听书检查点和服务端进度一起清掉，重新加入时从头开始。
                     checkpoints.clear(scope, book.id)
-                    withContext(Dispatchers.IO) { cache.clear(scope, book.id) }
+                    withContext(Dispatchers.IO) {
+                        progressStore.clear(scope, book.id)
+                        cache.clear(scope, book.id)
+                    }
                     if (audio.state.value.bookId == book.id) audio.stop()
                     _state.update { state ->
                         state.copy(
@@ -396,17 +437,37 @@ class ReaderViewModel(
         if (_state.value.shelfLoading) return
         _state.update { it.copy(shelfLoading = true, shelfError = null) }
         viewModelScope.launch {
-            val booksResult = repo.shelf()
-            val groupsResult = if (_state.value.groupsLoaded) null else repo.bookGroups()
-            val mergedShelf = (booksResult as? ApiResult.Success)?.value
-                ?.let(::mergeLocalAudioProgress)
-            val cachedShelf = if (mergedShelf != null) {
-                withContext(Dispatchers.IO) { cache.saveShelf(scope, mergedShelf) }
-                null
-            } else {
-                withContext(Dispatchers.IO) { cache.readShelf(scope) }
-                    ?.let(::mergeLocalAudioProgress)
+            if (offlineOnly) {
+                val books = withContext(Dispatchers.IO) { cache.offlineShelf(scope) }
+                serverBooks = books.associateBy { it.id }
+                val merged = withContext(Dispatchers.IO) { mergeLocalAudioProgress(books) }
+                _state.update { it.copy(
+                    shelfLoading = false, books = merged,
+                    shelfNotice = "离线模式：仅可阅读完整缓存的文本和漫画，进度保存在本机",
+                ) }
+                return@launch
             }
+            val booksResult = repo.shelf(fresh = true)
+            val groupsResult = if (_state.value.groupsLoaded) null else repo.bookGroups()
+            val remoteBooks = (booksResult as? ApiResult.Success)?.value
+            if (remoteBooks != null) serverBooks = remoteBooks.associateBy { it.id }
+            val mergedShelf = remoteBooks?.let { books ->
+                withContext(Dispatchers.IO) { mergeLocalAudioProgress(books) }
+            }
+            val cachedShelf = if (remoteBooks != null) {
+                withContext(Dispatchers.IO) {
+                    runCatching { cache.saveShelf(scope, remoteBooks) }
+                        .onFailure { DiagnosticsLog.w("Reader", "离线书架快照保存失败", it) }
+                }
+                null
+            } else if (booksResult is ApiResult.NetworkError ||
+                (booksResult is ApiResult.Failure && booksResult.status >= 500)
+            ) {
+                withContext(Dispatchers.IO) { cache.readShelf(scope) }?.let { books ->
+                    serverBooks = books.associateBy { it.id }
+                    withContext(Dispatchers.IO) { mergeLocalAudioProgress(books) }
+                }
+            } else null
             val error = when {
                 cachedShelf != null -> null
                 booksResult is ApiResult.Failure -> readerError(booksResult)
@@ -450,7 +511,7 @@ class ReaderViewModel(
      */
     private fun mergeLocalAudioProgress(books: List<ReaderBookDto>): List<ReaderBookDto> =
         books.map { book ->
-            if (!book.isAudio) return@map book
+            if (!book.isAudio) return@map ReaderProgressResume.merge(book, progressStore.load(scope, book.id))
             val local = checkpoints.load(scope, book.id) ?: return@map book
             if (local.updatedAtMs <= book.durChapterTime) return@map book
             book.copy(
@@ -517,6 +578,7 @@ class ReaderViewModel(
         styleTouched = true
         preferences.save(scope, sanitized)
         _state.update { it.copy(style = sanitized) }
+        if (offlineOnly) return
         profileSaveJob?.cancel()
         profileSaveJob = viewModelScope.launch {
             // 拖动滑块时连续提交会打满服务端；停顿后再同步一次完整偏好。
@@ -1068,6 +1130,9 @@ class ReaderViewModel(
         startChapterUrl: String? = null,
         startChapterIndex: Int? = null,
     ) {
+        if (offlineOnly && book.type !in setOf(0, 2)) return
+        saveProgressNow()
+        cancelCacheDownload()
         loadToken += 1
         val token = loadToken
         pendingChapterUrl = startChapterUrl
@@ -1116,6 +1181,11 @@ class ReaderViewModel(
                 browserPage = null,
                 cacheNotice = null,
                 cacheProgress = "",
+                cacheBusy = false,
+                cachedChapters = emptySet(),
+                partialCachedChapters = emptySet(),
+                cacheFailedChapters = emptySet(),
+                cacheBytes = 0,
                 audioPlayRequested = null,
                 audioCreditsOpen = false,
                 audioCreditsError = null,
@@ -1152,7 +1222,10 @@ class ReaderViewModel(
             }
             return
         }
-        withContext(Dispatchers.IO) { cache.saveChapters(scope, book.id, loaded.chapters) }
+        withContext(Dispatchers.IO) {
+            runCatching { cache.saveChapters(scope, book.id, loaded.chapters) }
+                .onFailure { DiagnosticsLog.w("Reader", "离线目录保存失败 book=${book.id}", it) }
+        }
         audio.updateChapters(book.id, loaded.chapters)
         // 详情页目录点章：优先按章节地址定位，地址找不到时按详情目录序号，最后回到书架进度。
         val requestedUrl = pendingChapterUrl
@@ -1178,13 +1251,17 @@ class ReaderViewModel(
         } else {
             null
         }
+        val serverBook = serverBooks[book.id] ?: book
+        val readingBook = if (book.isAudio) book else withContext(Dispatchers.IO) {
+            ReaderProgressResume.merge(serverBook, progressStore.load(scope, book.id), loaded.chapters)
+        }
         val index = requestedIndex
             ?: resume?.chapterIndex
-            ?: ReaderChapters.initialIndex(book, loaded.chapters)
+            ?: ReaderChapters.initialIndex(readingBook, loaded.chapters)
         val page = when {
             requestedIndex != null -> 0
-            resume?.fromLocalCheckpoint == true -> resume.positionSec
-            index == book.durChapterIndex -> book.durChapterPos
+            resume != null -> resume.positionSec
+            index == readingBook.durChapterIndex -> readingBook.durChapterPos
             else -> 0
         }
         _state.update {
@@ -1202,6 +1279,8 @@ class ReaderViewModel(
     private suspend fun loadChapters(book: ReaderBookDto): ChapterLoad {
         var cachedEmptyMessage: String? = null
         val cachedChapters = withContext(Dispatchers.IO) { cache.readChapters(scope, book.id) }
+        if (offlineOnly) return ChapterLoad(cachedChapters.orEmpty(),
+            if (cachedChapters == null) "本机没有缓存目录，请联网后下载" else "已加载离线目录")
         when (val result = repo.chapters(book.id)) {
             is ApiResult.Success -> {
                 if (result.value.isNotEmpty() || book.isLocal) {
@@ -1285,6 +1364,17 @@ class ReaderViewModel(
             )
         }
         contentJob = viewModelScope.launch {
+            if (offlineOnly) {
+                val cached = withContext(Dispatchers.IO) {
+                    if (cache.status(scope, book.id, index) == ReaderCacheStatus.COMPLETE)
+                        cache.read(scope, book.id, index) else null
+                }
+                if (token != loadToken) return@launch
+                if (cached != null && cached.type in setOf("text", "image")) {
+                    applyChapterContent(book, index, cached.copy(comments = null), offline = true)
+                } else _state.update { it.copy(chapterLoading = false, chapterError = "本章未完整缓存，请联网下载后再阅读") }
+                return@launch
+            }
             when (val result = repo.content(book.id, index)) {
                 is ApiResult.Success -> {
                     if (token != loadToken) return@launch
@@ -1403,7 +1493,8 @@ class ReaderViewModel(
     }
 
     private fun autoCacheText(book: ReaderBookDto, index: Int, content: ReaderChapterContentDto) {
-        if (content.type != "text") return
+        if (content.type != "text" || offlineOnly || !cacheWritable()) return
+        val expected = cache.generation(scope, book.id)
         viewModelScope.launch {
             val already = withContext(Dispatchers.IO) {
                 cache.hasChapter(scope, book.id, index)
@@ -1411,7 +1502,7 @@ class ReaderViewModel(
             if (!already) {
                 runCatching {
                     withContext(Dispatchers.IO) {
-                        cache.save(scope, book.id, index, content, origin)
+                        cache.save(scope, book.id, index, content, origin, expected)
                     }
                 }
                 refreshCacheStatus(book.id)
@@ -1621,7 +1712,10 @@ class ReaderViewModel(
                 is ApiResult.Success -> {
                     cacheJob?.cancel()
                     audio.stop()
-                    withContext(Dispatchers.IO) { cache.clear(scope, book.id) }
+                    withContext(Dispatchers.IO) {
+                        progressStore.clear(scope, book.id)
+                        cache.clear(scope, book.id)
+                    }
                     _state.update {
                         it.copy(
                             originPickerOpen = false,
@@ -2244,10 +2338,11 @@ class ReaderViewModel(
         val target = bookId ?: _state.value.book?.id ?: return
         viewModelScope.launch {
             val indexes = withContext(Dispatchers.IO) { cache.cachedIndexes(scope, target) }
+            val partial = withContext(Dispatchers.IO) { cache.partialIndexes(scope, target) }
             val bytes = withContext(Dispatchers.IO) { cache.sizeBytes(scope, target) }
             _state.update { current ->
                 if (current.book?.id == target) {
-                    current.copy(cachedChapters = indexes, cacheBytes = bytes)
+                    current.copy(cachedChapters = indexes, partialCachedChapters = partial, cacheBytes = bytes)
                 } else {
                     current
                 }
@@ -2283,63 +2378,74 @@ class ReaderViewModel(
         downloadChapters(book, listOf(current.chapterIndex))
     }
 
-    private fun downloadChapters(book: ReaderBookDto, targets: List<Int>) {
+    fun cancelCacheDownload() {
+        if (cacheJob?.isActive != true) return
+        cacheTaskToken += 1
         cacheJob?.cancel()
-        _state.update {
-            it.copy(
-                cacheBusy = true,
-                cacheNotice = null,
-                cacheProgress = "0/${targets.size}",
-            )
+        cacheJob = null
+        _state.update { it.copy(cacheBusy = false, cacheProgress = "", cacheNotice = "下载已取消，已完成资源保留") }
+        refreshCacheStatus()
+    }
+
+    fun retryFailedCache() {
+        val current = _state.value
+        val book = current.book ?: return
+        if (!current.cacheBusy && current.cacheFailedChapters.isNotEmpty()) {
+            downloadChapters(book, current.cacheFailedChapters.sorted())
         }
+    }
+
+    private fun downloadChapters(book: ReaderBookDto, targets: List<Int>) {
+        if (offlineOnly || !cacheWritable()) return
+        cacheJob?.cancel()
+        val task = ++cacheTaskToken
+        val indexes = targets.distinct()
+        val expected = cache.generation(scope, book.id)
+        _state.update { it.copy(cacheBusy = true, cacheNotice = null,
+            cacheProgress = "0/${indexes.size}", cacheFailedChapters = indexes.toSet()) }
         cacheJob = viewModelScope.launch {
             var done = 0
-            var failed = 0
-            targets.chunked(20).forEach { chunk ->
-                when (val result = repo.contentBatch(book.id, chunk)) {
-                    is ApiResult.Success -> {
-                        val items = result.value.items.orEmpty()
-                            .associateBy { it.chapterIndex }
-                        chunk.forEach { index ->
-                            val item = items[index]
-                            if (item == null || item.error.isNotBlank() || item.type.isBlank()) {
-                                failed += 1
-                            } else if (item.type == "audio" && item.hls) {
-                                // HLS 播放列表依赖在线分片，客户端目前不做分片级离线缓存。
-                                failed += 1
-                            } else {
-                                val content = item.toChapterContent()
-                                val saved = runCatching {
-                                    withContext(Dispatchers.IO) {
-                                        cache.save(scope, book.id, index, content, origin)
-                                    }
-                                }.isSuccess
-                                if (saved) done += 1 else failed += 1
-                            }
-                            _state.update {
-                                it.copy(cacheProgress = "${done + failed}/${targets.size}")
+            var processed = 0
+            val failed = indexes.toMutableSet()
+            try {
+                indexes.chunked(20).forEach { chunk ->
+                    if (cache.generation(scope, book.id) != expected) throw CancellationException("缓存代次已变化")
+                    val result = repo.contentBatch(book.id, chunk)
+                    val items = (result as? ApiResult.Success)?.value?.items.orEmpty().associateBy { it.chapterIndex }
+                    chunk.forEach { index ->
+                        val item = items[index]
+                        if (item != null && item.error.isBlank() && item.type.isNotBlank()) {
+                            if (!(item.type == "audio" && item.hls)) {
+                                try {
+                                    cache.save(scope, book.id, index, item.toChapterContent(), origin, expected)
+                                } catch (cancelled: CancellationException) { throw cancelled }
+                                catch (failure: Exception) {
+                                    DiagnosticsLog.w("Reader", "章节缓存写入失败 book=${book.id} index=$index", failure)
+                                }
                             }
                         }
-                    }
-                    else -> {
-                        failed += chunk.size
-                        _state.update {
-                            it.copy(cacheProgress = "${done + failed}/${targets.size}")
+                        val complete = withContext(Dispatchers.IO) {
+                            cache.status(scope, book.id, index) == ReaderCacheStatus.COMPLETE
                         }
+                        if (complete) { done++; failed.remove(index) }
+                        processed++
+                        if (task == cacheTaskToken) _state.update { it.copy(
+                            cacheProgress = "$processed/${indexes.size}", cacheFailedChapters = failed.toSet(),
+                        ) }
                     }
                 }
-            }
-            refreshCacheStatus(book.id)
-            _state.update {
-                it.copy(
-                    cacheBusy = false,
-                    cacheProgress = "",
-                    cacheNotice = if (failed == 0) {
-                        "已缓存 $done 章"
-                    } else {
-                        "已缓存 $done 章，失败 $failed 章（HLS 音轨与部分上游资源不支持离线）"
-                    },
-                )
+                if (task == cacheTaskToken) _state.update { it.copy(cacheNotice =
+                    "完整缓存 $done 章，未完成 ${failed.size} 章" +
+                        if (failed.isEmpty()) "" else "（可重试失败章节；HLS 暂不支持离线）") }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                DiagnosticsLog.w("Reader", "缓存任务失败 book=${book.id}", failure)
+                if (task == cacheTaskToken) _state.update { it.copy(cacheNotice = "缓存未完成，请检查空间与网络后重试") }
+            } finally {
+                if (task == cacheTaskToken) {
+                    _state.update { it.copy(cacheBusy = false, cacheProgress = "", cacheFailedChapters = failed.toSet()) }
+                    refreshCacheStatus(book.id)
+                }
             }
         }
     }
@@ -2351,9 +2457,15 @@ class ReaderViewModel(
         cacheJob?.cancel()
         _state.update { it.copy(cacheBusy = true, cacheNotice = null) }
         cacheJob = viewModelScope.launch {
-            withContext(Dispatchers.IO) { cache.clear(scope, book.id) }
+            val cleared = withContext(Dispatchers.IO) { runCatching { cache.clear(scope, book.id) }.getOrDefault(false) }
             refreshCacheStatus(book.id)
-            _state.update { it.copy(cacheBusy = false, cacheNotice = "已清除本书缓存") }
+            _state.update {
+                it.copy(
+                    cacheBusy = false,
+                    cacheFailedChapters = emptySet(),
+                    cacheNotice = if (cleared) "已清除本书缓存" else "缓存清除失败，请检查存储后重试",
+                )
+            }
         }
     }
 
@@ -2393,7 +2505,9 @@ class ReaderViewModel(
                         )
                     }
                     repo.saveChapters(book.id, chapters)
-                    withContext(Dispatchers.IO) { cache.saveChapters(scope, book.id, chapters) }
+                    withContext(Dispatchers.IO) {
+                        runCatching { cache.saveChapters(scope, book.id, chapters) }
+                    }
                     audio.updateChapters(book.id, chapters)
                     if (token != loadToken) return@launch
                     val target = ReaderChapters.initialIndex(book, chapters)
@@ -2461,55 +2575,85 @@ class ReaderViewModel(
         if (_state.value.screen != ReaderScreen.Reading) return
         if (page < 0 || page == currentPage) return
         currentPage = page
-        scheduleProgressSave()
+        persistProgress(_state.value, page)
     }
 
     fun clearChapterNotice() {
         _state.update { it.copy(chapterNotice = null) }
     }
 
+    fun persistReadingPosition() { saveProgressNow() }
+
     private fun scheduleProgressSave() {
         progressJob?.cancel()
         progressJob = viewModelScope.launch {
             delay(PROGRESS_DEBOUNCE_MS)
-            pushProgress(_state.value, currentPage)
+            syncPendingProgress()
         }
     }
 
     private fun saveProgressNow() {
-        progressJob?.cancel()
-        val snapshot = _state.value
-        progressJob = viewModelScope.launch { pushProgress(snapshot, currentPage) }
+        persistProgress(_state.value, currentPage, syncImmediately = true)
     }
 
-    private suspend fun pushProgress(snapshot: ReaderUiState, page: Int) {
+    /** 翻页即落本机，网络防抖与持久化分开，取消网络请求不会取消本地保存。 */
+    private fun persistProgress(snapshot: ReaderUiState, page: Int, syncImmediately: Boolean = false) {
         val book = snapshot.book ?: return
-        if (snapshot.content == null) return
-        // 音频进度由 ReaderAudioEngine 按秒上报；这里再用页码上报会把它覆盖成 0。
-        if (snapshot.content.type == "audio") return
-        val chapterTitle = snapshot.chapters.getOrNull(snapshot.chapterIndex)?.title.orEmpty()
-        val result = repo.saveProgress(
-            bookId = book.id,
-            chapterIndex = snapshot.chapterIndex,
-            pos = page.coerceAtLeast(0),
-            chapterTitle = chapterTitle,
+        val content = snapshot.content ?: return
+        if (snapshot.chapterLoading || content.type !in setOf("text", "image")) return
+        // 退出登录后旧实例的写入必须整体丢弃，不能再落本机文件。
+        if (progressStore.generation(scope) != progressGeneration) return
+        lastProgressTime = maxOf(System.currentTimeMillis(), lastProgressTime + 1)
+        val event = ReaderProgress(
+            bookId = book.id, chapterIndex = snapshot.chapterIndex,
+            position = page.coerceAtLeast(0), chapterTitle = snapshot.chapterTitle,
+            chapterUrl = snapshot.chapters.getOrNull(snapshot.chapterIndex)?.url.orEmpty(),
+            updatedAtMs = lastProgressTime,
         )
-        if (result is ApiResult.Success) {
-            _state.update { current ->
-                val currentBook = current.book
-                if (currentBook == null || currentBook.id != book.id) {
-                    current
-                } else {
+        viewModelScope.launch {
+            try {
+                val local = withContext(Dispatchers.IO) {
+                    val previous = progressStore.load(scope, book.id)
+                    if (previous != null && previous.chapterIndex == event.chapterIndex &&
+                        previous.position == event.position && previous.chapterUrl == event.chapterUrl
+                    ) previous else {
+                        progressStore.save(scope, event, progressGeneration)
+                        progressStore.load(scope, book.id)
+                    }
+                } ?: return@launch
+                _state.update { current ->
                     current.copy(
-                        book = currentBook.copy(
-                            durChapterIndex = snapshot.chapterIndex,
-                            durChapterPos = page,
-                            durChapterTitle = chapterTitle,
-                            durChapterTime = System.currentTimeMillis(),
-                        ),
+                        book = current.book?.let {
+                            if (it.id == book.id) ReaderProgressResume.merge(it, local) else it
+                        },
+                        books = current.books.map {
+                            if (it.id == book.id) ReaderProgressResume.merge(it, local) else it
+                        },
+                        progressNotice = if (offlineOnly) "进度已保存本机，联网后同步" else "进度已保存本机，等待同步",
                     )
                 }
+                if (syncImmediately) syncPendingProgress() else scheduleProgressSave()
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                DiagnosticsLog.w("Reader", "保存阅读进度失败 book=${book.id}", failure)
+                _state.update { it.copy(progressNotice = "本机进度保存失败，请检查可用空间") }
             }
+        }
+    }
+
+    private suspend fun syncPendingProgress() {
+        if (offlineOnly || progressStore.generation(scope) != progressGeneration) return
+        try {
+            val remaining = withContext(Dispatchers.IO) {
+                progressSync.flush()
+                progressStore.pending(scope).size
+            }
+            _state.update { it.copy(progressNotice =
+                if (remaining == 0) null else "进度已保存本机，${remaining} 本书等待同步") }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) {
+            DiagnosticsLog.w("Reader", "同步阅读进度失败", failure)
+            _state.update { it.copy(progressNotice = "进度已保存本机，网络恢复后重试同步") }
         }
     }
 
@@ -2530,6 +2674,7 @@ class ReaderViewModel(
     }
 
     fun toggleInfo() {
+        if (offlineOnly) return
         val opening = !_state.value.infoOpen
         _state.update { it.copy(infoOpen = opening, tocOpen = false, settingsOpen = false) }
         if (opening) loadCurrentSource()
@@ -2540,7 +2685,9 @@ class ReaderViewModel(
     }
 
     fun closeReading() {
+        cancelCacheDownload()
         val snapshot = _state.value
+        persistProgress(snapshot, currentPage, syncImmediately = true)
         // 听书可能在离开阅读页后继续播放；先落一次本地位置。
         audio.persistCheckpoint(synchronous = true)
         loadToken += 1
@@ -2568,15 +2715,17 @@ class ReaderViewModel(
                 browserPage = null,
                 cacheNotice = null,
                 cacheProgress = "",
+                cacheBusy = false,
+                cachedChapters = emptySet(),
+                partialCachedChapters = emptySet(),
+                cacheFailedChapters = emptySet(),
+                cacheBytes = 0,
                 audioPlayRequested = null,
                 audioCreditsOpen = false,
                 audioCreditsError = null,
             )
         }
-        viewModelScope.launch {
-            pushProgress(snapshot, currentPage)
-            loadShelf()
-        }
+        loadShelf()
     }
 
     fun removeCurrentBook() {
@@ -2592,7 +2741,10 @@ class ReaderViewModel(
                     progressJob?.cancel()
                     if (audio.state.value.bookId == book.id) audio.stop()
                     checkpoints.clear(scope, book.id)
-                    withContext(Dispatchers.IO) { cache.clear(scope, book.id) }
+                    withContext(Dispatchers.IO) {
+                        progressStore.clear(scope, book.id)
+                        cache.clear(scope, book.id)
+                    }
                     _state.update {
                         it.copy(
                             screen = ReaderScreen.Shelf,
@@ -2685,6 +2837,8 @@ class ReaderViewModel(
         private val audio: ReaderAudioEngine,
         private val checkpoints: ReaderAudioCheckpointStore,
         private val origin: String,
+        private val progressStore: ReaderProgressStore,
+        private val offlineOnly: Boolean = false,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -2697,6 +2851,8 @@ class ReaderViewModel(
                 audio,
                 checkpoints,
                 origin,
+                progressStore,
+                offlineOnly,
             ) as T
         }
     }

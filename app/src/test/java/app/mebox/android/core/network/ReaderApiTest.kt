@@ -35,6 +35,13 @@ class ReaderApiTest {
     }
 
     @Test
+    fun `progress reconciliation explicitly bypasses cached shelf`() = runTest {
+        server.enqueue(MockResponse().setBody("""{"books":[]}"""))
+        client.readerBooks("token", fresh = true)
+        assertEquals("no-cache", server.takeRequest().getHeader("Cache-Control"))
+    }
+
+    @Test
     fun `shelf parses books and tolerates null lists`() = runTest {
         server.enqueue(
             MockResponse().setResponseCode(200).setBody(
