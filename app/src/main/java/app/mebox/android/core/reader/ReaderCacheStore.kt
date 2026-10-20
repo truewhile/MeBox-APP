@@ -5,236 +5,282 @@ import app.mebox.android.core.model.AccountScope
 import app.mebox.android.core.network.ReaderBookDto
 import app.mebox.android.core.network.ReaderChapterContentDto
 import app.mebox.android.core.network.ReaderChapterDto
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.net.URI
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import kotlin.coroutines.resume
 
-/**
- * 阅读离线缓存（应用私有目录）。
- *
- * 只缓存「服务端已经处理好的产物」：文本正文、图片与可直接播放的音频文件。
- * 书源解析、解密和替换规则仍在服务端执行，客户端不保存书源凭据。
- *
- * 目录按 serverId / userId / bookId 隔离；章节内容存成一个 JSON 文件，
- * 图片和音频下载到同目录的 assets 下，缓存 DTO 里的地址改写为 file://。
- * HLS/需要服务端转码的音轨不做离线缓存。
- */
+/** PARTIAL 同时涵盖旧缓存的资源丢失与不支持的 HLS，不冒充完整离线。 */
+enum class ReaderCacheStatus { MISSING, PARTIAL, COMPLETE }
+
+data class ReaderCacheGeneration(val account: Long, val book: Long = 0L)
+
+/** 服务端处理好的阅读内容缓存；不保存书源凭据、不解析书源规则。 */
 class ReaderCacheStore(
-    context: Context,
+    private val root: File,
     private val httpClient: OkHttpClient,
     private val json: Json,
 ) {
-    private val root = File(context.filesDir, "reader-cache")
+    constructor(context: Context, httpClient: OkHttpClient, json: Json) :
+        this(File(context.filesDir, "reader-cache"), httpClient, json)
 
-    fun read(scope: AccountScope, bookId: String, chapterIndex: Int): ReaderChapterContentDto? {
-        val file = chapterFile(scope, bookId, chapterIndex)
-        if (!file.isFile) return null
-        return runCatching {
-            json.decodeFromString(ReaderChapterContentDto.serializer(), file.readText())
+    private val saveMutex = Mutex()
+    private val writeLock = Any()
+    private val accountGenerations = mutableMapOf<AccountScope, Long>()
+    private val bookGenerations = mutableMapOf<Pair<AccountScope, String>, Long>()
+    private val activeCalls = mutableMapOf<Call, Pair<AccountScope, String>>()
+
+    fun generation(scope: AccountScope, bookId: String? = null): ReaderCacheGeneration = synchronized(writeLock) {
+        ReaderCacheGeneration(accountGenerations[scope] ?: 0L,
+            bookId?.let { bookGenerations[scope to it] } ?: 0L)
+    }
+
+    private fun <T> guardedWrite(
+        scope: AccountScope, bookId: String?, expected: ReaderCacheGeneration, block: () -> T,
+    ): T = synchronized(writeLock) {
+        if (generation(scope, bookId) != expected) throw CancellationException("缓存任务已失效")
+        block()
+    }
+
+    fun read(scope: AccountScope, bookId: String, chapterIndex: Int): ReaderChapterContentDto? =
+        runCatching {
+            json.decodeFromString(ReaderChapterContentDto.serializer(), chapterFile(scope, bookId, chapterIndex).readText())
         }.getOrNull()
+
+    fun readChapters(scope: AccountScope, bookId: String): List<ReaderChapterDto>? = runCatching {
+        json.decodeFromString(ListSerializer(ReaderChapterDto.serializer()), File(bookDir(scope, bookId), CHAPTERS_FILE).readText())
+    }.getOrNull()?.takeIf { it.isNotEmpty() }
+
+    fun saveChapters(
+        scope: AccountScope, bookId: String, chapters: List<ReaderChapterDto>,
+        expected: ReaderCacheGeneration = generation(scope, bookId),
+    ) = guardedWrite(scope, bookId, expected) {
+        if (chapters.isNotEmpty()) {
+            writeAtomically(File(bookDir(scope, bookId), CHAPTERS_FILE), json.encodeToString(ListSerializer(ReaderChapterDto.serializer()), chapters))
+        }
     }
 
-    fun readChapters(scope: AccountScope, bookId: String): List<ReaderChapterDto>? {
-        val file = File(bookDir(scope, bookId), CHAPTERS_FILE)
-        if (!file.isFile) return null
-        return runCatching {
-            json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(ReaderChapterDto.serializer()), file.readText())
-        }.getOrNull()?.takeIf { it.isNotEmpty() }
+    fun readShelf(scope: AccountScope): List<ReaderBookDto>? = runCatching {
+        json.decodeFromString(ListSerializer(ReaderBookDto.serializer()), File(accountDir(scope), SHELF_FILE).readText())
+    }.getOrNull()
+
+    fun saveShelf(
+        scope: AccountScope, books: List<ReaderBookDto>,
+        expected: ReaderCacheGeneration = generation(scope),
+    ) = guardedWrite(scope, null, expected) {
+        // 空书架也必须覆盖旧快照，避免移出的书在断网后重新出现。
+        writeAtomically(File(accountDir(scope), SHELF_FILE), json.encodeToString(ListSerializer(ReaderBookDto.serializer()), books))
     }
 
-    fun saveChapters(scope: AccountScope, bookId: String, chapters: List<ReaderChapterDto>) {
-        if (chapters.isEmpty()) return
-        val dir = bookDir(scope, bookId)
-        dir.mkdirs()
-        writeAtomically(
-            File(dir, CHAPTERS_FILE),
-            json.encodeToString(
-                kotlinx.serialization.builtins.ListSerializer(ReaderChapterDto.serializer()),
-                chapters,
-            ),
-        )
+    fun offlineShelf(scope: AccountScope): List<ReaderBookDto> = readShelf(scope).orEmpty()
+        .filter { it.type in setOf(0, 2) && cachedIndexes(scope, it.id).isNotEmpty() }
+        // 离线宿主不会因封面而向服务器/书源发出请求。
+        .map { it.copy(coverUrl = "") }
+
+    fun status(scope: AccountScope, bookId: String, chapterIndex: Int): ReaderCacheStatus {
+        val content = read(scope, bookId, chapterIndex) ?: return ReaderCacheStatus.MISSING
+        val complete = when (content.type) {
+            "text" -> content.content.isNotBlank() && ReaderText.parse(content.content)
+                .filter { it.isImage }.all { isPrivateAsset(it.imageUrl.orEmpty()) }
+            "image" -> content.images?.takeIf { it.isNotEmpty() }?.all(::isPrivateAsset) == true
+            "audio" -> !content.hls && !content.transcoding &&
+                content.tracks?.takeIf { it.isNotEmpty() }?.all(::isPrivateAsset) == true
+            else -> false
+        }
+        return if (complete) ReaderCacheStatus.COMPLETE else ReaderCacheStatus.PARTIAL
     }
 
-    fun readShelf(scope: AccountScope): List<ReaderBookDto>? {
-        val file = File(accountDir(scope), SHELF_FILE)
-        if (!file.isFile) return null
-        return runCatching {
-            json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(ReaderBookDto.serializer()), file.readText())
-        }.getOrNull()?.takeIf { it.isNotEmpty() }
-    }
-
-    fun saveShelf(scope: AccountScope, books: List<ReaderBookDto>) {
-        if (books.isEmpty()) return
-        val dir = accountDir(scope)
-        dir.mkdirs()
-        writeAtomically(
-            File(dir, SHELF_FILE),
-            json.encodeToString(
-                kotlinx.serialization.builtins.ListSerializer(ReaderBookDto.serializer()),
-                books,
-            ),
-        )
-    }
+    private fun isPrivateAsset(raw: String): Boolean = runCatching {
+        val uri = URI(raw)
+        if (uri.scheme != "file") return false
+        val file = File(uri).canonicalFile
+        file.toPath().startsWith(root.canonicalFile.toPath()) && file.isFile && file.length() > 0
+    }.getOrDefault(false)
 
     fun hasChapter(scope: AccountScope, bookId: String, chapterIndex: Int): Boolean =
-        chapterFile(scope, bookId, chapterIndex).isFile
+        status(scope, bookId, chapterIndex) == ReaderCacheStatus.COMPLETE
 
-    fun cachedIndexes(scope: AccountScope, bookId: String): Set<Int> {
+    fun cachedIndexes(scope: AccountScope, bookId: String): Set<Int> = indexes(scope, bookId)
+        .filter { status(scope, bookId, it) == ReaderCacheStatus.COMPLETE }.toSet()
+
+    fun partialIndexes(scope: AccountScope, bookId: String): Set<Int> = indexes(scope, bookId)
+        .filter { status(scope, bookId, it) == ReaderCacheStatus.PARTIAL }.toSet()
+
+    private fun indexes(scope: AccountScope, bookId: String): List<Int> = bookDir(scope, bookId)
+        .listFiles().orEmpty().mapNotNull {
+            CHAPTER_PATTERN.matchEntire(it.name)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        }
+
+    fun sizeBytes(scope: AccountScope, bookId: String): Long = bookDir(scope, bookId)
+        .takeIf { it.isDirectory }?.walkTopDown()?.filter { it.isFile }?.sumOf { it.length() } ?: 0
+
+    fun clear(scope: AccountScope, bookId: String): Boolean = synchronized(writeLock) {
+        val key = scope to bookId
+        bookGenerations[key] = (bookGenerations[key] ?: 0L) + 1L
+        activeCalls.filterValues { it == key }.keys.forEach { it.cancel() }
         val dir = bookDir(scope, bookId)
-        if (!dir.isDirectory) return emptySet()
-        return dir.listFiles()
-            .orEmpty()
-            .mapNotNull { file ->
-                CHAPTER_PATTERN.matchEntire(file.name)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            }
-            .toSet()
+        !dir.exists() || dir.deleteRecursively()
     }
 
-    fun sizeBytes(scope: AccountScope, bookId: String): Long {
-        val dir = bookDir(scope, bookId)
-        if (!dir.isDirectory) return 0L
-        return dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+    fun clearAccount(scope: AccountScope): Boolean = synchronized(writeLock) {
+        accountGenerations[scope] = (accountGenerations[scope] ?: 0L) + 1L
+        activeCalls.filterValues { it.first == scope }.keys.forEach { it.cancel() }
+        val dir = accountDir(scope)
+        !dir.exists() || dir.deleteRecursively()
     }
 
-    fun clear(scope: AccountScope, bookId: String) {
-        bookDir(scope, bookId).deleteRecursively()
-    }
-
-    fun clearAccount(scope: AccountScope) {
-        accountDir(scope).deleteRecursively()
-    }
-
-    /**
-     * 保存一章。图片/音频下载失败时保留原地址，仍然缓存文本与成功下载的资源；
-     * 返回真正写入的 DTO，调用方可以直接用它离线渲染。
-     */
+    /** 失败资源保留在线地址以便重试，完整性必须单独由 status 判定。 */
     suspend fun save(
         scope: AccountScope,
         bookId: String,
         chapterIndex: Int,
         content: ReaderChapterContentDto,
         origin: String,
+        expected: ReaderCacheGeneration = generation(scope, bookId),
     ): ReaderChapterContentDto = withContext(Dispatchers.IO) {
-        val dir = bookDir(scope, bookId)
-        dir.mkdirs()
-        val assets = File(dir, "assets").apply { mkdirs() }
-
-        val images = content.images?.mapIndexed { index, url ->
-            downloadAsset(origin, url, assets, "c$chapterIndex-img-$index") ?: url
-        }
-        val tracks = if (content.hls) {
-            content.tracks
-        } else {
-            content.tracks?.mapIndexed { index, url ->
-                downloadAsset(origin, url, assets, "c$chapterIndex-audio-$index") ?: url
+        saveMutex.withLock {
+            val assets = guardedWrite(scope, bookId, expected) {
+                File(bookDir(scope, bookId), "assets").apply { check(isDirectory || mkdirs()) }
             }
+            suspend fun asset(url: String, name: String) =
+                downloadAsset(scope, bookId, expected, origin, url, assets, name)
+            val images = content.images?.mapIndexed { index, url ->
+                asset(url, "c$chapterIndex-img-$index") ?: url
+            }
+            val tracks = if (content.hls || content.transcoding) content.tracks else {
+                content.tracks?.mapIndexed { index, url ->
+                    asset(url, "c$chapterIndex-audio-$index") ?: url
+                }
+            }
+            ensureActive()
+            val text = if (content.type == "text") {
+                content.content.lines().mapIndexed { index, line ->
+                    val trimmed = line.trim()
+                    if (trimmed.startsWith("[img]")) {
+                        val raw = trimmed.removePrefix("[img]").trim()
+                        "[img]${asset(raw, "c$chapterIndex-inline-$index") ?: raw}"
+                    } else line
+                }.joinToString("\n")
+            } else content.content
+            val cached = content.copy(content = text, images = images, tracks = tracks)
+            ensureActive()
+            guardedWrite(scope, bookId, expected) {
+                writeAtomically(chapterFile(scope, bookId, chapterIndex), json.encodeToString(ReaderChapterContentDto.serializer(), cached))
+            }
+            cached
         }
-        val cached = content.copy(images = images, tracks = tracks)
-        writeAtomically(
-            chapterFile(scope, bookId, chapterIndex),
-            json.encodeToString(ReaderChapterContentDto.serializer(), cached),
-        )
-        cached
     }
 
-    private fun downloadAsset(origin: String, rawUrl: String, dir: File, name: String): String? {
+    private suspend fun downloadAsset(
+        scope: AccountScope, bookId: String, expected: ReaderCacheGeneration,
+        origin: String, rawUrl: String, dir: File, name: String,
+    ): String? {
         if (rawUrl.startsWith("file:") || rawUrl.startsWith("content:")) return rawUrl
         val url = ReaderUrls.resolve(origin, rawUrl) ?: return null
         if (!url.startsWith("http://") && !url.startsWith("https://")) return null
-        val extension = extensionOf(url)
-        val target = File(dir, "$name-${shortHash(url)}$extension")
+        val target = File(dir, "$name-${shortHash(url)}${extensionOf(url)}")
         if (target.isFile && target.length() > 0) return target.toURI().toString()
-        val temp = File(dir, "${target.name}.tmp")
-        return try {
-            val request = Request.Builder().url(url).build()
-            val response = httpClient.newCall(request).execute()
-            try {
-                if (!response.isSuccessful) return null
-                val body = response.body ?: return null
-                if (body.contentLength() > MAX_ASSET_BYTES) return null
-                body.byteStream().use { input ->
-                    FileOutputStream(temp).use { output ->
-                        if (!copyLimited(input, output)) return null
-                        output.fd.sync()
+        return suspendCancellableCoroutine { continuation ->
+            val call = httpClient.newCall(Request.Builder().url(url).build())
+            val temp = guardedWrite(scope, bookId, expected) {
+                File.createTempFile("asset-", ".tmp", dir).also { activeCalls[call] = scope to bookId }
+            }
+            continuation.invokeOnCancellation { call.cancel(); temp.delete() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    synchronized(writeLock) { activeCalls.remove(call) }
+                    temp.delete()
+                    if (continuation.isActive) continuation.resume(null)
+                }
+                override fun onResponse(call: Call, response: Response) {
+                    var result: String? = null
+                    try {
+                        response.use {
+                            val body = it.body
+                            if (it.isSuccessful && body != null && body.contentLength() <= MAX_ASSET_BYTES) {
+                                var written = 0L
+                                body.byteStream().use { input ->
+                                    FileOutputStream(temp).use { output ->
+                                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                                        while (continuation.isActive) {
+                                            val count = input.read(buffer)
+                                            if (count < 0) break
+                                            written += count
+                                            if (written > MAX_ASSET_BYTES) throw IOException("资源超过缓存大小上限")
+                                            output.write(buffer, 0, count)
+                                        }
+                                        output.fd.sync()
+                                    }
+                                }
+                                if (continuation.isActive && written > 0) {
+                                    replaceFile(temp, target)
+                                    result = target.toURI().toString()
+                                }
+                            }
+                        }
+                    } catch (_: IOException) {
+                        // 下载失败保留其它已缓存资源；取消由 continuation 原样传播。
+                    } finally {
+                        synchronized(writeLock) { activeCalls.remove(call) }
+                        temp.delete()
+                        if (continuation.isActive) continuation.resume(result)
                     }
                 }
-            } finally {
-                response.close()
-            }
-            if (!temp.isFile || temp.length() <= 0) {
-                temp.delete()
-                return null
-            }
-            if (target.exists()) target.delete()
-            if (!temp.renameTo(target)) {
-                temp.delete()
-                return null
-            }
-            target.toURI().toString()
-        } catch (_: Exception) {
-            temp.delete()
-            null
+            })
         }
-    }
-
-    private fun copyLimited(input: java.io.InputStream, output: FileOutputStream): Boolean {
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        var written = 0L
-        while (true) {
-            val read = input.read(buffer)
-            if (read <= 0) break
-            written += read
-            if (written > MAX_ASSET_BYTES) return false
-            output.write(buffer, 0, read)
-        }
-        return true
     }
 
     private fun writeAtomically(target: File, text: String) {
-        val temp = File(target.parentFile, "${target.name}.tmp")
-        FileOutputStream(temp).use { output ->
-            output.write(text.toByteArray())
-            output.fd.sync()
-        }
-        if (target.exists()) target.delete()
-        if (!temp.renameTo(target)) {
-            temp.copyTo(target, overwrite = true)
-            temp.delete()
+        check(target.parentFile!!.isDirectory || target.parentFile!!.mkdirs())
+        val temp = File.createTempFile("chapter-", ".tmp", target.parentFile)
+        try {
+            FileOutputStream(temp).use { output -> output.write(text.toByteArray(Charsets.UTF_8)); output.fd.sync() }
+            replaceFile(temp, target)
+        } finally { temp.delete() }
+    }
+
+    private fun replaceFile(temp: File, target: File) {
+        try {
+            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
     }
 
-    private fun chapterFile(scope: AccountScope, bookId: String, chapterIndex: Int): File =
+    private fun chapterFile(scope: AccountScope, bookId: String, chapterIndex: Int) =
         File(bookDir(scope, bookId), "chapter-$chapterIndex.json")
-
-    private fun bookDir(scope: AccountScope, bookId: String): File =
-        File(accountDir(scope), safeName(bookId))
-
-    private fun accountDir(scope: AccountScope): File =
-        File(File(root, safeName(scope.serverId)), safeName(scope.userId))
-
+    private fun bookDir(scope: AccountScope, bookId: String) = File(accountDir(scope), safeName(bookId))
+    private fun accountDir(scope: AccountScope) = File(File(root, safeName(scope.serverId)), safeName(scope.userId))
     private fun safeName(value: String): String {
         val cleaned = value.replace(Regex("[^A-Za-z0-9._-]"), "_")
-        return if (cleaned.isBlank()) "unknown" else cleaned.take(64)
+        return if (cleaned == value && value.isNotBlank() && value !in setOf(".", "..") && value.length <= 64) value
+        else "${cleaned.take(40)}-${shortHash(value)}"
     }
-
     private fun extensionOf(url: String): String {
-        val path = url.substringBefore('?').substringAfterLast('/').substringAfterLast('.')
-        return when (path.lowercase()) {
-            "jpg", "jpeg", "png", "webp", "gif", "bmp" -> ".$path"
-            "mp3", "m4a", "aac", "flac", "ogg", "wav", "opus" -> ".$path"
-            else -> ""
-        }
+        val extension = url.substringBefore('?').substringAfterLast('/').substringAfterLast('.').lowercase()
+        return if (extension in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "mp3", "m4a", "aac", "flac", "ogg", "wav", "opus")) ".$extension" else ""
     }
-
-    private fun shortHash(value: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
-        return digest.take(6).joinToString("") { "%02x".format(it) }
-    }
+    private fun shortHash(value: String) = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray()).take(6).joinToString("") { "%02x".format(it) }
 
     private companion object {
         val CHAPTER_PATTERN = Regex("chapter-(\\d+)\\.json")

@@ -108,8 +108,8 @@ class MobileSessionRepository(
     fun mediaRepository(scope: AccountScope): MediaRepository =
         MediaRepository(api, coordinator, scope)
 
-    fun readerRepository(scope: AccountScope): ReaderRepository =
-        ReaderRepository(api, coordinator, scope)
+    fun readerRepository(scope: AccountScope, offlineOnly: Boolean = false): ReaderRepository =
+        ReaderRepository(api, coordinator, scope, offlineOnly)
 
     private companion object {
         const val CLIENT_NAME = "MeBox Android"

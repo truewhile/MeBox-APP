@@ -61,6 +61,7 @@ import app.mebox.android.feature.MainViewModel
 fun TvRoot(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val phoneUrl by viewModel.phoneInput.url.collectAsStateWithLifecycle()
+    val canOpenOffline by viewModel.canOpenOffline.collectAsStateWithLifecycle()
     val searchOnly = state is AppUiState.Account
 
     var showLogShare by remember { mutableStateOf(false) }
@@ -88,7 +89,16 @@ fun TvRoot(viewModel: MainViewModel) {
             color = MaterialTheme.colorScheme.background,
         ) {
             when (val current = state) {
-                AppUiState.Loading -> TvSplash()
+                AppUiState.Loading -> {
+                    Box(Modifier.fillMaxSize()) {
+                        TvSplash()
+                        if (canOpenOffline) TvActionButton(
+                            text = "进入离线书架", onClick = viewModel::openOfflineReader,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 32.dp),
+                        )
+                    }
+                }
+                is AppUiState.Offline -> app.mebox.android.feature.reader.OfflineReaderHost(current, viewModel, television = true)
                 is AppUiState.Connection -> TvConnectionScreen(
                     state = current,
                     phoneUrl = phoneUrl,
@@ -183,6 +193,7 @@ private fun TvConnectionScreen(
     viewModel: MainViewModel,
 ) {
     val connectFocus = remember { FocusRequester() }
+    val canOpenOffline by viewModel.canOpenOffline.collectAsStateWithLifecycle()
     androidx.compose.runtime.LaunchedEffect(Unit) {
         kotlinx.coroutines.delay(120)
         runCatching { connectFocus.requestFocus() }
@@ -289,6 +300,10 @@ private fun TvConnectionScreen(
                     primary = false,
                     enabled = state.addressText.isNotBlank() && !state.testing,
                 )
+            }
+            if (canOpenOffline) {
+                Spacer(Modifier.height(12.dp))
+                TvActionButton(text = "进入离线书架", onClick = viewModel::openOfflineReader, primary = false)
             }
             Spacer(Modifier.height(18.dp))
             Text(

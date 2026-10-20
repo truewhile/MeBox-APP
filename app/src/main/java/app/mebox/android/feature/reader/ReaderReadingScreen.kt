@@ -105,6 +105,7 @@ internal fun ReaderReadingScreen(
     origin: String,
     viewModel: ReaderViewModel,
 ) {
+    PersistReaderOnStop(viewModel)
     val palette = readerPalette(state.style)
     val audioMode = state.audioPlayerVisible
     val sheetPalette = if (audioMode) AudioPlayerPalette else palette
@@ -279,7 +280,7 @@ private fun ReaderTopBar(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        IconButton(onClick = viewModel::toggleInfo) {
+        if (!state.offlineOnly) IconButton(onClick = viewModel::toggleInfo) {
             Icon(Icons.Default.Info, contentDescription = "书籍信息", tint = palette.text)
         }
         IconButton(onClick = viewModel::toggleToc) {
@@ -329,6 +330,10 @@ private fun ReaderBottomBar(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            state.progressNotice?.let { notice ->
+                Text(notice, color = palette.secondary, style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
             if (state.chapters.isNotEmpty()) {
                 val position = (state.chapterIndex + 1).coerceAtMost(state.chapters.size)
                 Text(
@@ -527,7 +532,7 @@ private fun ReadingErrorBody(
                 Spacer(Modifier.height(16.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = viewModel::retryChapter) { Text("重试") }
-                    if (state.book?.isLocal == false) {
+                    if (!state.offlineOnly && state.book?.isLocal == false) {
                         TextButton(onClick = viewModel::rebuildToc) { Text("刷新目录") }
                     }
                 }
@@ -619,6 +624,9 @@ internal fun ReaderTocSheet(
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                             )
+                            if (index in state.partialCachedChapters) {
+                                Text("部分缓存", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                            }
                             if (index in state.cachedChapters) {
                                 Text(
                                     "已缓存",
@@ -885,7 +893,7 @@ internal fun ReaderInfoSheet(
             Spacer(Modifier.height(16.dp))
             Text("离线缓存", style = MaterialTheme.typography.labelMedium, color = palette.secondary)
             Text(
-                "已缓存 ${state.cachedChapters.size} 章 · ${formatCacheSize(state.cacheBytes)}",
+                "完整 ${state.cachedChapters.size} 章 · 部分 ${state.partialCachedChapters.size} 章 · ${formatCacheSize(state.cacheBytes)}",
                 style = MaterialTheme.typography.labelSmall,
                 color = palette.secondary,
             )
@@ -918,9 +926,14 @@ internal fun ReaderInfoSheet(
                     Text("后续 20 章")
                 }
             }
+            if (state.cacheBusy) {
+                TextButton(onClick = viewModel::cancelCacheDownload) { Text("取消下载") }
+            } else if (state.cacheFailedChapters.isNotEmpty()) {
+                TextButton(onClick = viewModel::retryFailedCache) { Text("重试未完成的 ${state.cacheFailedChapters.size} 章") }
+            }
             TextButton(
                 onClick = viewModel::clearBookCache,
-                enabled = !state.cacheBusy && state.cachedChapters.isNotEmpty(),
+                enabled = !state.cacheBusy && state.cacheBytes > 0,
             ) {
                 Text("清除本书缓存", color = MaterialTheme.colorScheme.error)
             }

@@ -22,12 +22,14 @@ import app.mebox.android.core.player.PlayerEngineKind
 import app.mebox.android.core.player.SubtitlePreference
 import app.mebox.android.core.player.SubtitlePriority
 import app.mebox.android.di.AppContainer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed interface AppUiState {
     data object Loading : AppUiState
@@ -47,6 +49,8 @@ sealed interface AppUiState {
         val submitting: Boolean = false,
         val error: String? = null,
     ) : AppUiState
+
+    data class Offline(val address: ServerAddress, val scope: AccountScope) : AppUiState
 
     data class Account(
         val address: ServerAddress,
@@ -69,6 +73,17 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
 
     private val _state = MutableStateFlow<AppUiState>(AppUiState.Loading)
     val state: StateFlow<AppUiState> = _state.asStateFlow()
+
+    /**
+     * 「能否进入离线书架」只从内存读取：凭证和服务器快照的校验在 IO 上完成，
+     * 组合期间不触碰磁盘或 Keystore。
+     */
+    private val _canOpenOffline = MutableStateFlow(false)
+    val canOpenOffline: StateFlow<Boolean> = _canOpenOffline.asStateFlow()
+
+    /** 离线宿主与它的 ViewModel 工厂；进入离线时一次性构建，组合期间不再读盘。 */
+    @Volatile
+    private var offlineEntry: Pair<AppUiState.Offline, ViewModelProvider.Factory>? = null
 
     /**
      * 当前选择的播放内核。选择结果保存在本机，玩家在「我的 → 播放设置」
@@ -147,9 +162,25 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
 
     /** 冷启动网络失败后的自动重试任务；同一时间只保留一个。 */
     private var restoreRetryJob: Job? = null
+    private var sessionJob: Job? = null
+    private var connectionJob: Job? = null
 
     init {
-        viewModelScope.launch { restoreSession() }
+        sessionJob = viewModelScope.launch { restoreSession() }
+        viewModelScope.launch {
+            // 只在从登录/账号页回到连接页时校验一次离线入口条件。
+            var checked = false
+            _state.collect { current ->
+                val canEnter = current is AppUiState.Loading || current is AppUiState.Connection
+                if (!canEnter) {
+                    checked = false
+                    _canOpenOffline.value = false
+                } else if (!checked) {
+                    checked = true
+                    _canOpenOffline.value = withContext(Dispatchers.IO) { offlineIdentity() != null }
+                }
+            }
+        }
         viewModelScope.launch {
             container.phoneInput.events.collect { event ->
                 when (event) {
@@ -170,7 +201,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                                 }
                             }
 
-                            is AppUiState.Account, AppUiState.Loading -> Unit
+                            is AppUiState.Account, is AppUiState.Offline, AppUiState.Loading -> Unit
                         }
                     }
 
@@ -290,7 +321,11 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             container.watchProgress.clear(current.scope)
             container.readerAudio.stop()
             container.readerAudioCheckpoints.clearAccount(current.scope)
-            container.readerCache.clearAccount(current.scope)
+            withContext(Dispatchers.IO) {
+                // 磁盘清理放到 IO：缓存目录删除与进度文件清理都不应阻塞界面。
+                container.readerCache.clearAccount(current.scope)
+                container.readerProgress.clearAccount(current.scope)
+            }
             container.preferences.clearAccount()
             // 主动退出时不再在登录页带出用户名。
             container.preferences.lastUsername = null
@@ -318,7 +353,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             is AppUiState.Connection -> _state.value = current.copy(error = null, notice = null)
             is AppUiState.Login -> _state.value = current.copy(error = null)
             is AppUiState.Account -> _state.value = current.copy(notice = null)
-            AppUiState.Loading -> Unit
+            is AppUiState.Offline, AppUiState.Loading -> Unit
         }
     }
 
@@ -537,7 +572,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             when (val result = api.serverInfo()) {
                 is ApiResult.Success -> {
                     saveServerInfoSnapshot(address, result.value)
-                    val current = _state.value
+                    val current = _state.value as? AppUiState.Account ?: return@launch
                     if (result.value.serverId != serverId) {
                         DiagnosticsLog.w(
                             "Session",
@@ -563,7 +598,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                         )
                         return@launch
                     }
-                    if (current is AppUiState.Account && current.address == address) {
+                    if (current.address == address) {
                         _state.value = current.copy(serverInfo = result.value)
                     }
                 }
@@ -585,7 +620,8 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         } else {
             _state.value = AppUiState.Connection(addressText = address.origin, testing = true)
         }
-        viewModelScope.launch {
+        connectionJob?.cancel()
+        connectionJob = viewModelScope.launch {
             val api = container.apiFor(address)
             when (val result = api.serverInfo()) {
                 is ApiResult.Success -> {
@@ -773,6 +809,65 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         )
     }
 
+    private fun offlineIdentity(): Pair<ServerAddress, AccountScope>? {
+        val raw = container.preferences.lastAddress ?: return null
+        val address = (ServerAddress.parse(raw) as? ServerAddressResult.Valid)?.address ?: return null
+        val serverId = container.preferences.accountServerId ?: return null
+        val userId = container.preferences.accountUserId ?: return null
+        val info = cachedServerInfo(address) ?: return null
+        if (info.serverId != serverId) return null
+        val scope = AccountScope(serverId, userId)
+        if (container.credentialStore.read(scope) == null) return null
+        return address to scope
+    }
+
+    fun openOfflineReader() {
+        val state = _state.value
+        if (state is AppUiState.Account || state is AppUiState.Login || state is AppUiState.Offline) return
+        viewModelScope.launch {
+            val prepared = withContext(Dispatchers.IO) {
+                val (address, scope) = offlineIdentity() ?: return@withContext null
+                val info = cachedServerInfo(address) ?: return@withContext null
+                val repo = MobileSessionRepository(info, container.apiFor(address), container.credentialStore)
+                val factory = app.mebox.android.feature.reader.ReaderViewModel.Factory(
+                    repository = repo.readerRepository(scope, offlineOnly = true),
+                    scope = scope, preferences = container.readerPreferences,
+                    cache = container.readerCache, audio = container.readerAudio,
+                    checkpoints = container.readerAudioCheckpoints, origin = address.origin,
+                    progressStore = container.readerProgress, offlineOnly = true,
+                )
+                AppUiState.Offline(address, scope) to factory
+            }
+            if (prepared == null) {
+                _canOpenOffline.value = false
+                return@launch
+            }
+            restoreRetryJob?.cancel()
+            sessionJob?.cancel()
+            connectionJob?.cancel()
+            container.readerAudio.stop()
+            offlineEntry = prepared
+            _state.value = prepared.first
+        }
+    }
+
+    fun leaveOfflineReader() {
+        val current = _state.value as? AppUiState.Offline ?: return
+        offlineEntry = null
+        _state.value = AppUiState.Connection(current.address.origin, notice = "离线进度已保留，可测试连接恢复在线使用")
+    }
+
+    /**
+     * 阅读 ViewModel 的键必须跟随「当前会话 + 本地进度代次」：
+     * Activity 级 ViewModelStore 会跨退出登录保留实例，键不变就会复用已被撤销的会话。
+     * 两项都取自内存，组合期间无磁盘读取。
+     */
+    fun readerSessionKey(scope: AccountScope): String =
+        "${System.identityHashCode(repository?.coordinator)}:${container.readerProgress.generation(scope)}"
+
+    fun offlineReaderFactory(current: AppUiState.Offline): ViewModelProvider.Factory? =
+        offlineEntry?.takeIf { it.first == current }?.second
+
     fun readerFactory(scope: AccountScope, address: ServerAddress): ViewModelProvider.Factory? {
         val repo = repository ?: return null
         return app.mebox.android.feature.reader.ReaderViewModel.Factory(
@@ -783,6 +878,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             audio = container.readerAudio,
             checkpoints = container.readerAudioCheckpoints,
             origin = address.origin,
+            progressStore = container.readerProgress,
         )
     }
 

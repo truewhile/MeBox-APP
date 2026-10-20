@@ -90,7 +90,7 @@ fun TvAccountHost(
         factory = factory,
     )
     val readerViewModel: ReaderViewModel = viewModel(
-        key = "tv-reader-${account.scope.serverId}-${account.scope.userId}",
+        key = "tv-reader-${account.scope.serverId}-${account.scope.userId}-${mainViewModel.readerSessionKey(account.scope)}",
         factory = readerFactory,
     )
     val state by mediaViewModel.state.collectAsStateWithLifecycle()

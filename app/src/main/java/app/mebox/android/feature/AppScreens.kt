@@ -74,12 +74,22 @@ import app.mebox.android.feature.media.AccountHost
 @Composable
 fun MeBoxRoot(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val canOpenOffline by viewModel.canOpenOffline.collectAsStateWithLifecycle()
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
     ) {
         when (val current = state) {
-            AppUiState.Loading -> LoadingScreen()
+            AppUiState.Loading -> {
+                Box(Modifier.fillMaxSize()) {
+                    LoadingScreen()
+                    if (canOpenOffline) TextButton(
+                        onClick = viewModel::openOfflineReader,
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp),
+                    ) { Text("直接进入离线书架") }
+                }
+            }
+            is AppUiState.Offline -> app.mebox.android.feature.reader.OfflineReaderHost(current, viewModel)
             is AppUiState.Connection -> ConnectionScreen(current, viewModel)
             is AppUiState.Login -> LoginScreen(current, viewModel)
             is AppUiState.Account -> AccountHost(current, viewModel)
@@ -137,6 +147,7 @@ private fun ConnectionScreen(state: AppUiState.Connection, viewModel: MainViewMo
     val exportLogs = rememberLogExport()
     var showLogShare by remember { mutableStateOf(false) }
     val logShareUrl by viewModel.logShare.url.collectAsStateWithLifecycle()
+    val canOpenOffline by viewModel.canOpenOffline.collectAsStateWithLifecycle()
     LaunchedEffect(showLogShare) {
         if (showLogShare) viewModel.logShare.start() else viewModel.logShare.stop()
     }
@@ -207,6 +218,11 @@ private fun ConnectionScreen(state: AppUiState.Connection, viewModel: MainViewMo
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("测试连接")
+                }
+                if (canOpenOffline) {
+                    TextButton(onClick = viewModel::openOfflineReader, modifier = Modifier.fillMaxWidth()) {
+                        Text("进入离线书架")
+                    }
                 }
             }
         }
