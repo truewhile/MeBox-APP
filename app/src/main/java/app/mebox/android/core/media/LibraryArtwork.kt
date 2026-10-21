@@ -6,10 +6,9 @@ import app.mebox.android.core.network.SeriesCardDto
 /**
  * 媒体库卡片的封面选择。
  *
- * 服务端只有管理员显式设置过封面时才会返回 `cover_url`；大多数媒体库的
- * `cover_url` 是空的。Web 端此时会用库内作品的剧照拼出封面
- * （`web/src/pages/librariesPageModel.ts` 的 `getLibraryArtworks`），App 走同一套
- * 兜底规则，否则媒体库卡片只剩下纯色占位。
+ * 优先用服务端生成的拼图封面（`cover_image_url`）：它和 Web / Emby 客户端
+ * 看到的是同一张图（库内成员海报竖切）。只有旧服务端没有这个字段时才回退
+ * 到 `cover_url`，再退到用预览卡片拼一张，避免媒体库卡片只剩纯色占位。
  */
 object LibraryArtwork {
 
@@ -18,7 +17,10 @@ object LibraryArtwork {
         library: LibraryDto,
         width: Int = 480,
         height: Int = 320,
-    ): String? = cover(origin, library.coverUrl, library.cards, width, height)
+    ): String? {
+        MediaImageUrls.backdrop(origin, library.coverImageUrl, width, height)?.let { return it }
+        return cover(origin, library.coverUrl, library.cards, width, height)
+    }
 
     fun cover(
         origin: String,

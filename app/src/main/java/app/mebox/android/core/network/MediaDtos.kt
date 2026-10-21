@@ -9,6 +9,13 @@ data class LibraryDto(
     val name: String = "",
     val type: String = "movie",
     @SerialName("cover_url") val coverUrl: String = "",
+    /**
+     * 服务端生成的媒体库封面（成员海报拼图）。
+     *
+     * 管理员自定义过封面时等于 `cover_url`；否则指向 `/api/libraries/{id}/cover`。
+     * 客户端不再自己拿预览卡片拼封面，直接用它即可，Web / App / Emby 外观一致。
+     */
+    @SerialName("cover_image_url") val coverImageUrl: String = "",
     val enabled: Boolean = true,
     @SerialName("sort_order") val sortOrder: Int = 0,
     val total: Int = 0,

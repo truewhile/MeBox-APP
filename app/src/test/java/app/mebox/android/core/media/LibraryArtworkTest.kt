@@ -18,6 +18,25 @@ class LibraryArtworkTest {
     )
 
     @Test
+    fun `server generated cover wins over preview cards`() {
+        val library = LibraryDto(
+            id = "lib",
+            coverImageUrl = "/api/libraries/lib/cover",
+            coverUrl = "",
+            cards = listOf(card("D:\\test\\poster.jpg", "D:\\test\\backdrop.jpg")),
+        )
+
+        val url = LibraryArtwork.cover(origin, library)!!
+
+        // 服务端拼图接口：走 origin + /api/... 直连，由图片加载器补 Authorization，
+        // 并透传尺寸档位让服务端直接产出该尺寸。
+        assertTrue(url, url.startsWith("$origin/api/libraries/lib/cover"))
+        assertTrue(url, url.contains("maxWidth=480"))
+        assertTrue(url, url.contains("maxHeight=320"))
+        assertTrue(url, !url.contains("/api/img"))
+    }
+
+    @Test
     fun `explicit cover wins`() {
         val library = LibraryDto(
             id = "lib",
