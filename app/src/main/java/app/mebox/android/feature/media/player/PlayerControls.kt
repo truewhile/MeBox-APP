@@ -92,6 +92,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -112,6 +113,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import app.mebox.android.core.media.PlaybackPlan
 import app.mebox.android.core.player.vr.VrDisplayMode
 import app.mebox.android.core.player.vr.VrProjection
@@ -327,16 +330,42 @@ private fun SideActionDivider() {
 
 /** 锁定状态下的解锁按钮：贴在左侧中间，玻璃圆底。 */
 @Composable
-fun PlayerLockButton(onUnlock: () -> Unit, modifier: Modifier = Modifier) {
+fun PlayerLockButton(
+    onUnlock: () -> Unit,
+    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = modifier,
         contentAlignment = Alignment.Center,
     ) {
-        PlayerGlass(radius = 22.dp, strong = true) {
+        PlayerGlass(
+            radius = 22.dp,
+            strong = true,
+            modifier = if (focused) {
+                Modifier.border(2.dp, PlayerSkin.White55, CircleShape)
+            } else {
+                Modifier
+            },
+        ) {
             Box(
                 modifier = Modifier
                     .size(44.dp)
-                    .clickable(onClick = onUnlock),
+                    .then(
+                        if (focusRequester != null) {
+                            Modifier.focusRequester(focusRequester)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .onFocusChanged { focused = it.isFocused }
+                    .clickable(
+                        interactionSource = interaction,
+                        indication = null,
+                        onClick = onUnlock,
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -376,6 +405,7 @@ fun PlayerBottomControls(
     onSeekDragStateChange: (Boolean) -> Unit,
     onTogglePlay: () -> Unit,
     onSeekBack: () -> Unit,
+    onSeekForward: () -> Unit,
     onPlayNext: () -> Unit,
     onToggleDanmaku: () -> Unit,
     onOpenSubtitle: () -> Unit,
@@ -388,6 +418,8 @@ fun PlayerBottomControls(
     onRecenterVr: (() -> Unit)? = null,
     /** 矮屏（手机横屏）没有空间放右侧竖排按钮时，把锁定入口并入操作行。 */
     onLock: (() -> Unit)? = null,
+    /** TV 端进入控制栏焦点模式时，把焦点放到播放键上。 */
+    playFocusRequester: FocusRequester? = null,
 ) {
     val qualityValue = remember(qualityLabel) { qualityActionValue(qualityLabel) }
     Column(
@@ -431,7 +463,8 @@ fun PlayerBottomControls(
         }
         Spacer(Modifier.height(2.dp))
 
-        // 传输行：快退 10 秒 / 播放暂停 / 下一集，播放键固定 56dp 玻璃圆。
+        // 传输行：快退 10 秒 / 播放暂停 / 快进 10 秒 / 下一集。
+        // 快进/快退同时承担 TV 遥控器在焦点模式下的 seek 入口。
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Center,
@@ -445,17 +478,32 @@ fun PlayerBottomControls(
                 iconSize = 24.dp,
                 tint = PlayerSkin.White78,
             )
-            Spacer(Modifier.width(36.dp))
-            PlayPauseButton(isPlaying = isPlaying, onClick = onTogglePlay)
-            Spacer(Modifier.width(36.dp))
+            Spacer(Modifier.width(20.dp))
+            PlayPauseButton(
+                isPlaying = isPlaying,
+                onClick = onTogglePlay,
+                focusRequester = playFocusRequester,
+            )
+            Spacer(Modifier.width(20.dp))
             PlayerIconButton(
-                icon = Icons.Outlined.SkipNext,
-                contentDescription = "下一集",
-                onClick = if (hasNext) onPlayNext else ({}),
+                icon = Icons.Outlined.FastForward,
+                contentDescription = "快进 10 秒",
+                onClick = onSeekForward,
                 size = 44.dp,
                 iconSize = 24.dp,
-                tint = if (hasNext) PlayerSkin.White78 else PlayerSkin.White28,
+                tint = PlayerSkin.White78,
             )
+            if (hasNext) {
+                Spacer(Modifier.width(20.dp))
+                PlayerIconButton(
+                    icon = Icons.Outlined.SkipNext,
+                    contentDescription = "下一集",
+                    onClick = onPlayNext,
+                    size = 44.dp,
+                    iconSize = 24.dp,
+                    tint = PlayerSkin.White78,
+                )
+            }
         }
         Spacer(Modifier.height(4.dp))
 
@@ -526,18 +574,38 @@ fun PlayerBottomControls(
 }
 
 @Composable
-private fun PlayPauseButton(isPlaying: Boolean, onClick: () -> Unit) {
+private fun PlayPauseButton(
+    isPlaying: Boolean,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null,
+) {
     val interaction = remember { MutableInteractionSource() }
+    var focused by remember { mutableStateOf(false) }
     PlayerGlass(
         radius = 28.dp,
         strong = true,
         modifier = Modifier
             .size(56.dp)
+            .then(
+                if (focused) {
+                    Modifier.border(2.dp, PlayerSkin.White55, CircleShape)
+                } else {
+                    Modifier
+                },
+            )
             .playerPressScale(interaction),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .then(
+                    if (focusRequester != null) {
+                        Modifier.focusRequester(focusRequester)
+                    } else {
+                        Modifier
+                    },
+                )
+                .onFocusChanged { focused = it.isFocused }
                 .clickable(
                     interactionSource = interaction,
                     indication = null,
@@ -846,10 +914,12 @@ fun playerMenuEntries(
 )
 
 /**
- * 统一的面板容器：底部贴边、28dp 顶部圆角、拖拽手柄、标题 + 关闭按钮。
+ * 统一的面板容器。
  *
- * 所有面板共用同一个 `ModalBottomSheet`，同一时间只允许一个面板，
- * 面板打开期间由页面暂停控制栏自动隐藏。
+ * - 手机：底部 Sheet，28dp 顶部圆角 + 拖拽手柄；
+ * - TV/平板：右侧 420dp Side Sheet，避免在 16:9 大屏上把面板拉成整屏宽。
+ *
+ * 同一时间只允许一个面板，面板打开期间由页面暂停控制栏自动隐藏。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -857,8 +927,65 @@ private fun PlayerSheetScaffold(
     title: String,
     subtitle: String? = null,
     onDismiss: () -> Unit,
+    sideSheet: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    if (sideSheet) {
+        // 用可聚焦 Popup 承载侧边面板：它拥有独立窗口焦点，遥控器方向键不会
+        // 逃逸到后面的播放器控件，返回键也由 Popup 自己分发。
+        Popup(
+            onDismissRequest = onDismiss,
+            properties = PopupProperties(
+                focusable = true,
+                dismissOnBackPress = true,
+                dismissOnClickOutside = true,
+            ),
+        ) {
+            val shape = RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(PlayerSkin.Scrim)
+                    .pointerInput(Unit) { detectTapGestures { onDismiss() } },
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .width(420.dp)
+                            .fillMaxHeight()
+                            .shadow(
+                                elevation = 24.dp,
+                                shape = shape,
+                                clip = false,
+                                ambientColor = Color.Black.copy(alpha = 0.5f),
+                                spotColor = Color.Black.copy(alpha = 0.6f),
+                            )
+                            .clip(shape)
+                            .background(Color(0xF2101216))
+                            .border(1.dp, PlayerSkin.White14, shape)
+                            // 面板空白区域的点击不穿透到遮罩，避免误关。
+                            .pointerInput(Unit) { detectTapGestures { } }
+                            .statusBarsPadding()
+                            .navigationBarsPadding()
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 20.dp, vertical = 18.dp),
+                    ) {
+                        PlayerSheetContent(
+                            title = title,
+                            subtitle = subtitle,
+                            onDismiss = onDismiss,
+                            content = content,
+                        )
+                    }
+                }
+            }
+        }
+        return
+    }
+
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -887,35 +1014,52 @@ private fun PlayerSheetScaffold(
                 .padding(horizontal = 18.dp)
                 .padding(bottom = 18.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        title,
-                        color = PlayerSkin.TextPrimary,
-                        style = PlayerSkin.Headline,
-                    )
-                    if (!subtitle.isNullOrBlank()) {
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            subtitle,
-                            color = PlayerSkin.TextSecondary,
-                            style = PlayerSkin.Overline,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-                PlayerIconButton(
-                    icon = Icons.Outlined.Close,
-                    contentDescription = "关闭",
-                    onClick = onDismiss,
-                    size = 34.dp,
-                    iconSize = 18.dp,
-                )
-            }
-            Spacer(Modifier.height(14.dp))
-            content()
+            PlayerSheetContent(
+                title = title,
+                subtitle = subtitle,
+                onDismiss = onDismiss,
+                content = content,
+            )
         }
+    }
+}
+
+@Composable
+private fun PlayerSheetContent(
+    title: String,
+    subtitle: String?,
+    onDismiss: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title,
+                    color = PlayerSkin.TextPrimary,
+                    style = PlayerSkin.Headline,
+                )
+                if (!subtitle.isNullOrBlank()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        subtitle,
+                        color = PlayerSkin.TextSecondary,
+                        style = PlayerSkin.Overline,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            PlayerIconButton(
+                icon = Icons.Outlined.Close,
+                contentDescription = "关闭",
+                onClick = onDismiss,
+                size = 40.dp,
+                iconSize = 20.dp,
+            )
+        }
+        Spacer(Modifier.height(14.dp))
+        content()
     }
 }
 
@@ -938,12 +1082,16 @@ fun PlayerMoreSheet(
     onSelect: (PlayerSettingsSection) -> Unit,
     onDismiss: () -> Unit,
     autoFocus: Boolean = false,
+    sideSheet: Boolean = false,
+    /** TV 端可以从面板里进入锁屏，避免侧边按钮不可达。 */
+    onLock: (() -> Unit)? = null,
 ) {
     val firstFocus = rememberFirstFocus(autoFocus)
     PlayerSheetScaffold(
         title = "播放设置",
         subtitle = "仅影响当前播放器",
         onDismiss = onDismiss,
+        sideSheet = sideSheet,
     ) {
         entries.forEachIndexed { index, entry ->
             PlayerMenuRow(
@@ -955,12 +1103,41 @@ fun PlayerMoreSheet(
                 Spacer(Modifier.height(2.dp))
             }
         }
+        if (onLock != null) {
+            Spacer(Modifier.height(10.dp))
+            PlayerMenuActionRow(
+                icon = Icons.Outlined.Lock,
+                label = "锁定屏幕",
+                value = "仅保留解锁按钮",
+                onClick = {
+                    onDismiss()
+                    onLock()
+                },
+            )
+        }
     }
 }
 
 @Composable
 private fun PlayerMenuRow(
     entry: PlayerMenuEntry,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    PlayerMenuActionRow(
+        icon = entry.icon,
+        label = entry.label,
+        value = entry.value,
+        onClick = onClick,
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun PlayerMenuActionRow(
+    icon: ImageVector,
+    label: String,
+    value: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -971,6 +1148,11 @@ private fun PlayerMenuRow(
             .heightIn(min = 54.dp)
             .clip(RoundedCornerShape(PlayerSkin.RadiusControl))
             .background(if (focused) PlayerSkin.White06 else Color.Transparent)
+            .border(
+                1.dp,
+                if (focused) PlayerSkin.White28 else Color.Transparent,
+                RoundedCornerShape(PlayerSkin.RadiusControl),
+            )
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 8.dp),
@@ -984,7 +1166,7 @@ private fun PlayerMenuRow(
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                entry.icon,
+                icon,
                 contentDescription = null,
                 tint = PlayerSkin.TextSecondary,
                 modifier = Modifier.size(17.dp),
@@ -992,14 +1174,14 @@ private fun PlayerMenuRow(
         }
         Spacer(Modifier.width(12.dp))
         Text(
-            entry.label,
+            label,
             color = PlayerSkin.TextPrimary,
             style = PlayerSkin.BodySmall,
             modifier = Modifier.weight(1f),
             maxLines = 1,
         )
         Text(
-            entry.value,
+            value,
             color = PlayerSkin.TextSecondary,
             style = PlayerSkin.Overline,
             maxLines = 1,
@@ -1025,12 +1207,14 @@ fun PlayerVrSheet(
     onRecenter: () -> Unit,
     onDismiss: () -> Unit,
     autoFocus: Boolean = false,
+    sideSheet: Boolean = false,
 ) {
     val firstFocus = rememberFirstFocus(autoFocus)
     PlayerSheetScaffold(
         title = "VR / 全景",
         subtitle = "把 360°/180° 全景视频投影到球面，支持立体格式与陀螺仪头部追踪",
         onDismiss = onDismiss,
+        sideSheet = sideSheet,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -1177,12 +1361,14 @@ fun PlayerSettingsSheet(
     onDismiss: () -> Unit,
     onSelect: (PlayerChoice) -> Unit,
     autoFocus: Boolean = false,
+    sideSheet: Boolean = false,
 ) {
     val firstFocus = rememberFirstFocus(autoFocus)
     PlayerSheetScaffold(
         title = section.title(),
         subtitle = description,
         onDismiss = onDismiss,
+        sideSheet = sideSheet,
     ) {
         when {
             choices.isEmpty() -> Text(
@@ -1385,12 +1571,14 @@ fun DanmakuSettingsSheet(
     /** 电视端没有键盘：非空时显示「手机扫码输入关键词」入口。 */
     onOpenPhoneSearch: (() -> Unit)? = null,
     autoFocus: Boolean = false,
+    sideSheet: Boolean = false,
 ) {
     val firstFocus = rememberFirstFocus(autoFocus)
     PlayerSheetScaffold(
         title = "弹幕",
         subtitle = "开关、字号与显示区域即时生效",
         onDismiss = onDismiss,
+        sideSheet = sideSheet,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -1496,6 +1684,11 @@ fun DanmakuSettingsSheet(
                                 .fillMaxWidth()
                                 .clip(shape)
                                 .background(if (focused) PlayerSkin.White06 else Color.Transparent)
+                                .border(
+                                    1.dp,
+                                    if (focused) PlayerSkin.White28 else Color.Transparent,
+                                    shape,
+                                )
                                 .onFocusChanged { focused = it.isFocused }
                                 .clickable { onSelectEpisode(episode.episodeId) }
                                 .padding(horizontal = 10.dp, vertical = 10.dp),
@@ -1773,6 +1966,27 @@ fun PlayerHint(text: String, modifier: Modifier = Modifier) {
 }
 
 /**
+ * TV 全屏状态层：Popup 拥有独立窗口焦点，避免遥控器焦点逃逸到后面的控制栏。
+ * 返回键统一回到调用方提供的退出逻辑。
+ */
+@Composable
+private fun PlayerTvOverlay(
+    onBack: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Popup(
+        onDismissRequest = onBack,
+        properties = PopupProperties(
+            focusable = true,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        content()
+    }
+}
+
+/**
  * 错误状态层：图标 + 标题 + 说明 + 主/次按钮。
  *
  * 技术原因（解码失败等）放在第二行说明里，主按钮始终是「重试」。
@@ -1791,10 +2005,15 @@ fun PlayerErrorOverlay(
     val retryFocus = remember { FocusRequester() }
     LaunchedEffect(isTv) {
         if (isTv) {
-            kotlinx.coroutines.delay(80)
-            runCatching { retryFocus.requestFocus() }
+            repeat(5) {
+                kotlinx.coroutines.delay(80)
+                if (runCatching { retryFocus.requestFocus() }.isSuccess) {
+                    return@LaunchedEffect
+                }
+            }
         }
     }
+    val content: @Composable () -> Unit = {
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -1882,6 +2101,12 @@ fun PlayerErrorOverlay(
             }
         }
     }
+    }
+    if (isTv) {
+        PlayerTvOverlay(onBack = onBack) { content() }
+    } else {
+        content()
+    }
 }
 
 /**
@@ -1899,7 +2124,17 @@ fun PlayerEndedOverlay(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     countdownTotal: Int = 8,
+    autoFocus: Boolean = false,
 ) {
+    val primaryFocus = remember { FocusRequester() }
+    LaunchedEffect(autoFocus) {
+        if (!autoFocus) return@LaunchedEffect
+        repeat(4) {
+            kotlinx.coroutines.delay(80)
+            if (runCatching { primaryFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+        }
+    }
+    val content: @Composable () -> Unit = {
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -1991,7 +2226,9 @@ fun PlayerEndedOverlay(
                         Spacer(Modifier.width(8.dp))
                         Button(
                             onClick = onPlayNext,
-                            modifier = Modifier.height(34.dp),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .focusRequester(primaryFocus),
                             shape = RoundedCornerShape(10.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color.White,
@@ -2032,7 +2269,9 @@ fun PlayerEndedOverlay(
                         Spacer(Modifier.width(8.dp))
                         Button(
                             onClick = onReplay,
-                            modifier = Modifier.height(34.dp),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .focusRequester(primaryFocus),
                             shape = RoundedCornerShape(10.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color.White,
@@ -2055,6 +2294,12 @@ fun PlayerEndedOverlay(
                 }
             }
         }
+    }
+    }
+    if (autoFocus) {
+        PlayerTvOverlay(onBack = onBack) { content() }
+    } else {
+        content()
     }
 }
 

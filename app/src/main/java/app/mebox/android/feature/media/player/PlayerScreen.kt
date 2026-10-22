@@ -399,6 +399,8 @@ private fun PlayerSurface(
     // 任何交互都递增这个计数，用来重置 3 秒自动隐藏计时（控件本来就可见时，
     // 只改 controlsVisible 不会触发 LaunchedEffect 重启）。
     var controlsTick by remember(initialKey) { mutableIntStateOf(0) }
+    // TV 焦点模式：true 时方向键交给焦点系统在控制栏按钮间移动。
+    var tvFocusMode by remember(initialKey) { mutableStateOf(false) }
 
     // 一个内核实例绑定一集内容；切换内核会重建实例并从当前位置续播。
     val engine = remember(initialKey, engineKind, decoderMode) {
@@ -864,6 +866,7 @@ private fun PlayerSurface(
         locked,
         seekDragging,
         boostSpeed,
+        tvFocusMode,
         settingsSection,
         moreSheetVisible,
     ) {
@@ -873,6 +876,7 @@ private fun PlayerSurface(
             !playbackEnded &&
             !locked &&
             !seekDragging &&
+            !tvFocusMode &&
             boostSpeed == 0f &&
             settingsSection == null &&
             !moreSheetVisible
@@ -881,9 +885,9 @@ private fun PlayerSurface(
             controlsVisible = false
         }
     }
-    // 锁屏后只保留解锁按钮，3 秒后淡出；点按画面可再次唤出。
-    LaunchedEffect(locked, lockBarVisible) {
-        if (locked && lockBarVisible) {
+    // 锁屏后只保留解锁按钮，3 秒后淡出；TV 端保持可见，保证遥控器随时能解锁。
+    LaunchedEffect(locked, lockBarVisible, isTv) {
+        if (locked && lockBarVisible && !isTv) {
             delay(3_000)
             lockBarVisible = false
         }
@@ -1024,6 +1028,7 @@ private fun PlayerSurface(
         locked = true
         controlsVisible = false
         lockBarVisible = true
+        tvFocusMode = false
         controlsTick++
         hint = "屏幕已锁定"
     }
@@ -1032,6 +1037,7 @@ private fun PlayerSurface(
         locked = false
         lockBarVisible = false
         controlsVisible = true
+        tvFocusMode = false
         controlsTick++
         hint = "屏幕已解锁"
     }
@@ -1088,15 +1094,49 @@ private fun PlayerSurface(
     val audioLabel = trackState.selectedAudioLabel ?: "默认"
 
     // ── 电视遥控器 ──
-    // 焦点固定在播放器根节点上，方向键直接映射为播放操作；打开设置面板后
-    // 不再拦截方向键，把焦点交给面板里的选项。
+    // 两段式焦点：
+    // - 根节点持有焦点时，方向键映射为快捷操作（左右 seek、上下显隐、OK 播放暂停）；
+    // - 按方向上键进入控制栏焦点模式，焦点落到播放键，方向键在按钮间移动，OK 确认；
+    //   此时按返回退出焦点模式，再按返回收起控制栏 / 退出播放页。
     val tvFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(isTv) {
-        if (isTv) runCatching { tvFocusRequester.requestFocus() }
-    }
-    LaunchedEffect(isTv, moreSheetVisible, settingsSection, failedMessage) {
-        if (isTv && !moreSheetVisible && settingsSection == null && failedMessage == null) {
-            runCatching { tvFocusRequester.requestFocus() }
+    val tvPlayFocus = remember { FocusRequester() }
+    val tvUnlockFocus = remember { FocusRequester() }
+
+    LaunchedEffect(
+        isTv,
+        controlsVisible,
+        tvFocusMode,
+        locked,
+        moreSheetVisible,
+        settingsSection,
+        failedMessage,
+        playbackEnded,
+    ) {
+        if (!isTv) return@LaunchedEffect
+        when {
+            locked -> repeat(5) {
+                delay(80)
+                if (runCatching { tvUnlockFocus.requestFocus() }.isSuccess) {
+                    return@LaunchedEffect
+                }
+            }
+
+            // 错误页、结束页和面板有自己的焦点管理，不抢它们的焦点。
+            failedMessage != null || playbackEnded || moreSheetVisible || settingsSection != null -> Unit
+
+            tvFocusMode && controlsVisible -> repeat(5) {
+                delay(60)
+                if (runCatching { tvPlayFocus.requestFocus() }.isSuccess) {
+                    return@LaunchedEffect
+                }
+            }
+
+            else -> repeat(3) {
+                delay(80)
+                if (runCatching { tvFocusRequester.requestFocus() }.isSuccess) {
+                    return@LaunchedEffect
+                }
+            }
         }
     }
 
@@ -1113,9 +1153,54 @@ private fun PlayerSurface(
         // 设置面板打开时把方向键/确认键完全还给面板，否则 KeyUp 被根节点吞掉会导致
         // 面板里的 clickable 选项无法触发。
         if (moreSheetVisible || settingsSection != null) return false
-        // 播放失败时把按键完全交给错误页的按钮（重试/切换内核/返回）：
-        // 根节点的预览阶段一旦吞掉确认键，焦点按钮就永远点不动。
-        if (failedMessage != null) return false
+        // 错误页 / 结束页 / 锁定态各自持有焦点，根节点不拦截按键。
+        if (failedMessage != null || playbackEnded || locked) return false
+
+        // 媒体键在两种焦点模式下都直接生效，不依赖当前焦点位置。
+        if (event.type == KeyEventType.KeyDown) {
+            when (code) {
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                KeyEvent.KEYCODE_HEADSETHOOK -> {
+                    togglePlayback()
+                    return true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                    tvSeek(-seekStep)
+                    return true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                    tvSeek(seekStep)
+                    return true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                    if (request.nextEpisode != null) {
+                        playNextNow()
+                        return true
+                    }
+                }
+
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                    tvSeek(-absolutePosition())
+                    return true
+                }
+            }
+        }
+
+        // 控制栏焦点模式：方向键交给焦点系统在按钮间移动，只拦截菜单键。
+        // 注意不能再吞 KeyUp，否则焦点按钮收不到确认键的抬起事件。
+        if (tvFocusMode) {
+            if (event.type == KeyEventType.KeyDown &&
+                (code == KeyEvent.KEYCODE_MENU || code == KeyEvent.KEYCODE_INFO)
+            ) {
+                moreSheetVisible = true
+                return true
+            }
+            return false
+        }
+
         if (event.type == KeyEventType.KeyUp) {
             return code in TV_CONFIRM_KEYS
         }
@@ -1143,13 +1228,18 @@ private fun PlayerSurface(
                 true
             }
 
+            // 上键：显示控制栏并进入按钮焦点模式，焦点落在播放键。
             KeyEvent.KEYCODE_DPAD_UP -> {
                 controlsVisible = true
+                tvFocusMode = true
+                controlsTick++
                 true
             }
 
             KeyEvent.KEYCODE_DPAD_DOWN -> {
                 controlsVisible = false
+                tvFocusMode = false
+                controlsTick++
                 true
             }
 
@@ -1161,9 +1251,7 @@ private fun PlayerSurface(
 
             KeyEvent.KEYCODE_MEDIA_NEXT -> {
                 if (request.nextEpisode != null) {
-                    playbackEnded = false
-                    autoNextCancelled = true
-                    onPlayNext()
+                    playNextNow()
                     true
                 } else {
                     false
@@ -1180,6 +1268,19 @@ private fun PlayerSurface(
     }
 
     BackHandler(enabled = locked) { unlockScreen() }
+    // TV 焦点模式：返回先退出焦点模式并收起控制栏，回到方向键快捷操作。
+    BackHandler(enabled = isTv && tvFocusMode && !locked) {
+        tvFocusMode = false
+        controlsVisible = false
+        controlsTick++
+        runCatching { tvFocusRequester.requestFocus() }
+    }
+    // TV：控制栏可见时先收起控制栏，再按一次才退出播放页。
+    BackHandler(enabled = isTv && controlsVisible && !locked && !tvFocusMode) {
+        controlsVisible = false
+        tvFocusMode = false
+        controlsTick++
+    }
 
     BoxWithConstraints(
         modifier = Modifier
@@ -1309,16 +1410,31 @@ private fun PlayerSurface(
                     .align(Alignment.TopCenter)
                     .padding(top = 92.dp),
             ) {
-                Text(
-                    "OK 播放/暂停 · ◀ ▶ 快退/快进 · 菜单键 播放设置 · 返回键 退出",
-                    color = PlayerSkin.TextSecondary,
-                    style = PlayerSkin.Overline,
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        if (tvFocusMode) {
+                            "方向键选择按钮 · OK 确认"
+                        } else {
+                            "▲ 显示控制栏并选择按钮 · OK 播放/暂停"
+                        },
+                        color = PlayerSkin.TextSecondary,
+                        style = PlayerSkin.Overline,
+                    )
+                    Text(
+                        if (tvFocusMode) {
+                            "返回 收起控制栏 · 菜单键 播放设置"
+                        } else {
+                            "未选中按钮时 ◀ ▶ 快退/快进 · 菜单键 播放设置"
+                        },
+                        color = PlayerSkin.TextTertiary,
+                        style = PlayerSkin.Overline,
+                    )
+                }
             }
         }
 
         AnimatedVisibility(
-            visible = controlsVisible && !locked && !compactControls,
+            visible = controlsVisible && !locked && !compactControls && !isTv,
             enter = fadeIn(animationSpec = tween(200)),
             exit = fadeOut(animationSpec = tween(200)),
             modifier = Modifier
@@ -1362,6 +1478,7 @@ private fun PlayerSurface(
                 },
                 onTogglePlay = { togglePlayback() },
                 onSeekBack = { tvSeek(-seekStep) },
+                onSeekForward = { tvSeek(seekStep) },
                 onPlayNext = ::playNextNow,
                 onToggleDanmaku = ::toggleDanmakuFromControls,
                 onOpenSubtitle = { settingsSection = PlayerSettingsSection.SUBTITLE },
@@ -1371,7 +1488,8 @@ private fun PlayerSurface(
                 onOpenMore = { moreSheetVisible = true },
                 vrActive = vrEnabled,
                 onRecenterVr = ::recenterVr,
-                onLock = if (compactControls) ::lockScreen else null,
+                onLock = if (compactControls || isTv) ::lockScreen else null,
+                playFocusRequester = if (isTv) tvPlayFocus else null,
             )
         }
 
@@ -1443,7 +1561,10 @@ private fun PlayerSurface(
                 .align(Alignment.CenterStart)
                 .padding(start = 12.dp),
         ) {
-            PlayerLockButton(onUnlock = ::unlockScreen)
+            PlayerLockButton(
+                onUnlock = ::unlockScreen,
+                focusRequester = if (isTv) tvUnlockFocus else null,
+            )
         }
 
         failedMessage?.let { message ->
@@ -1485,6 +1606,7 @@ private fun PlayerSurface(
                 },
                 onBack = ::leavePlayer,
                 countdownTotal = AUTO_NEXT_SECONDS,
+                autoFocus = isTv,
             )
         }
 
@@ -1506,6 +1628,8 @@ private fun PlayerSurface(
                 },
                 onDismiss = { moreSheetVisible = false },
                 autoFocus = isTv,
+                sideSheet = isTv,
+                onLock = if (isTv) ::lockScreen else null,
             )
         }
 
@@ -1520,6 +1644,7 @@ private fun PlayerSurface(
                     onRecenter = ::recenterVr,
                     onDismiss = { settingsSection = null },
                     autoFocus = isTv,
+                    sideSheet = isTv,
                 )
                 return@let
             }
@@ -1535,6 +1660,7 @@ private fun PlayerSurface(
                     onResetAuto = onDanmakuResetAuto,
                     onOpenPhoneSearch = onOpenDanmakuPhoneInput,
                     autoFocus = isTv,
+                    sideSheet = isTv,
                 )
                 return@let
             }
@@ -1560,6 +1686,7 @@ private fun PlayerSurface(
                 description = sheetDescription,
                 onDismiss = { settingsSection = null },
                 autoFocus = isTv,
+                sideSheet = isTv,
                 onSelect = { choice ->
                     when (section) {
                         PlayerSettingsSection.DANMAKU -> Unit

@@ -294,6 +294,11 @@ fun PlayerActionItem(
             .playerPressScale(interaction)
             .clip(shape)
             .background(if (focused) PlayerSkin.White08 else Color.Transparent)
+            .border(
+                1.dp,
+                if (focused) PlayerSkin.White28 else Color.Transparent,
+                shape,
+            )
             .onFocusChanged { focused = it.isFocused }
             .clickable(
                 interactionSource = interaction,
