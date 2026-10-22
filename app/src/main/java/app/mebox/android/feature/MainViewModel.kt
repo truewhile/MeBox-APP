@@ -19,6 +19,7 @@ import app.mebox.android.core.network.ServerCompatibility
 import app.mebox.android.core.network.ServerInfo
 import app.mebox.android.core.player.DecoderMode
 import app.mebox.android.core.player.PlayerEngineKind
+import app.mebox.android.core.player.PlayerUiSettings
 import app.mebox.android.core.player.SubtitlePreference
 import app.mebox.android.core.player.SubtitlePriority
 import app.mebox.android.core.player.vr.VrDisplayMode
@@ -130,6 +131,13 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
     private val _homeReadingBar = MutableStateFlow(container.preferences.homeReadingBar)
     val homeReadingBar: StateFlow<Boolean> = _homeReadingBar.asStateFlow()
 
+    /**
+     * 播放器界面与手势偏好（双击/长按动作、按钮显隐、方向、连续播放等）。
+     * 播放页直接读取；修改后立即写回本机并驱动界面重组。
+     */
+    private val _playerUiSettings = MutableStateFlow(container.preferences.playerUiSettings)
+    val playerUiSettings: StateFlow<PlayerUiSettings> = _playerUiSettings.asStateFlow()
+
     fun selectPlayerEngine(kind: PlayerEngineKind) {
         container.preferences.playerEngine = kind.key
         _playerEngine.value = kind
@@ -158,6 +166,11 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         container.preferences.subtitlePriority = priority.key
         _subtitlePreference.value = _subtitlePreference.value.copy(priority = priority)
         DiagnosticsLog.i("Play", "字幕优先语言: ${priority.key}")
+    }
+
+    fun updatePlayerUiSettings(settings: PlayerUiSettings) {
+        container.preferences.playerUiSettings = settings
+        _playerUiSettings.value = settings
     }
 
     fun setVrSettings(settings: VrSettings) {

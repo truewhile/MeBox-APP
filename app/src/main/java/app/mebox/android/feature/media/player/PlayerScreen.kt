@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.media.AudioManager
 import android.os.Build
 import android.os.SystemClock
@@ -18,6 +19,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -39,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,6 +51,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -54,6 +59,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -75,6 +81,7 @@ import app.mebox.android.core.player.EnginePlaybackState
 import app.mebox.android.core.player.EngineResizeMode
 import app.mebox.android.core.player.EngineSubtitle
 import app.mebox.android.core.player.EngineTrack
+import app.mebox.android.core.player.EngineSubtitleStyle
 import app.mebox.android.core.player.EngineTrackType
 import app.mebox.android.core.player.EngineTracks
 import app.mebox.android.core.player.DecoderMode
@@ -82,7 +89,11 @@ import app.mebox.android.core.player.PlaybackSessionState
 import app.mebox.android.core.player.PlaybackTrackRef
 import app.mebox.android.core.player.PlaybackTrackRestorer
 import app.mebox.android.core.player.PlaybackTrackSelection
+import app.mebox.android.core.player.PlayerDoubleTapAction
 import app.mebox.android.core.player.PlayerEngineKind
+import app.mebox.android.core.player.PlayerLongPressAction
+import app.mebox.android.core.player.PlayerOrientation
+import app.mebox.android.core.player.PlayerUiSettings
 import app.mebox.android.core.player.SubtitlePreference
 import app.mebox.android.core.player.SubtitleSelector
 import app.mebox.android.core.player.VideoPlayerEngineListener
@@ -90,8 +101,10 @@ import app.mebox.android.core.player.createVideoPlayerEngine
 import app.mebox.android.core.player.vr.VrSettings
 import app.mebox.android.feature.media.DanmakuUiState
 import app.mebox.android.feature.media.PlaybackRequest
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
@@ -117,6 +130,10 @@ fun PlayerScreen(
     decoderMode: DecoderMode = DecoderMode.AUTO,
     vrSettings: VrSettings = VrSettings(),
     onVrSettingsChange: (VrSettings) -> Unit = {},
+    uiSettings: PlayerUiSettings = PlayerUiSettings.Default,
+    onUiSettingsChange: (PlayerUiSettings) -> Unit = {},
+    serverLabel: String? = null,
+    onSelectEpisode: (String) -> Unit = {},
     isTv: Boolean = false,
     onEngineSelected: (PlayerEngineKind) -> Unit = {},
     onBack: () -> Unit,
@@ -133,31 +150,6 @@ fun PlayerScreen(
     /** 电视端打开手机扫码输入弹幕关键词的对话框。 */
     onOpenDanmakuPhoneInput: (() -> Unit)? = null,
 ) {
-    // 进入播放页自动横屏；退出时恢复到用户当前的旋转偏好。
-    // Activity 已声明 configChanges，旋转不会重建页面、不会中断播放。
-    val context = LocalContext.current
-    val activity = remember(context) { context.findActivity() }
-    val previousOrientation = remember(activity) {
-        activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-    }
-    DisposableEffect(activity, isTv) {
-        if (!isTv) {
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        }
-        onDispose {
-            if (!isTv) {
-                activity?.requestedOrientation =
-                    if (previousOrientation == ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) {
-                        // UNSPECIFIED 在关闭自动旋转的设备上会停留在横屏；USER 会遵循
-                        // 用户自己的旋转锁定，回到竖屏（或用户锁定的方向）。
-                        ActivityInfo.SCREEN_ORIENTATION_USER
-                    } else {
-                        previousOrientation
-                    }
-            }
-        }
-    }
-
     if (request == null) {
         BackHandler { onBack() }
         val retryFocus = remember { FocusRequester() }
@@ -228,29 +220,36 @@ fun PlayerScreen(
         return
     }
 
-    PlayerSurface(
-        request = request,
-        title = request.title.ifBlank { title },
-        danmaku = danmaku,
-        initialEngine = engine,
-        subtitlePreference = subtitlePreference,
-        decoderMode = decoderMode,
-        storedVrSettings = vrSettings,
-        onVrSettingsChange = onVrSettingsChange,
-        isTv = isTv,
-        onEngineSelected = onEngineSelected,
-        onBack = onBack,
-        onProgress = onProgress,
-        onError = onError,
-        onPlayNext = onPlayNext,
-        onDanmakuEnabledChange = onDanmakuEnabledChange,
-        onDanmakuRenderChange = onDanmakuRenderChange,
-        onDanmakuReload = onDanmakuReload,
-        onDanmakuSelectEpisode = onDanmakuSelectEpisode,
-        onDanmakuSearch = onDanmakuSearch,
-        onDanmakuResetAuto = onDanmakuResetAuto,
-        onOpenDanmakuPhoneInput = onOpenDanmakuPhoneInput,
-    )
+    // 播放器外壳、浮层、分集条通过这个 CompositionLocal 读取电视规格。
+    CompositionLocalProvider(LocalPlayerIsTv provides isTv) {
+        PlayerSurface(
+            request = request,
+            title = request.title.ifBlank { title },
+            danmaku = danmaku,
+            initialEngine = engine,
+            subtitlePreference = subtitlePreference,
+            decoderMode = decoderMode,
+            storedVrSettings = vrSettings,
+            onVrSettingsChange = onVrSettingsChange,
+            uiSettings = uiSettings,
+            onUiSettingsChange = onUiSettingsChange,
+            serverLabel = serverLabel,
+            onSelectEpisode = onSelectEpisode,
+            isTv = isTv,
+            onEngineSelected = onEngineSelected,
+            onBack = onBack,
+            onProgress = onProgress,
+            onError = onError,
+            onPlayNext = onPlayNext,
+            onDanmakuEnabledChange = onDanmakuEnabledChange,
+            onDanmakuRenderChange = onDanmakuRenderChange,
+            onDanmakuReload = onDanmakuReload,
+            onDanmakuSelectEpisode = onDanmakuSelectEpisode,
+            onDanmakuSearch = onDanmakuSearch,
+            onDanmakuResetAuto = onDanmakuResetAuto,
+            onOpenDanmakuPhoneInput = onOpenDanmakuPhoneInput,
+        )
+    }
 }
 
 /** 双击/拖动快进时的提示数据；值为 null 时不显示浮层。 */
@@ -296,6 +295,10 @@ private fun PlayerSurface(
     decoderMode: DecoderMode,
     storedVrSettings: VrSettings,
     onVrSettingsChange: (VrSettings) -> Unit,
+    uiSettings: PlayerUiSettings,
+    onUiSettingsChange: (PlayerUiSettings) -> Unit,
+    serverLabel: String?,
+    onSelectEpisode: (String) -> Unit,
     isTv: Boolean,
     onEngineSelected: (PlayerEngineKind) -> Unit,
     onBack: () -> Unit,
@@ -322,6 +325,36 @@ private fun PlayerSurface(
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
     }
 
+    // 影片方向：默认跟随传感器；设置页和右侧旋转按钮都可以临时改变。
+    val previousOrientation = remember(activity) {
+        activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+    var orientationOverride by remember { mutableStateOf<PlayerOrientation?>(null) }
+    val activeOrientation = orientationOverride ?: uiSettings.orientation
+    DisposableEffect(activity, isTv) {
+        onDispose {
+            if (!isTv) {
+                activity?.requestedOrientation =
+                    if (previousOrientation == ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) {
+                        ActivityInfo.SCREEN_ORIENTATION_USER
+                    } else {
+                        previousOrientation
+                    }
+            }
+        }
+    }
+    LaunchedEffect(activity, isTv, activeOrientation) {
+        if (isTv) return@LaunchedEffect
+        activity?.requestedOrientation = when (activeOrientation) {
+            PlayerOrientation.SENSOR -> ActivityInfo.SCREEN_ORIENTATION_SENSOR
+            PlayerOrientation.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            PlayerOrientation.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        }
+    }
+    LaunchedEffect(uiSettings.orientation) {
+        orientationOverride = null
+    }
+
     val initialKey = request.mediaId + "|" + request.streamUrl + "|" +
         request.startPositionMs
 
@@ -340,7 +373,19 @@ private fun PlayerSurface(
     var lockBarVisible by remember(initialKey) { mutableStateOf(false) }
     var hint by remember(initialKey) { mutableStateOf<String?>(null) }
     var settingsSection by remember(initialKey) { mutableStateOf<PlayerSettingsSection?>(null) }
-    var moreSheetVisible by remember(initialKey) { mutableStateOf(false) }
+    var settingsHubVisible by remember(initialKey) { mutableStateOf(false) }
+    var mediaInfoVisible by remember(initialKey) { mutableStateOf(false) }
+    var sleepTimerVisible by remember(initialKey) { mutableStateOf(false) }
+    // 定时关闭是整次播放会话的行为，跨集数继续计时。
+    var sleepTimerMinutes by remember { mutableIntStateOf(0) }
+    var sleepTimerDeadline by remember { mutableStateOf<Long?>(null) }
+    var episodeStripVisible by remember(initialKey) { mutableStateOf(false) }
+    var quickMenu by remember(initialKey) { mutableStateOf<PlayerQuickMenu?>(null) }
+    var osdVisible by remember(initialKey) { mutableStateOf(false) }
+    var subtitleSettingsVisible by remember(initialKey) { mutableStateOf(false) }
+    var longPressActive by remember(initialKey) { mutableStateOf(false) }
+    var holdSeekJob by remember(initialKey) { mutableStateOf<Job?>(null) }
+    val touchScope = rememberCoroutineScope()
     var seekFeedback by remember(initialKey) { mutableStateOf<SeekFeedbackState?>(null) }
     var levelFeedback by remember(initialKey) { mutableStateOf<PlayerLevel?>(null) }
     var levelFraction by remember(initialKey) { mutableFloatStateOf(0.5f) }
@@ -557,17 +602,18 @@ private fun PlayerSurface(
     }
 
     /**
-     * 长按临时倍速：按住时以 2× 播放，横滑按 0.25× 步进调整；
+     * 长按临时倍速：默认 2×，长按慢速为 0.5×；长按后横滑按 0.25× 步进调整。
      * 松手恢复用户原本选择的倍速，不写回偏好。
      */
-    fun startBoost() {
+    fun startBoost(base: Float = 2f) {
         if (boostSpeed > 0f) return
         resetControlsTimer()
-        boostSpeed = 2f
+        boostSpeed = base
         engine.setSpeed(boostSpeed)
     }
 
     fun adjustBoost(delta: Float) {
+        if (!uiSettings.longPressSpeedAdjust) return
         if (boostSpeed <= 0f) return
         boostSpeed = (boostSpeed + delta).coerceIn(0.5f, 4f)
         engine.setSpeed(boostSpeed)
@@ -577,6 +623,56 @@ private fun PlayerSurface(
         if (boostSpeed <= 0f) return
         boostSpeed = 0f
         engine.setSpeed(playbackSpeed)
+    }
+
+    fun startHoldSeek(direction: Long) {
+        holdSeekJob?.cancel()
+        holdSeekJob = touchScope.launch {
+            // 长按持续快进/快退：先走 1 秒，随后每 120ms 再走 1 秒。
+            while (isActive) {
+                seekTo(absolutePosition() + direction * 1_000L)
+                delay(120)
+            }
+        }
+    }
+
+    /** 长按左右半屏：按设置执行倍速、慢速、连续快进/快退或上/下一集。 */
+    fun beginLongPress(right: Boolean) {
+        val action = if (right) uiSettings.longPressRight else uiSettings.longPressLeft
+        longPressActive = true
+        resetControlsTimer()
+        when (action) {
+            PlayerLongPressAction.FAST -> startBoost(2f)
+            PlayerLongPressAction.SLOW -> startBoost(0.5f)
+            PlayerLongPressAction.SEEK_FORWARD -> startHoldSeek(1L)
+            PlayerLongPressAction.SEEK_BACK -> startHoldSeek(-1L)
+            PlayerLongPressAction.NEXT_EPISODE -> {
+                longPressActive = false
+                if (request.nextEpisode != null) {
+                    playbackEnded = false
+                    autoNextCancelled = true
+                    onPlayNext()
+                } else {
+                    hint = "没有下一集"
+                }
+            }
+            PlayerLongPressAction.PREVIOUS_EPISODE -> {
+                longPressActive = false
+                if (absolutePosition() > 3_000L) {
+                    seekTo(0L)
+                    hint = "已回到本集开头"
+                } else {
+                    hint = "已经是本集开头"
+                }
+            }
+        }
+    }
+
+    fun endLongPress() {
+        longPressActive = false
+        holdSeekJob?.cancel()
+        holdSeekJob = null
+        endBoost()
     }
 
     /** 错误页与遥控器共用的显式重试入口：重置本轮错误并继续播放。 */
@@ -642,14 +738,31 @@ private fun PlayerSurface(
     }
 
 
-    // 进入播放页：隐藏系统栏，退出时恢复。
-    DisposableEffect(activity, view) {
+    // 播放页参考真实截图保留状态栏，只隐藏导航栏；退出时恢复。
+    DisposableEffect(activity, view, isTv) {
         val window = activity?.window
         val controller = window?.let { WindowCompat.getInsetsController(it, view) }
-        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        if (isTv) {
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            window?.let { WindowCompat.setDecorFitsSystemWindows(it, false) }
+            window?.statusBarColor = android.graphics.Color.TRANSPARENT
+            window?.navigationBarColor = android.graphics.Color.TRANSPARENT
+            controller?.isAppearanceLightStatusBars = false
+            controller?.isAppearanceLightNavigationBars = false
+            controller?.show(WindowInsetsCompat.Type.statusBars())
+            controller?.hide(WindowInsetsCompat.Type.navigationBars())
+        }
         controller?.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+            if (!isTv) {
+                window?.let { WindowCompat.setDecorFitsSystemWindows(it, true) }
+                controller?.isAppearanceLightStatusBars = true
+                controller?.isAppearanceLightNavigationBars = true
+            }
+        }
     }
 
     // 播放器亮度只在播放页生效，退出时恢复系统亮度。
@@ -674,13 +787,30 @@ private fun PlayerSurface(
         }
     }
 
-    DisposableEffect(engine, lifecycleOwner) {
+    val autoPipEnabled by rememberUpdatedState(uiSettings.autoPictureInPicture)
+    val playingForPip by rememberUpdatedState(isPlaying)
+    val lockedForPip by rememberUpdatedState(locked)
+    DisposableEffect(engine, lifecycleOwner, activity, pipAvailable, isTv) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) {
                 report(force = true)
-                // 退到后台属于用户可见的暂停：切回前台后仍保持暂停。
-                session.onUserPause()
-                engine.pause()
+                // 参考 CapyPlayer 的「离开自动进入画中画」：退到后台前先切 PiP，
+                // 再暂停本地播放会话，避免回来时状态错乱。
+                var pipEntered = false
+                if (autoPipEnabled && pipAvailable && !isTv && !lockedForPip && playingForPip) {
+                    pipEntered = runCatching {
+                        activity?.enterPictureInPictureMode(
+                            PictureInPictureParams.Builder()
+                                .setAspectRatio(Rational(16, 9))
+                                .build(),
+                        ) == true
+                    }.getOrDefault(false)
+                }
+                // 进入画中画时继续播放；普通退到后台仍按用户可见的暂停处理。
+                if (!pipEntered) {
+                    session.onUserPause()
+                    engine.pause()
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -830,6 +960,23 @@ private fun PlayerSurface(
         engine.setResizeMode(resizeMode)
     }
 
+    LaunchedEffect(
+        engine,
+        uiSettings.subtitleVerticalPosition,
+        uiSettings.subtitleScale,
+        uiSettings.subtitleTextColor,
+        uiSettings.subtitleOutline,
+    ) {
+        engine.setSubtitleStyle(
+            EngineSubtitleStyle(
+                verticalPosition = uiSettings.subtitleVerticalPosition,
+                scale = uiSettings.subtitleScale,
+                textColor = uiSettings.subtitleTextColor.toInt(),
+                outline = uiSettings.subtitleOutline,
+            ),
+        )
+    }
+
     LaunchedEffect(engine, request.mediaId) {
         var lastTick = 0L
         while (isActive) {
@@ -866,9 +1013,15 @@ private fun PlayerSurface(
         locked,
         seekDragging,
         boostSpeed,
+        longPressActive,
         tvFocusMode,
         settingsSection,
-        moreSheetVisible,
+        settingsHubVisible,
+        mediaInfoVisible,
+        sleepTimerVisible,
+        episodeStripVisible,
+        quickMenu,
+        subtitleSettingsVisible,
     ) {
         if (controlsVisible &&
             isPlaying &&
@@ -878,8 +1031,14 @@ private fun PlayerSurface(
             !seekDragging &&
             !tvFocusMode &&
             boostSpeed == 0f &&
+            !longPressActive &&
             settingsSection == null &&
-            !moreSheetVisible
+            !settingsHubVisible &&
+            !mediaInfoVisible &&
+            !sleepTimerVisible &&
+            !episodeStripVisible &&
+            quickMenu == null &&
+            !subtitleSettingsVisible
         ) {
             delay(3_000)
             controlsVisible = false
@@ -896,6 +1055,24 @@ private fun PlayerSurface(
         if (hint != null) {
             delay(1_800)
             hint = null
+        }
+    }
+    // 定时关闭只作用于当前播放会话：到点暂停并清除计时。
+    LaunchedEffect(sleepTimerDeadline) {
+        val deadline = sleepTimerDeadline ?: return@LaunchedEffect
+        while (isActive) {
+            val remaining = deadline - SystemClock.elapsedRealtime()
+            if (remaining <= 0L) {
+                sleepTimerDeadline = null
+                sleepTimerMinutes = 0
+                if (isPlaying) {
+                    session.onUserPause()
+                    engine.pause()
+                }
+                hint = "定时关闭已到，播放已暂停"
+                return@LaunchedEffect
+            }
+            delay(remaining.coerceAtMost(1_000L))
         }
     }
     // 本机解码能力提示只在起播时出现一次，不阻塞播放；LibVLC 自带解码器，
@@ -916,9 +1093,16 @@ private fun PlayerSurface(
             levelFeedback = null
         }
     }
-    // 播放结束后自动接下一集；用户取消或没有下一集时不倒计时。
-    LaunchedEffect(playbackEnded, autoNextCancelled, request.nextEpisode?.mediaId) {
-        if (!playbackEnded || autoNextCancelled || request.nextEpisode == null) {
+    // 播放结束后自动接下一集；关闭连续播放、用户取消或没有下一集时不倒计时。
+    LaunchedEffect(
+        playbackEnded,
+        autoNextCancelled,
+        request.nextEpisode?.mediaId,
+        uiSettings.continuousPlay,
+    ) {
+        if (!uiSettings.continuousPlay || !playbackEnded || autoNextCancelled ||
+            request.nextEpisode == null
+        ) {
             autoNextCountdown = 0
             return@LaunchedEffect
         }
@@ -938,7 +1122,12 @@ private fun PlayerSurface(
     LaunchedEffect(danmaku.candidates.size, danmaku.loadedMediaId) {
         if (danmaku.candidates.isNotEmpty() &&
             settingsSection == null &&
-            !moreSheetVisible
+            !settingsHubVisible &&
+            !mediaInfoVisible &&
+            !sleepTimerVisible &&
+            !episodeStripVisible &&
+            quickMenu == null &&
+            !subtitleSettingsVisible
         ) {
             settingsSection = PlayerSettingsSection.DANMAKU
         }
@@ -1033,6 +1222,17 @@ private fun PlayerSurface(
         hint = "屏幕已锁定"
     }
 
+    fun toggleOrientation() {
+        val currentlyLandscape =
+            activity?.resources?.configuration?.orientation == Configuration.ORIENTATION_LANDSCAPE
+        orientationOverride = if (currentlyLandscape) {
+            PlayerOrientation.PORTRAIT
+        } else {
+            PlayerOrientation.LANDSCAPE
+        }
+        touchControls()
+    }
+
     fun unlockScreen() {
         locked = false
         lockBarVisible = false
@@ -1051,7 +1251,8 @@ private fun PlayerSurface(
     }
 
     val duration = durationMs.coerceAtLeast(request.durationMs)
-    val seekStep = 10_000L
+    val seekBackStep = uiSettings.seekBackwardMs.coerceIn(1_000L, 60_000L)
+    val seekForwardStep = uiSettings.seekForwardMs.coerceIn(1_000L, 60_000L)
     val speedLabel = playerSpeedLabel(playbackSpeed)
     val qualityLabel = pinnedQuality?.label ?: "自动"
     val subtitleLabel = when {
@@ -1092,6 +1293,30 @@ private fun PlayerSurface(
         else -> "自动匹配"
     }
     val audioLabel = trackState.selectedAudioLabel ?: "默认"
+    // 参考播放器左下角的技术信息：内核 + 当前画质/码率 + 剧集。
+    val engineTag = when (engineKind) {
+        PlayerEngineKind.EXO -> "EXO"
+        PlayerEngineKind.VLC -> "VLC"
+    }
+    val selectedVideo = trackState.video.firstOrNull { it.selected }
+    val displayQuality = pinnedQuality?.label ?: selectedVideo?.label ?: qualityLabel
+    val infoLine = buildList {
+        add(engineTag)
+        displayQuality.takeIf { it.isNotBlank() && it != "自动" }?.let(::add)
+        request.subtitle?.takeIf { it.isNotBlank() }?.let(::add)
+    }.joinToString(" · ")
+    // 参考播放器的技术信息是「内核 容器」两个短 token。
+    val containerTag = remember(request.streamUrl) {
+        val path = request.streamUrl.substringBefore('?').substringBefore('#')
+        val ext = path.substringAfterLast('.', "").lowercase()
+        if (ext.length in 2..5 && ext.all { it.isLetterOrDigit() }) ext.uppercase() else "STRM"
+    }
+    val techInfo = "$engineTag $containerTag"
+    val episodeTitle = request.subtitle
+    val sleepRemainingMinutes = sleepTimerDeadline?.let { deadline ->
+        val remaining = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+        ((remaining + 59_999L) / 60_000L).toInt().coerceAtLeast(1)
+    }
 
     // ── 电视遥控器 ──
     // 两段式焦点：
@@ -1102,13 +1327,31 @@ private fun PlayerSurface(
     val tvPlayFocus = remember { FocusRequester() }
     val tvUnlockFocus = remember { FocusRequester() }
 
+    // 遥控器操作提示只在控制栏刚出现或刚切到按钮焦点模式时显示几秒，
+    // 不再长期叠在画面上方。
+    var tvHintVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(isTv, controlsVisible, tvFocusMode, locked) {
+        if (isTv && controlsVisible && !locked) {
+            tvHintVisible = true
+            delay(6_000)
+            tvHintVisible = false
+        } else {
+            tvHintVisible = false
+        }
+    }
+
     LaunchedEffect(
         isTv,
         controlsVisible,
         tvFocusMode,
         locked,
-        moreSheetVisible,
         settingsSection,
+        settingsHubVisible,
+        mediaInfoVisible,
+        sleepTimerVisible,
+        episodeStripVisible,
+        quickMenu,
+        subtitleSettingsVisible,
         failedMessage,
         playbackEnded,
     ) {
@@ -1122,7 +1365,10 @@ private fun PlayerSurface(
             }
 
             // 错误页、结束页和面板有自己的焦点管理，不抢它们的焦点。
-            failedMessage != null || playbackEnded || moreSheetVisible || settingsSection != null -> Unit
+            failedMessage != null || playbackEnded || settingsSection != null ||
+                settingsHubVisible || mediaInfoVisible || sleepTimerVisible ||
+                episodeStripVisible || quickMenu != null ||
+                subtitleSettingsVisible -> Unit
 
             tvFocusMode && controlsVisible -> repeat(5) {
                 delay(60)
@@ -1140,19 +1386,27 @@ private fun PlayerSurface(
         }
     }
 
-    fun tvSeek(deltaMs: Long) {
+    /** 相对当前位置快进/快退，并显示中央目标时间提示。 */
+    fun seekBy(deltaMs: Long) {
         val target = PlaybackPlan.seekTarget(absolutePosition(), deltaMs, currentDuration())
         seekTo(target)
         seekFeedback = SeekFeedbackState(deltaMs >= 0, deltaMs, target)
         touchControls()
     }
 
+    fun tvSeek(deltaMs: Long) = seekBy(deltaMs)
+
     fun handleTvKey(event: androidx.compose.ui.input.key.KeyEvent): Boolean {
         if (!isTv) return false
         val code = event.nativeKeyEvent.keyCode
         // 设置面板打开时把方向键/确认键完全还给面板，否则 KeyUp 被根节点吞掉会导致
         // 面板里的 clickable 选项无法触发。
-        if (moreSheetVisible || settingsSection != null) return false
+        if (settingsSection != null || settingsHubVisible ||
+            mediaInfoVisible || sleepTimerVisible || episodeStripVisible ||
+            quickMenu != null
+        ) {
+            return false
+        }
         // 错误页 / 结束页 / 锁定态各自持有焦点，根节点不拦截按键。
         if (failedMessage != null || playbackEnded || locked) return false
 
@@ -1166,12 +1420,12 @@ private fun PlayerSurface(
                 }
 
                 KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                    tvSeek(-seekStep)
+                    tvSeek(-seekBackStep)
                     return true
                 }
 
                 KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                    tvSeek(seekStep)
+                    tvSeek(seekForwardStep)
                     return true
                 }
 
@@ -1195,7 +1449,7 @@ private fun PlayerSurface(
             if (event.type == KeyEventType.KeyDown &&
                 (code == KeyEvent.KEYCODE_MENU || code == KeyEvent.KEYCODE_INFO)
             ) {
-                moreSheetVisible = true
+                settingsHubVisible = true
                 return true
             }
             return false
@@ -1218,13 +1472,13 @@ private fun PlayerSurface(
 
             KeyEvent.KEYCODE_DPAD_LEFT,
             KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                tvSeek(-seekStep)
+                tvSeek(-seekBackStep)
                 true
             }
 
             KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                tvSeek(seekStep)
+                tvSeek(seekForwardStep)
                 true
             }
 
@@ -1245,7 +1499,7 @@ private fun PlayerSurface(
 
             KeyEvent.KEYCODE_MENU,
             KeyEvent.KEYCODE_INFO -> {
-                moreSheetVisible = true
+                settingsHubVisible = true
                 true
             }
 
@@ -1267,6 +1521,9 @@ private fun PlayerSurface(
         }
     }
 
+    BackHandler(enabled = subtitleSettingsVisible) { subtitleSettingsVisible = false }
+    BackHandler(enabled = quickMenu != null) { quickMenu = null }
+    BackHandler(enabled = episodeStripVisible) { episodeStripVisible = false }
     BackHandler(enabled = locked) { unlockScreen() }
     // TV 焦点模式：返回先退出焦点模式并收起控制栏，回到方向键快捷操作。
     BackHandler(enabled = isTv && tvFocusMode && !locked) {
@@ -1297,9 +1554,11 @@ private fun PlayerSurface(
                 },
             ),
     ) {
-        // 手机横屏的可用高度通常只有 360–430dp，右侧竖排按钮会和底部控制栏
-        // 抢空间；矮屏下把锁定入口并入操作行，只保留底部一体化控制栏。
-        val compactControls = maxHeight < 600.dp
+        // 横屏/竖屏两套控件布局：与 CapyPlayer 的播放器一致，宽屏把信息放在
+        // 左下、操作胶囊放在右下；竖屏把标题放在左上、操作行沉到底部。
+        val landscape = maxWidth > maxHeight
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        val boostStepPx = with(density) { 40.dp.toPx() }
         AndroidView(
             factory = { ctx -> FrameLayout(ctx) },
             update = { frame ->
@@ -1342,15 +1601,17 @@ private fun PlayerSurface(
                             }
                         },
                         onDoubleTap = { forward ->
-                            val delta = if (forward) seekStep else -seekStep
-                            val target = PlaybackPlan.seekTarget(
-                                absolutePosition(),
-                                delta,
-                                currentDuration(),
-                            )
-                            seekTo(target)
-                            seekFeedback = SeekFeedbackState(forward, delta, target)
-                            touchControls()
+                            val action = if (forward) {
+                                uiSettings.doubleTapRight
+                            } else {
+                                uiSettings.doubleTapLeft
+                            }
+                            when (action) {
+                                PlayerDoubleTapAction.SEEK_FORWARD -> seekBy(seekForwardStep)
+                                PlayerDoubleTapAction.SEEK_BACK -> seekBy(-seekBackStep)
+                                PlayerDoubleTapAction.PLAY_PAUSE -> togglePlayback()
+                                PlayerDoubleTapAction.NONE -> touchControls()
+                            }
                         },
                         onSeekDragStart = {
                             dragBaseMs = absolutePosition()
@@ -1371,11 +1632,14 @@ private fun PlayerSurface(
                             seekDragging = false
                             resetControlsTimer()
                         },
+                        levelEnabled = uiSettings.slideBrightnessVolume,
                         onVolumeDelta = { delta -> adjustVolume(delta) },
                         onBrightnessDelta = { delta -> adjustBrightness(delta) },
-                        onBoostStart = { startBoost() },
-                        onBoostChange = { delta -> adjustBoost(delta) },
-                        onBoostEnd = { endBoost() },
+                        onLongPressStart = { right -> beginLongPress(right) },
+                        onLongPressChange = { deltaPx ->
+                            adjustBoost(deltaPx / boostStepPx * 0.25f)
+                        },
+                        onLongPressEnd = { endLongPress() },
                     ),
             )
         } else {
@@ -1394,21 +1658,35 @@ private fun PlayerSurface(
             exit = fadeOut(animationSpec = tween(200)),
             modifier = Modifier.align(Alignment.TopCenter),
         ) {
-            PlayerTopBar(
+            PlayerTopChrome(
+                landscape = landscape,
                 title = title,
-                subtitle = request.subtitle,
+                serverLabel = serverLabel,
+                settings = uiSettings,
                 pictureInPictureAvailable = pipAvailable && !isTv,
+                danmakuEnabled = danmaku.enabled,
                 onBack = ::leavePlayer,
                 onPictureInPicture = { enterPictureInPicture() },
-                onOpenSettings = { moreSheetVisible = true },
+                onEngine = {
+                    touchControls()
+                    quickMenu = PlayerQuickMenu.ENGINE
+                },
+                onOpenDanmaku = {
+                    touchControls()
+                    quickMenu = PlayerQuickMenu.DANMAKU
+                },
+                onOpenScale = { settingsSection = PlayerSettingsSection.SCALE },
+                onSettings = { settingsHubVisible = true },
+                onInfo = { mediaInfoVisible = true },
+                onCast = { hint = "投屏功能尚未接入" },
             )
         }
 
-        if (isTv && controlsVisible && !locked) {
+        if (isTv && tvHintVisible && controlsVisible && !locked) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 92.dp),
+                    .padding(top = 128.dp),
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
@@ -1434,20 +1712,17 @@ private fun PlayerSurface(
         }
 
         AnimatedVisibility(
-            visible = controlsVisible && !locked && !compactControls && !isTv,
+            visible = controlsVisible && !locked && !isTv,
             enter = fadeIn(animationSpec = tween(200)),
             exit = fadeOut(animationSpec = tween(200)),
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 12.dp),
+            modifier = Modifier.fillMaxSize(),
         ) {
-            PlayerSideActions(
-                danmakuEnabled = danmaku.enabled,
-                pictureInPictureAvailable = pipAvailable && !isTv,
+            PlayerSideChrome(
+                landscape = landscape,
+                settings = uiSettings,
+                locked = false,
                 onLock = ::lockScreen,
-                onToggleDanmaku = ::toggleDanmakuFromControls,
-                onPictureInPicture = { enterPictureInPicture() },
-                onOpenSettings = { moreSheetVisible = true },
+                onRotate = ::toggleOrientation,
             )
         }
 
@@ -1457,17 +1732,18 @@ private fun PlayerSurface(
             exit = fadeOut(animationSpec = tween(200)),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
-            PlayerBottomControls(
+            PlayerBottomChrome(
+                landscape = landscape,
+                seriesTitle = title,
+                episodeTitle = episodeTitle,
+                techInfo = techInfo,
                 positionMs = positionMs,
                 durationMs = duration,
                 bufferedMs = bufferedMs,
                 isPlaying = isPlaying && !playbackEnded,
                 hasNext = request.nextEpisode != null,
                 speedLabel = speedLabel,
-                qualityLabel = qualityLabel,
-                audioLabel = audioLabel,
-                subtitleLabel = subtitleLabel,
-                danmakuEnabled = danmaku.enabled,
+                settings = uiSettings,
                 onSeek = { position ->
                     seekTo(position)
                     resetControlsTimer()
@@ -1477,19 +1753,183 @@ private fun PlayerSurface(
                     if (dragging) touchControls()
                 },
                 onTogglePlay = { togglePlayback() },
-                onSeekBack = { tvSeek(-seekStep) },
-                onSeekForward = { tvSeek(seekStep) },
+                onSeekBack = { seekBy(-seekBackStep) },
+                onSeekForward = { seekBy(seekForwardStep) },
                 onPlayNext = ::playNextNow,
-                onToggleDanmaku = ::toggleDanmakuFromControls,
-                onOpenSubtitle = { settingsSection = PlayerSettingsSection.SUBTITLE },
-                onOpenSpeed = { settingsSection = PlayerSettingsSection.SPEED },
+                onOpenSpeed = {
+                    touchControls()
+                    quickMenu = PlayerQuickMenu.SPEED
+                },
                 onOpenQuality = { settingsSection = PlayerSettingsSection.QUALITY },
-                onOpenAudio = { settingsSection = PlayerSettingsSection.AUDIO },
-                onOpenMore = { moreSheetVisible = true },
-                vrActive = vrEnabled,
-                onRecenterVr = ::recenterVr,
-                onLock = if (compactControls || isTv) ::lockScreen else null,
+                onOpenAudio = {
+                    touchControls()
+                    quickMenu = PlayerQuickMenu.AUDIO
+                },
+                onOpenSubtitle = {
+                    touchControls()
+                    quickMenu = PlayerQuickMenu.SUBTITLE
+                },
+                onOpenEpisodes = {
+                    touchControls()
+                    if (request.episodes.isEmpty()) {
+                        hint = "当前没有分集信息"
+                    } else {
+                        episodeStripVisible = !episodeStripVisible
+                    }
+                },
+                onDownload = { hint = "当前版本暂不支持视频下载" },
                 playFocusRequester = if (isTv) tvPlayFocus else null,
+                modifier = Modifier.graphicsLayer {
+                    alpha = if (episodeStripVisible) 0.35f else 1f
+                },
+            )
+        }
+
+        quickMenu?.let { menu ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    // 用 pointerInput 而不是 clickable：clickable 会变成可聚焦节点，
+                    // 遥控器焦点可能落到整块透明遮罩上。
+                    .pointerInput(Unit) {
+                        detectTapGestures { quickMenu = null }
+                    },
+            )
+            PlayerQuickMenuCard(
+                menu = menu,
+                engineLabel = engineKind.shortLabel,
+                speed = playbackSpeed,
+                audioTracks = trackState.audio.map {
+                    PlayerQuickTrack(
+                        id = it.id,
+                        label = it.label,
+                        selected = it.selected,
+                        detail = it.lang,
+                    )
+                },
+                subtitleOff = subtitlesOff,
+                subtitleTracks = trackState.text.map {
+                    PlayerQuickTrack(
+                        id = it.id,
+                        label = it.label,
+                        selected = it.selected && !subtitlesOff,
+                        detail = it.lang,
+                    )
+                },
+                danmakuEnabled = danmaku.enabled,
+                danmakuLoading = danmaku.loading,
+                danmakuMatchLabel = danmaku.matchLabel,
+                danmakuCount = danmaku.comments.size,
+                osdVisible = osdVisible,
+                onSelectSpeed = { value ->
+                    playbackSpeed = value
+                    engine.setSpeed(value)
+                    quickMenu = null
+                },
+                onSelectAudio = { id ->
+                    if (id == null) {
+                        audioSelection = PlaybackTrackSelection.Auto
+                        engine.selectAudioTrack(null)
+                    } else {
+                        trackState.audio.firstOrNull { it.id == id }?.let(::chooseTrack)
+                    }
+                    quickMenu = null
+                },
+                onSelectSubtitle = { id ->
+                    if (id == null) {
+                        disableSubtitles()
+                    } else {
+                        trackState.text.firstOrNull { it.id == id }?.let(::chooseTrack)
+                    }
+                    quickMenu = null
+                },
+                onOpenSubtitleSearch = {
+                    quickMenu = null
+                    settingsSection = PlayerSettingsSection.SUBTITLE
+                },
+                onOpenSubtitleSettings = {
+                    quickMenu = null
+                    subtitleSettingsVisible = true
+                },
+                onToggleDanmaku = { onDanmakuEnabledChange(it) },
+                onOpenDanmakuSearch = {
+                    quickMenu = null
+                    settingsSection = PlayerSettingsSection.DANMAKU
+                },
+                onOpenDanmakuSettings = {
+                    quickMenu = null
+                    settingsSection = PlayerSettingsSection.DANMAKU
+                },
+                onOpenEngine = {
+                    quickMenu = null
+                    settingsSection = PlayerSettingsSection.ENGINE
+                },
+                onToggleOsd = {
+                    osdVisible = !osdVisible
+                    quickMenu = null
+                },
+                modifier = Modifier
+                    .align(
+                        if (menu == PlayerQuickMenu.ENGINE) {
+                            Alignment.TopEnd
+                        } else {
+                            Alignment.BottomEnd
+                        },
+                    )
+                    .padding(
+                        end = if (landscape) 64.dp else 16.dp,
+                        top = if (menu == PlayerQuickMenu.ENGINE) {
+                            if (landscape) 84.dp else 78.dp
+                        } else {
+                            0.dp
+                        },
+                        bottom = if (menu == PlayerQuickMenu.ENGINE) {
+                            0.dp
+                        } else {
+                            if (landscape) 132.dp else 150.dp
+                        },
+                    ),
+            )
+        }
+
+        if (osdVisible) {
+            PlayerOsdOverlay(
+                engine = engineKind.shortLabel,
+                quality = displayQuality,
+                audio = audioLabel,
+                subtitle = subtitleLabel,
+                positionMs = positionMs,
+                durationMs = duration,
+                bufferedMs = bufferedMs,
+                host = serverLabel,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(
+                        end = if (landscape) 64.dp else 16.dp,
+                        top = if (landscape) 140.dp else 100.dp,
+                    ),
+            )
+        }
+
+        if (episodeStripVisible) {
+            // 点空白处关闭分集条；卡片自己消费点击。
+            // 同样不能用 clickable，否则遥控器焦点会停在这层全屏遮罩上。
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures { episodeStripVisible = false }
+                    },
+            )
+            PlayerEpisodeStrip(
+                episodes = request.episodes,
+                currentMediaId = request.mediaId,
+                onSelect = { episode ->
+                    episodeStripVisible = false
+                    onSelectEpisode(episode.mediaId)
+                },
+                landscape = landscape,
+                modifier = Modifier.align(Alignment.BottomCenter),
             )
         }
 
@@ -1517,7 +1957,7 @@ private fun PlayerSurface(
             }
         }
 
-        boostSpeed.takeIf { it > 0f }?.let { speed ->
+        boostSpeed.takeIf { it > 0f && uiSettings.showLongPressHint }?.let { speed ->
             Box(
                 modifier = Modifier.align(Alignment.Center),
                 contentAlignment = Alignment.Center,
@@ -1610,11 +2050,13 @@ private fun PlayerSurface(
             )
         }
 
-        if (moreSheetVisible) {
-            PlayerMoreSheet(
+        if (settingsHubVisible) {
+            PlayerSettingsHubSheet(
+                settings = uiSettings,
+                onSettingsChange = onUiSettingsChange,
                 entries = playerMenuEntries(
                     speed = speedLabel,
-                    quality = qualityLabel,
+                    quality = displayQuality,
                     audio = audioLabel,
                     subtitle = subtitleLabel,
                     scale = resizeModeLabel(resizeMode),
@@ -1622,14 +2064,91 @@ private fun PlayerSurface(
                     vr = if (vrEnabled) resolvedVr.summary() else "关闭",
                     engine = engineKind.shortLabel,
                 ),
-                onSelect = { section ->
-                    moreSheetVisible = false
+                onSelectSection = { section ->
+                    settingsHubVisible = false
                     settingsSection = section
                 },
-                onDismiss = { moreSheetVisible = false },
+                onOpenInfo = {
+                    settingsHubVisible = false
+                    mediaInfoVisible = true
+                },
+                onOpenSleepTimer = {
+                    settingsHubVisible = false
+                    sleepTimerVisible = true
+                },
+                onDismiss = { settingsHubVisible = false },
+                sleepTimerLabel = sleepTimerMinutes
+                    .takeIf { it > 0 }
+                    ?.let { "$it 分钟" }
+                    ?: "当前会话",
+                onLock = ::lockScreen,
                 autoFocus = isTv,
                 sideSheet = isTv,
-                onLock = if (isTv) ::lockScreen else null,
+            )
+        }
+
+        if (mediaInfoVisible) {
+            PlayerMediaInfoSheet(
+                title = title,
+                subtitle = request.subtitle,
+                engine = engineKind.label,
+                quality = displayQuality,
+                audio = audioLabel,
+                subtitleTrack = subtitleLabel,
+                durationMs = duration,
+                server = serverLabel,
+                onDismiss = { mediaInfoVisible = false },
+                autoFocus = isTv,
+                sideSheet = isTv,
+            )
+        }
+
+        if (sleepTimerVisible) {
+            PlayerSleepTimerSheet(
+                remainingMinutes = sleepRemainingMinutes,
+                selectedMinutes = sleepTimerMinutes.takeIf { it > 0 },
+                onSelect = { minutes ->
+                    if (minutes <= 0) {
+                        sleepTimerMinutes = 0
+                        sleepTimerDeadline = null
+                        hint = "已关闭定时关闭"
+                    } else {
+                        sleepTimerMinutes = minutes
+                        sleepTimerDeadline =
+                            SystemClock.elapsedRealtime() + minutes * 60_000L
+                        hint = "将在 $minutes 分钟后暂停播放"
+                    }
+                    sleepTimerVisible = false
+                },
+                onDismiss = { sleepTimerVisible = false },
+                autoFocus = isTv,
+                sideSheet = isTv,
+            )
+        }
+
+        if (subtitleSettingsVisible) {
+            PlayerSubtitleSettingsSheet(
+                settings = uiSettings,
+                onSettingsChange = onUiSettingsChange,
+                tracks = trackState.text.map {
+                    PlayerQuickTrack(
+                        id = it.id,
+                        label = it.label,
+                        selected = it.selected && !subtitlesOff,
+                        detail = it.lang,
+                    )
+                },
+                subtitlesOff = subtitlesOff,
+                onSelectTrack = { id ->
+                    if (id == null) {
+                        disableSubtitles()
+                    } else {
+                        trackState.text.firstOrNull { it.id == id }?.let(::chooseTrack)
+                    }
+                },
+                onDismiss = { subtitleSettingsVisible = false },
+                autoFocus = isTv,
+                sideSheet = landscape || isTv,
             )
         }
 
@@ -1911,9 +2430,10 @@ private fun Modifier.playerTouch(
     onBrightnessDelta: (Float) -> Unit,
     vrMode: Boolean = false,
     onVrDrag: (Float, Float) -> Unit = { _, _ -> },
-    onBoostStart: (Float) -> Unit = {},
-    onBoostChange: (Float) -> Unit = {},
-    onBoostEnd: () -> Unit = {},
+    levelEnabled: Boolean = true,
+    onLongPressStart: (right: Boolean) -> Unit = {},
+    onLongPressChange: (deltaX: Float) -> Unit = {},
+    onLongPressEnd: () -> Unit = {},
 ): Modifier {
     if (!enabled) return this
     val tap = pointerInput(enabled) {
@@ -1946,7 +2466,6 @@ private fun Modifier.playerTouch(
         val edgePx = 16.dp.toPx()
         val longPressTimeout = viewConfiguration.longPressTimeoutMillis
         val slop = viewConfiguration.touchSlop
-        val boostStepPx = 40.dp.toPx()
 
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
@@ -1961,7 +2480,6 @@ private fun Modifier.playerTouch(
             var total = androidx.compose.ui.geometry.Offset.Zero
             var mode = GestureMode.Pending
             var levelRight = startX >= size.width / 2f
-            var boostAccum = 0f
             val downTime = down.uptimeMillis
 
             while (true) {
@@ -1980,8 +2498,8 @@ private fun Modifier.playerTouch(
                 }
                 if (event == null) {
                     if (mode == GestureMode.Pending) {
-                        mode = GestureMode.Boost
-                        onBoostStart(2f)
+                        mode = GestureMode.LongPress
+                        onLongPressStart(startX >= size.width / 2f)
                     }
                     continue
                 }
@@ -2003,8 +2521,8 @@ private fun Modifier.playerTouch(
                         }
                         if (mode == GestureMode.Seek) onSeekDragStart()
                     } else if (now - downTime >= longPressTimeout) {
-                        mode = GestureMode.Boost
-                        onBoostStart(2f)
+                        mode = GestureMode.LongPress
+                        onLongPressStart(startX >= size.width / 2f)
                     }
                 }
 
@@ -2016,18 +2534,15 @@ private fun Modifier.playerTouch(
 
                     GestureMode.Level -> {
                         change.consume()
-                        val value = -delta.y / size.height
-                        if (levelRight) onVolumeDelta(value) else onBrightnessDelta(value)
+                        if (levelEnabled) {
+                            val value = -delta.y / size.height
+                            if (levelRight) onVolumeDelta(value) else onBrightnessDelta(value)
+                        }
                     }
 
-                    GestureMode.Boost -> {
+                    GestureMode.LongPress -> {
                         change.consume()
-                        boostAccum += delta.x
-                        val steps = (boostAccum / boostStepPx).toInt()
-                        if (steps != 0) {
-                            boostAccum -= steps * boostStepPx
-                            onBoostChange(steps * 0.25f)
-                        }
+                        if (delta.x != 0f) onLongPressChange(delta.x)
                     }
 
                     GestureMode.Pending -> Unit
@@ -2036,14 +2551,14 @@ private fun Modifier.playerTouch(
 
             when (mode) {
                 GestureMode.Seek -> onSeekDragEnd()
-                GestureMode.Boost -> onBoostEnd()
+                GestureMode.LongPress -> onLongPressEnd()
                 else -> Unit
             }
         }
     }
 }
 
-private enum class GestureMode { Pending, Seek, Level, Boost }
+private enum class GestureMode { Pending, Seek, Level, LongPress }
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this

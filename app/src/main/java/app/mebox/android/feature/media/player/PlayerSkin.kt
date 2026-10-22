@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.TextStyle
@@ -222,13 +223,11 @@ fun PlayerIconButton(
     var focused by remember { mutableStateOf(false) }
     val background = when {
         active -> PlayerSkin.AccentSoft
-        focused -> PlayerSkin.White10
         glass -> PlayerSkin.GlassFill
         else -> Color.Transparent
     }
     val border = when {
         active -> PlayerSkin.AccentLine
-        focused -> PlayerSkin.White28
         glass -> PlayerSkin.GlassBorder
         else -> Color.Transparent
     }
@@ -252,6 +251,8 @@ fun PlayerIconButton(
             .clip(shape)
             .background(background)
             .border(1.dp, border, shape)
+            // 电视遥控器焦点：统一的 2dp 描边 + 轻微放大。
+            .playerTvFocus(focused, shape)
             .onFocusChanged { focused = it.isFocused }
             .clickable(
                 interactionSource = interaction,
@@ -362,10 +363,26 @@ fun PlayPauseGlyph(
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
     tint: Color = Color.White,
+    shadow: Boolean = false,
 ) {
     Canvas(modifier) {
         if (isPlaying) {
             val barWidth = size.width * 0.24f
+            if (shadow) {
+                val offset = 2.dp.toPx()
+                drawRoundRect(
+                    color = Color(0x66000000),
+                    topLeft = Offset(size.width * 0.18f, size.height * 0.1f + offset),
+                    size = Size(barWidth, size.height * 0.8f),
+                    cornerRadius = CornerRadius(3f),
+                )
+                drawRoundRect(
+                    color = Color(0x66000000),
+                    topLeft = Offset(size.width * 0.58f, size.height * 0.1f + offset),
+                    size = Size(barWidth, size.height * 0.8f),
+                    cornerRadius = CornerRadius(3f),
+                )
+            }
             drawRoundRect(
                 color = tint,
                 topLeft = Offset(size.width * 0.18f, size.height * 0.1f),
@@ -384,6 +401,11 @@ fun PlayPauseGlyph(
                 lineTo(size.width * 0.9f, size.height * 0.5f)
                 lineTo(size.width * 0.22f, size.height * 0.92f)
                 close()
+            }
+            if (shadow) {
+                translate(0f, 2.dp.toPx()) {
+                    drawPath(path, Color(0x66000000))
+                }
             }
             drawPath(path, tint)
         }

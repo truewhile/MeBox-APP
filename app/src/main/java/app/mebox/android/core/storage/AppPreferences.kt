@@ -1,6 +1,10 @@
 package app.mebox.android.core.storage
 
 import android.content.Context
+import app.mebox.android.core.player.PlayerDoubleTapAction
+import app.mebox.android.core.player.PlayerLongPressAction
+import app.mebox.android.core.player.PlayerOrientation
+import app.mebox.android.core.player.PlayerUiSettings
 import java.util.UUID
 
 /** 非敏感的本地偏好：最后地址、账号分区与设备标识。 */
@@ -132,6 +136,126 @@ class AppPreferences(context: Context) {
         get() = prefs.getBoolean(KEY_AUDIO_MIX, true)
         set(value) = prefs.edit().putBoolean(KEY_AUDIO_MIX, value).apply()
 
+    /** 播放器界面与手势偏好，字段含义见 [PlayerUiSettings]。 */
+    var playerUiSettings: PlayerUiSettings
+        get() = PlayerUiSettings(
+            doubleTapLeft = PlayerDoubleTapAction.fromKey(prefs.getString(KEY_PLAYER_DOUBLE_TAP_LEFT, null))
+                ?: PlayerUiSettings.Default.doubleTapLeft,
+            doubleTapRight = PlayerDoubleTapAction.fromKey(prefs.getString(KEY_PLAYER_DOUBLE_TAP_RIGHT, null))
+                ?: PlayerUiSettings.Default.doubleTapRight,
+            longPressLeft = PlayerLongPressAction.fromKey(prefs.getString(KEY_PLAYER_LONG_PRESS_LEFT, null))
+                ?: PlayerUiSettings.Default.longPressLeft,
+            longPressRight = PlayerLongPressAction.fromKey(prefs.getString(KEY_PLAYER_LONG_PRESS_RIGHT, null))
+                ?: PlayerUiSettings.Default.longPressRight,
+            longPressSpeedAdjust = prefs.getBoolean(
+                KEY_PLAYER_LONG_PRESS_ADJUST,
+                PlayerUiSettings.Default.longPressSpeedAdjust,
+            ),
+            slideBrightnessVolume = prefs.getBoolean(
+                KEY_PLAYER_SLIDE_LEVEL,
+                PlayerUiSettings.Default.slideBrightnessVolume,
+            ),
+            seekBackwardMs = prefs.getLong(
+                KEY_PLAYER_SEEK_BACK_MS,
+                PlayerUiSettings.Default.seekBackwardMs,
+            ),
+            seekForwardMs = prefs.getLong(
+                KEY_PLAYER_SEEK_FORWARD_MS,
+                PlayerUiSettings.Default.seekForwardMs,
+            ),
+            simpleMode = prefs.getBoolean(KEY_PLAYER_SIMPLE_MODE, PlayerUiSettings.Default.simpleMode),
+            showInfoIcon = prefs.getBoolean(KEY_PLAYER_SHOW_INFO, PlayerUiSettings.Default.showInfoIcon),
+            showDanmakuIcon = prefs.getBoolean(
+                KEY_PLAYER_SHOW_DANMAKU,
+                PlayerUiSettings.Default.showDanmakuIcon,
+            ),
+            showLockButton = prefs.getBoolean(KEY_PLAYER_SHOW_LOCK, PlayerUiSettings.Default.showLockButton),
+            showRotateButton = prefs.getBoolean(
+                KEY_PLAYER_SHOW_ROTATE,
+                PlayerUiSettings.Default.showRotateButton,
+            ),
+            showPictureInPictureButton = prefs.getBoolean(
+                KEY_PLAYER_SHOW_PIP,
+                PlayerUiSettings.Default.showPictureInPictureButton,
+            ),
+            showCastButton = prefs.getBoolean(KEY_PLAYER_SHOW_CAST, PlayerUiSettings.Default.showCastButton),
+            showQualityButton = prefs.getBoolean(
+                KEY_PLAYER_SHOW_QUALITY,
+                PlayerUiSettings.Default.showQualityButton,
+            ),
+            showCrossServerButton = prefs.getBoolean(
+                KEY_PLAYER_SHOW_CROSS_SERVER,
+                PlayerUiSettings.Default.showCrossServerButton,
+            ),
+            showDownloadButton = prefs.getBoolean(
+                KEY_PLAYER_SHOW_DOWNLOAD,
+                PlayerUiSettings.Default.showDownloadButton,
+            ),
+            rollingTime = prefs.getBoolean(KEY_PLAYER_ROLLING_TIME, PlayerUiSettings.Default.rollingTime),
+            showLongPressHint = prefs.getBoolean(
+                KEY_PLAYER_SHOW_LONG_PRESS_HINT,
+                PlayerUiSettings.Default.showLongPressHint,
+            ),
+            continuousPlay = prefs.getBoolean(
+                KEY_PLAYER_CONTINUOUS_PLAY,
+                PlayerUiSettings.Default.continuousPlay,
+            ),
+            autoPictureInPicture = prefs.getBoolean(
+                KEY_PLAYER_AUTO_PIP,
+                PlayerUiSettings.Default.autoPictureInPicture,
+            ),
+            orientation = PlayerOrientation.fromKey(
+                prefs.getString(KEY_PLAYER_ORIENTATION, null),
+            ),
+            subtitleVerticalPosition = prefs.getInt(
+                KEY_PLAYER_SUBTITLE_POSITION,
+                PlayerUiSettings.Default.subtitleVerticalPosition,
+            ),
+            subtitleScale = prefs.getFloat(
+                KEY_PLAYER_SUBTITLE_SCALE,
+                PlayerUiSettings.Default.subtitleScale,
+            ),
+            subtitleTextColor = prefs.getLong(
+                KEY_PLAYER_SUBTITLE_COLOR,
+                PlayerUiSettings.Default.subtitleTextColor,
+            ),
+            subtitleOutline = prefs.getFloat(
+                KEY_PLAYER_SUBTITLE_OUTLINE,
+                PlayerUiSettings.Default.subtitleOutline,
+            ),
+        )
+        set(value) {
+            prefs.edit()
+                .putString(KEY_PLAYER_DOUBLE_TAP_LEFT, value.doubleTapLeft.key)
+                .putString(KEY_PLAYER_DOUBLE_TAP_RIGHT, value.doubleTapRight.key)
+                .putString(KEY_PLAYER_LONG_PRESS_LEFT, value.longPressLeft.key)
+                .putString(KEY_PLAYER_LONG_PRESS_RIGHT, value.longPressRight.key)
+                .putBoolean(KEY_PLAYER_LONG_PRESS_ADJUST, value.longPressSpeedAdjust)
+                .putBoolean(KEY_PLAYER_SLIDE_LEVEL, value.slideBrightnessVolume)
+                .putLong(KEY_PLAYER_SEEK_BACK_MS, value.seekBackwardMs)
+                .putLong(KEY_PLAYER_SEEK_FORWARD_MS, value.seekForwardMs)
+                .putBoolean(KEY_PLAYER_SIMPLE_MODE, value.simpleMode)
+                .putBoolean(KEY_PLAYER_SHOW_INFO, value.showInfoIcon)
+                .putBoolean(KEY_PLAYER_SHOW_DANMAKU, value.showDanmakuIcon)
+                .putBoolean(KEY_PLAYER_SHOW_LOCK, value.showLockButton)
+                .putBoolean(KEY_PLAYER_SHOW_ROTATE, value.showRotateButton)
+                .putBoolean(KEY_PLAYER_SHOW_PIP, value.showPictureInPictureButton)
+                .putBoolean(KEY_PLAYER_SHOW_CAST, value.showCastButton)
+                .putBoolean(KEY_PLAYER_SHOW_QUALITY, value.showQualityButton)
+                .putBoolean(KEY_PLAYER_SHOW_CROSS_SERVER, value.showCrossServerButton)
+                .putBoolean(KEY_PLAYER_SHOW_DOWNLOAD, value.showDownloadButton)
+                .putBoolean(KEY_PLAYER_ROLLING_TIME, value.rollingTime)
+                .putBoolean(KEY_PLAYER_SHOW_LONG_PRESS_HINT, value.showLongPressHint)
+                .putBoolean(KEY_PLAYER_CONTINUOUS_PLAY, value.continuousPlay)
+                .putBoolean(KEY_PLAYER_AUTO_PIP, value.autoPictureInPicture)
+                .putString(KEY_PLAYER_ORIENTATION, value.orientation.key)
+                .putInt(KEY_PLAYER_SUBTITLE_POSITION, value.subtitleVerticalPosition)
+                .putFloat(KEY_PLAYER_SUBTITLE_SCALE, value.subtitleScale)
+                .putLong(KEY_PLAYER_SUBTITLE_COLOR, value.subtitleTextColor)
+                .putFloat(KEY_PLAYER_SUBTITLE_OUTLINE, value.subtitleOutline)
+                .apply()
+        }
+
     /**
      * 设备 ID 由安装随机生成，不使用 IMEI/MAC 等硬件标识。
      */
@@ -176,6 +300,33 @@ class AppPreferences(context: Context) {
         const val KEY_VR_LENS_CORRECTION = "vr_lens_correction"
         const val KEY_HOME_READING_BAR = "home_reading_bar"
         const val KEY_AUDIO_MIX = "reader_audio_mix_other_apps"
+        const val KEY_PLAYER_DOUBLE_TAP_LEFT = "player_double_tap_left"
+        const val KEY_PLAYER_DOUBLE_TAP_RIGHT = "player_double_tap_right"
+        const val KEY_PLAYER_LONG_PRESS_LEFT = "player_long_press_left"
+        const val KEY_PLAYER_LONG_PRESS_RIGHT = "player_long_press_right"
+        const val KEY_PLAYER_LONG_PRESS_ADJUST = "player_long_press_adjust"
+        const val KEY_PLAYER_SLIDE_LEVEL = "player_slide_level"
+        const val KEY_PLAYER_SEEK_BACK_MS = "player_seek_back_ms"
+        const val KEY_PLAYER_SEEK_FORWARD_MS = "player_seek_forward_ms"
+        const val KEY_PLAYER_SIMPLE_MODE = "player_simple_mode"
+        const val KEY_PLAYER_SHOW_INFO = "player_show_info"
+        const val KEY_PLAYER_SHOW_DANMAKU = "player_show_danmaku"
+        const val KEY_PLAYER_SHOW_LOCK = "player_show_lock"
+        const val KEY_PLAYER_SHOW_ROTATE = "player_show_rotate"
+        const val KEY_PLAYER_SHOW_PIP = "player_show_pip"
+        const val KEY_PLAYER_SHOW_CAST = "player_show_cast"
+        const val KEY_PLAYER_SHOW_QUALITY = "player_show_quality"
+        const val KEY_PLAYER_SHOW_CROSS_SERVER = "player_show_cross_server"
+        const val KEY_PLAYER_SHOW_DOWNLOAD = "player_show_download"
+        const val KEY_PLAYER_ROLLING_TIME = "player_rolling_time"
+        const val KEY_PLAYER_SHOW_LONG_PRESS_HINT = "player_show_long_press_hint"
+        const val KEY_PLAYER_CONTINUOUS_PLAY = "player_continuous_play"
+        const val KEY_PLAYER_AUTO_PIP = "player_auto_pip"
+        const val KEY_PLAYER_ORIENTATION = "player_orientation"
+        const val KEY_PLAYER_SUBTITLE_POSITION = "player_subtitle_position"
+        const val KEY_PLAYER_SUBTITLE_SCALE = "player_subtitle_scale"
+        const val KEY_PLAYER_SUBTITLE_COLOR = "player_subtitle_color"
+        const val KEY_PLAYER_SUBTITLE_OUTLINE = "player_subtitle_outline"
         const val KEY_SERVER_SNAPSHOT_ADDRESS = "server_snapshot_address"
         const val KEY_SERVER_SNAPSHOT_INFO = "server_snapshot_info"
     }

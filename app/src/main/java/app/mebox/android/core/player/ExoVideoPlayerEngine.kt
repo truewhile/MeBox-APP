@@ -2,6 +2,7 @@ package app.mebox.android.core.player
 
 import android.content.Context
 import android.graphics.Color
+import android.util.TypedValue
 import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.view.Surface
@@ -71,6 +72,7 @@ class ExoVideoPlayerEngine(
      * 双语字幕会重叠，所以这里用额外的 [SubtitleView] 接管渲染。
      */
     private var subtitleOverlay: SubtitleView? = null
+    private var subtitleStyle = EngineSubtitleStyle()
     private var resizeMode: EngineResizeMode = EngineResizeMode.FIT
 
     /** VR 模式下的全景视图；null 表示普通播放。 */
@@ -385,6 +387,7 @@ class ExoVideoPlayerEngine(
             // 再用 App 固定的白字黑描边覆盖。
             setUserDefaultTextSize()
             setStyle(subtitleCaptionStyle())
+            applySubtitleStyle(this)
             setLayoutParams(layoutParams)
         }
         builtIn.visibility = View.GONE
@@ -408,6 +411,35 @@ class ExoVideoPlayerEngine(
         Color.BLACK,
         null,
     )
+
+    override fun setSubtitleStyle(style: EngineSubtitleStyle) {
+        subtitleStyle = style
+        subtitleOverlay?.let(::applySubtitleStyle)
+    }
+
+    private fun applySubtitleStyle(view: SubtitleView) {
+        val style = subtitleStyle
+        view.setFixedTextSize(
+            TypedValue.COMPLEX_UNIT_SP,
+            18f * style.scale.coerceIn(0.5f, 2.5f),
+        )
+        val bottomFraction = ((100 - style.verticalPosition).coerceIn(0, 100)) / 100f
+        view.setBottomPaddingFraction(bottomFraction)
+        view.setStyle(
+            CaptionStyleCompat(
+                style.textColor,
+                Color.TRANSPARENT,
+                Color.TRANSPARENT,
+                if (style.outline > 0f) {
+                    CaptionStyleCompat.EDGE_TYPE_OUTLINE
+                } else {
+                    CaptionStyleCompat.EDGE_TYPE_NONE
+                },
+                Color.BLACK,
+                null,
+            ),
+        )
+    }
 
     override fun setMedia(media: EngineMedia, startPositionMs: Long, autoPlay: Boolean) {
         // 换集时重置中转尝试；同一集内部切换到中转地址不会重置，避免循环。

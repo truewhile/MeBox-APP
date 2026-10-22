@@ -15,6 +15,7 @@ import app.mebox.android.core.media.LibrarySort
 import app.mebox.android.core.media.LibrarySortSelection
 import app.mebox.android.core.media.LibraryTagTab
 import app.mebox.android.core.media.MediaContinue
+import app.mebox.android.core.media.MediaImageUrls
 import app.mebox.android.core.media.MediaRepository
 import app.mebox.android.core.media.PlaybackPlan
 import app.mebox.android.core.media.PlaybackUrls
@@ -92,6 +93,15 @@ data class PlaybackNext(
     val title: String,
 )
 
+/** 播放页分集条里的一项。图片是由服务器图片代理生成好的封面地址。 */
+data class PlaybackEpisode(
+    val mediaId: String,
+    val label: String,
+    val title: String,
+    val imageUrl: String? = null,
+    val durationMs: Long = 0L,
+)
+
 data class PlaybackRequest(
     val mediaId: String,
     val title: String,
@@ -116,6 +126,8 @@ data class PlaybackRequest(
     /** PGS/DVD 等图片字幕：ExoPlayer 不能渲染，只用于在设置面板里说明。 */
     val imageSubtitles: List<String> = emptyList(),
     val nextEpisode: PlaybackNext? = null,
+    /** 当前季/系列的全部分集；分集条使用。 */
+    val episodes: List<PlaybackEpisode> = emptyList(),
     /** 设备解码能力说明，例如“本机没有 HEVC 解码器”。 */
     val decoderNote: String? = null,
 )
@@ -1301,7 +1313,10 @@ class MediaViewModel(
                     playerRequest = PlaybackRequest(
                         mediaId = media.id,
                         title = media.title,
-                        subtitle = media.displayEpisode.ifBlank { media.episodeTitle }.ifBlank { null },
+                        subtitle = listOf(media.displayEpisode, media.episodeTitle)
+                            .filter { it.isNotBlank() }
+                            .joinToString(" ")
+                            .ifBlank { media.title },
                         streamUrl = streamUrl,
                         proxyUrl = proxyUrl,
                         refreshUrl = refreshUrl,
@@ -1316,6 +1331,24 @@ class MediaViewModel(
                                 title = item.displayEpisode.ifBlank { item.episodeTitle }.ifBlank { item.title },
                             )
                         },
+                        episodes = episodes.map { item ->
+                            PlaybackEpisode(
+                                mediaId = item.id,
+                                label = if (item.episodeNum > 0) {
+                                    "第 ${item.episodeNum} 集"
+                                } else {
+                                    item.displayEpisode.ifBlank { item.title }
+                                },
+                                title = item.episodeTitle.ifBlank { item.title },
+                                imageUrl = MediaImageUrls.backdrop(
+                                    origin,
+                                    item.backdropUrl.ifBlank { item.posterUrl },
+                                    width = 480,
+                                    height = 270,
+                                ),
+                                durationMs = item.durationSec.coerceAtLeast(0) * 1_000L,
+                            )
+                        },
                     ),
                 )
             }
@@ -1324,6 +1357,13 @@ class MediaViewModel(
 
     fun playNextEpisode() {
         lastNextMedia?.let(::preparePlayback)
+    }
+
+    /** 播放页分集条选择：按 mediaId 在当前剧集列表里重新起播。 */
+    fun playEpisodeById(mediaId: String) {
+        if (_state.value.playerRequest?.mediaId == mediaId) return
+        val target = _state.value.episodes.firstOrNull { it.id == mediaId } ?: return
+        preparePlayback(target)
     }
 
     // ── 弹幕 ──

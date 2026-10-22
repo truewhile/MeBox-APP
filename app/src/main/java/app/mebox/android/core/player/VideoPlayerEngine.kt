@@ -53,6 +53,15 @@ data class EngineMedia(
     val subtitlePreference: SubtitlePreference = SubtitlePreference(),
 )
 
+/** 字幕外观：位置/缩放/颜色/描边。不支持的内核保持默认值即可。 */
+data class EngineSubtitleStyle(
+    /** 0-100，95 表示贴近底部。 */
+    val verticalPosition: Int = 95,
+    val scale: Float = 1f,
+    val textColor: Int = -1,
+    val outline: Float = 0f,
+)
+
 /** 画面缩放策略，两个内核各自映射到自己的实现。 */
 enum class EngineResizeMode { FIT, FILL, ZOOM }
 
@@ -114,6 +123,9 @@ interface VideoPlayerEngine {
 
     fun setSpeed(speed: Float)
     fun setResizeMode(mode: EngineResizeMode)
+
+    /** 字幕外观；支持的内核在下次绘制/装载时应用，不支持的内核忽略。 */
+    fun setSubtitleStyle(style: EngineSubtitleStyle) = Unit
 
     /**
      * 内核是否支持 VR / 全景渲染。

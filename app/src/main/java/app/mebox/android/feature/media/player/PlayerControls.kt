@@ -94,6 +94,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
@@ -923,7 +924,7 @@ fun playerMenuEntries(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PlayerSheetScaffold(
+internal fun PlayerSheetScaffold(
     title: String,
     subtitle: String? = null,
     onDismiss: () -> Unit,
@@ -964,7 +965,7 @@ private fun PlayerSheetScaffold(
                                 spotColor = Color.Black.copy(alpha = 0.6f),
                             )
                             .clip(shape)
-                            .background(Color(0xF2101216))
+                            .background(Color(0xFF0F1114))
                             .border(1.dp, PlayerSkin.White14, shape)
                             // 面板空白区域的点击不穿透到遮罩，避免误关。
                             .pointerInput(Unit) { detectTapGestures { } }
@@ -990,7 +991,7 @@ private fun PlayerSheetScaffold(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xF2101216),
+        containerColor = Color(0xFF0F1114),
         contentColor = PlayerSkin.TextPrimary,
         scrimColor = PlayerSkin.Scrim,
         shape = RoundedCornerShape(topStart = PlayerSkin.RadiusSheet, topEnd = PlayerSkin.RadiusSheet),
@@ -1064,7 +1065,7 @@ private fun PlayerSheetContent(
 }
 
 @Composable
-private fun rememberFirstFocus(autoFocus: Boolean): FocusRequester {
+internal fun rememberFirstFocus(autoFocus: Boolean): FocusRequester {
     val firstFocus = remember { FocusRequester() }
     LaunchedEffect(autoFocus) {
         if (!autoFocus) return@LaunchedEffect
@@ -1134,7 +1135,7 @@ private fun PlayerMenuRow(
 }
 
 @Composable
-private fun PlayerMenuActionRow(
+internal fun PlayerMenuActionRow(
     icon: ImageVector,
     label: String,
     value: String,
@@ -1142,17 +1143,20 @@ private fun PlayerMenuActionRow(
     modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val tv = LocalPlayerIsTv.current
+    val shape = RoundedCornerShape(PlayerSkin.RadiusControl)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 54.dp)
-            .clip(RoundedCornerShape(PlayerSkin.RadiusControl))
+            .heightIn(min = if (tv) 60.dp else 54.dp)
+            .clip(shape)
             .background(if (focused) PlayerSkin.White06 else Color.Transparent)
             .border(
                 1.dp,
                 if (focused) PlayerSkin.White28 else Color.Transparent,
-                RoundedCornerShape(PlayerSkin.RadiusControl),
+                shape,
             )
+            .playerTvFocus(focused, shape)
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 8.dp),
@@ -1436,10 +1440,11 @@ private fun GridChoice(
     modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val tv = LocalPlayerIsTv.current
     val shape = RoundedCornerShape(11.dp)
     Box(
         modifier = modifier
-            .height(44.dp)
+            .height(if (tv) 52.dp else 44.dp)
             .clip(shape)
             .background(if (choice.selected) PlayerSkin.AccentSoft else PlayerSkin.White06)
             .border(
@@ -1451,6 +1456,7 @@ private fun GridChoice(
                 },
                 shape,
             )
+            .playerTvFocus(focused, shape)
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
@@ -1475,11 +1481,12 @@ private fun PlayerChoiceRow(
     modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val tv = LocalPlayerIsTv.current
     val shape = RoundedCornerShape(PlayerSkin.RadiusControl)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 54.dp)
+            .heightIn(min = if (tv) 60.dp else 54.dp)
             .clip(shape)
             .background(
                 when {
@@ -1497,6 +1504,7 @@ private fun PlayerChoiceRow(
                 },
                 shape,
             )
+            .playerTvFocus(focused, shape)
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -1689,6 +1697,7 @@ fun DanmakuSettingsSheet(
                                     if (focused) PlayerSkin.White28 else Color.Transparent,
                                     shape,
                                 )
+                                .playerTvFocus(focused, shape)
                                 .onFocusChanged { focused = it.isFocused }
                                 .clickable { onSelectEpisode(episode.episodeId) }
                                 .padding(horizontal = 10.dp, vertical = 10.dp),
@@ -1871,18 +1880,21 @@ private fun PlayerChip(
 }
 
 @Composable
-private fun PlayerSwitch(
+internal fun PlayerSwitch(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    checkedTrackColor: Color = PlayerSkin.Accent,
 ) {
     Switch(
         checked = checked,
         onCheckedChange = onCheckedChange,
-        modifier = modifier,
+        // 开关总是和整行点击绑在一起：遥控器只应停在行上，
+        // 否则焦点会落到开关上，按 OK 只切换开关而不是执行整行动作。
+        modifier = modifier.focusProperties { canFocus = false },
         colors = SwitchDefaults.colors(
             checkedThumbColor = Color.White,
-            checkedTrackColor = PlayerSkin.Accent,
+            checkedTrackColor = checkedTrackColor,
             checkedBorderColor = Color.Transparent,
             uncheckedThumbColor = Color(0xFFB9BCC3),
             uncheckedTrackColor = PlayerSkin.White18,

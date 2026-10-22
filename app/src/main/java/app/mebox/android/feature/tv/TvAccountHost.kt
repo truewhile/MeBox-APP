@@ -99,6 +99,7 @@ fun TvAccountHost(
     val subtitlePreference by mainViewModel.subtitlePreference.collectAsStateWithLifecycle()
     val decoderMode by mainViewModel.decoderMode.collectAsStateWithLifecycle()
     val vrSettings by mainViewModel.vrSettings.collectAsStateWithLifecycle()
+    val playerUiSettings by mainViewModel.playerUiSettings.collectAsStateWithLifecycle()
     val context = androidx.compose.ui.platform.LocalContext.current
     val imageLoader = remember(mediaViewModel) { mediaViewModel.createImageLoader(context) }
     DisposableEffect(imageLoader) {
@@ -167,6 +168,10 @@ fun TvAccountHost(
                     decoderMode = decoderMode,
                     vrSettings = vrSettings,
                     onVrSettingsChange = mainViewModel::setVrSettings,
+                    uiSettings = playerUiSettings,
+                    onUiSettingsChange = mainViewModel::updatePlayerUiSettings,
+                    serverLabel = account.serverInfo.name,
+                    onSelectEpisode = mediaViewModel::playEpisodeById,
                     isTv = true,
                     onEngineSelected = mainViewModel::selectPlayerEngine,
                     onBack = mediaViewModel::back,

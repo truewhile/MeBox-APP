@@ -181,6 +181,7 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
     val subtitlePreference by mainViewModel.subtitlePreference.collectAsStateWithLifecycle()
     val decoderMode by mainViewModel.decoderMode.collectAsStateWithLifecycle()
     val vrSettings by mainViewModel.vrSettings.collectAsStateWithLifecycle()
+    val playerUiSettings by mainViewModel.playerUiSettings.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val imageLoader = remember(mediaViewModel) { mediaViewModel.createImageLoader(context) }
     DisposableEffect(imageLoader) {
@@ -221,6 +222,10 @@ fun AccountHost(account: AppUiState.Account, mainViewModel: MainViewModel) {
                     decoderMode = decoderMode,
                     vrSettings = vrSettings,
                     onVrSettingsChange = mainViewModel::setVrSettings,
+                    uiSettings = playerUiSettings,
+                    onUiSettingsChange = mainViewModel::updatePlayerUiSettings,
+                    serverLabel = account.serverInfo.name,
+                    onSelectEpisode = mediaViewModel::playEpisodeById,
                     onEngineSelected = mainViewModel::selectPlayerEngine,
                     onBack = mediaViewModel::back,
                     onProgress = mediaViewModel::reportProgress,
