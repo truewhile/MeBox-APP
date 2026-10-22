@@ -21,6 +21,10 @@ import app.mebox.android.core.player.DecoderMode
 import app.mebox.android.core.player.PlayerEngineKind
 import app.mebox.android.core.player.SubtitlePreference
 import app.mebox.android.core.player.SubtitlePriority
+import app.mebox.android.core.player.vr.VrDisplayMode
+import app.mebox.android.core.player.vr.VrProjection
+import app.mebox.android.core.player.vr.VrSettings
+import app.mebox.android.core.player.vr.VrStereo
 import app.mebox.android.di.AppContainer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -111,6 +115,15 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
     val subtitlePreference: StateFlow<SubtitlePreference> = _subtitlePreference.asStateFlow()
 
     /**
+     * VR 参数（投影/立体/显示方式/镜头校正）。
+     *
+     * 是否进入 VR 由播放页按本次播放决定，不在这里持久化；这里只保存用户
+     * 上一次选择的观看方式，下次打开 VR 面板时直接沿用。
+     */
+    private val _vrSettings = MutableStateFlow(loadVrSettings())
+    val vrSettings: StateFlow<VrSettings> = _vrSettings.asStateFlow()
+
+    /**
      * 首页底部「继续阅读/收听」悬浮条的显示开关。
      * 与播放设置一样只保存在本机，不写入服务端账号配置。
      */
@@ -146,6 +159,21 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         _subtitlePreference.value = _subtitlePreference.value.copy(priority = priority)
         DiagnosticsLog.i("Play", "字幕优先语言: ${priority.key}")
     }
+
+    fun setVrSettings(settings: VrSettings) {
+        container.preferences.vrProjection = settings.projection.key
+        container.preferences.vrStereo = settings.stereo.key
+        container.preferences.vrDisplay = settings.display.key
+        container.preferences.vrLensCorrection = settings.lensCorrection
+        _vrSettings.value = settings
+    }
+
+    private fun loadVrSettings(): VrSettings = VrSettings(
+        projection = VrProjection.fromKey(container.preferences.vrProjection),
+        stereo = VrStereo.fromKey(container.preferences.vrStereo),
+        display = VrDisplayMode.fromKey(container.preferences.vrDisplay),
+        lensCorrection = container.preferences.vrLensCorrection,
+    )
 
     private fun loadSubtitlePreference(): SubtitlePreference = SubtitlePreference(
         autoLoad = container.preferences.subtitlesAutoLoad,

@@ -1,16 +1,20 @@
 package app.mebox.android.core.player
 
 import android.content.Context
+import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.FrameLayout
 import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.media.SubtitleLabel
 import app.mebox.android.core.network.APP_USER_AGENT
+import app.mebox.android.core.player.vr.VrSettings
+import app.mebox.android.core.player.vr.VrVideoView
 import java.io.File
 import java.net.InetAddress
 import kotlinx.coroutines.CoroutineScope
@@ -77,6 +81,10 @@ class VlcVideoPlayerEngine(
 
     private var host: FrameLayout? = null
     private var videoLayout: VLCVideoLayout? = null
+
+    /** VR 模式下的全景视图；进入 VR 时普通画面布局会被拆掉，退出时重建。 */
+    private var vrView: VrVideoView? = null
+    private var vrSettings: VrSettings? = null
     private var resizeMode: EngineResizeMode = EngineResizeMode.FIT
     /** 当前视频的显示宽高比；拿到轨道信息前为 null，按铺满宿主处理。 */
     private var videoAspect: Float? = null
@@ -268,6 +276,52 @@ class VlcVideoPlayerEngine(
             host.addOnLayoutChangeListener(hostLayoutListener)
             this.host = host
         }
+        if (vrSettings != null) {
+            mountVrView(host)
+        } else {
+            mountNormalView(host)
+        }
+        val media = pendingMedia
+        if (media != null && !mediaPlayer.hasMedia()) {
+            load(media, pendingStartMs)
+        }
+    }
+
+    override val supportsVr: Boolean = true
+
+    override fun setVrSettings(settings: VrSettings?) {
+        if (released || settings == vrSettings) return
+        vrSettings = settings
+        val host = host ?: return
+        if (settings == null) {
+            mountNormalView(host)
+        } else if (vrView != null) {
+            vrView?.setSettings(settings)
+        } else {
+            mountVrView(host)
+        }
+    }
+
+    override fun recenterVr() {
+        vrView?.recenter()
+    }
+
+    override fun rotateVr(dx: Float, dy: Float) {
+        vrView?.dragBy(dx, dy)
+    }
+
+    private fun mountNormalView(host: FrameLayout) {
+        // 从 VR 切回来 / 全新挂载：先拆掉 VR 视图并停止纹理输出。
+        if (vrView != null) {
+            runCatching { mediaPlayer.vlcVout.detachViews() }
+        }
+        vrView?.let { view ->
+            view.onSurfaceTextureReady = null
+            view.release()
+            (view.parent as? ViewGroup)?.removeView(view)
+        }
+        vrView = null
+
         val layout = videoLayout ?: VLCVideoLayout(context).also { created ->
             videoLayout = created
             created.addOnLayoutChangeListener(layoutGuardListener)
@@ -279,9 +333,66 @@ class VlcVideoPlayerEngine(
         // 所以每次 attach 都重新把画面框算一遍（重复调用只会比对、不会反复布局）。
         applySurfaceBox()
         applyResizeMode()
-        val media = pendingMedia
-        if (media != null && !mediaPlayer.hasMedia()) {
-            load(media, pendingStartMs)
+    }
+
+    private fun mountVrView(host: FrameLayout) {
+        val settings = vrSettings ?: return
+        val existing = vrView
+        if (existing != null) {
+            existing.setSettings(settings)
+            if (existing.parent !== host) {
+                host.removeAllViews()
+                host.addView(
+                    existing,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            }
+            return
+        }
+
+        // 进入 VR 前必须让普通画面布局退出视频输出，否则 VLC 会继续往
+        // SurfaceView 写帧，纹理拿不到数据。
+        videoLayout?.let { layout ->
+            runCatching { mediaPlayer.vlcVout.detachViews() }
+            (layout.parent as? ViewGroup)?.removeView(layout)
+        }
+        videoLayout = null
+        host.removeAllViews()
+
+        val view = VrVideoView(context).also { created ->
+            vrView = created
+            created.setSettings(settings)
+            created.onSurfaceTextureReady = ::attachVrSurface
+        }
+        host.addView(
+            view,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+    }
+
+    /**
+     * LibVLC 3.6 的 IVLCVout 支持直接把 OpenGL 输出写进 SurfaceTexture，
+     * 与 TextureView 内部走的是同一条路径；这里不再需要 VLCVideoLayout。
+     */
+    private fun attachVrSurface(surfaceTexture: SurfaceTexture) {
+        if (released || vrSettings == null) return
+        runCatching {
+            if (mediaPlayer.vlcVout.areViewsAttached()) {
+                mediaPlayer.vlcVout.detachViews()
+            }
+            mediaPlayer.vlcVout.setVideoSurface(surfaceTexture)
+            mediaPlayer.vlcVout.attachViews()
+        }.onFailure { error ->
+            DiagnosticsLog.w(
+                "Player",
+                "LibVLC VR 纹理输出初始化失败 type=${error.javaClass.simpleName}",
+            )
         }
     }
 
@@ -593,7 +704,7 @@ class VlcVideoPlayerEngine(
     }
 
     private fun applyResizeMode() {
-        if (released) return
+        if (released || vrView != null) return
         val scale = when (resizeMode) {
             EngineResizeMode.FIT -> MediaPlayer.ScaleType.SURFACE_BEST_FIT
             EngineResizeMode.FILL -> MediaPlayer.ScaleType.SURFACE_FILL
@@ -612,7 +723,7 @@ class VlcVideoPlayerEngine(
      * VLC 再按这个尺寸算出来的输出区域与画面框完全重合，两侧黑边等宽。
      */
     private fun applySurfaceBox() {
-        if (released) return
+        if (released || vrView != null) return
         val layout = videoLayout ?: return
         val host = host ?: return
         val box = videoSurfaceBox(host.width, host.height, videoAspect, resizeMode) ?: return
@@ -714,6 +825,12 @@ class VlcVideoPlayerEngine(
         runCatching { mediaPlayer.stop() }
         subtitleLoader.close()
         subtitleScope.cancel()
+        vrView?.let { view ->
+            view.onSurfaceTextureReady = null
+            view.release()
+            (view.parent as? android.view.ViewGroup)?.removeView(view)
+        }
+        vrView = null
         runCatching { mediaPlayer.detachViews() }
         (videoLayout?.parent as? android.view.ViewGroup)?.removeView(videoLayout)
         videoLayout = null

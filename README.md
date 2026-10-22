@@ -29,6 +29,10 @@ MeBox 的原生 Android 客户端（Kotlin + Jetpack Compose）。
   还原行内颜色、粗体、斜体、下划线和位置；LibVLC 内核由 libass 进一步还原
   字体、描边、定位与淡入淡出。
 - 断点续播：播放中每 5 秒写本地缓存，每 15 秒同步服务端；暂停/退出/播完立即上报
+- VR / 全景播放：播放页「更多 → VR / 全景」支持 360°/180° 投影、单目/左右（SBS）/
+  上下（TB）立体格式、手机全屏与头显双眼分屏；头部追踪优先使用游戏旋转矢量传感器，
+  没有陀螺仪时可以拖动画面，并提供纸盒镜头畸变校正与「重新居中」。ExoPlayer 与
+  LibVLC 都通过 SurfaceTexture 输出到同一个 OpenGL 渲染器
 
 已知限制：
 
@@ -41,6 +45,10 @@ MeBox 的原生 Android 客户端（Kotlin + Jetpack Compose）。
   能还原行内颜色/粗斜体/位置，LibVLC 由 libass 还原字体、描边与特效。字体仍依赖
   设备上可用的字体集合，ASS 里指定的非常用字体找不到时会被替换。
 - 影视后台播放、播放会话隔离尚未实现；离开播放页会暂停。
+- VR 模式依赖设备的旋转矢量传感器，没有陀螺仪时只能用手势拖动视角；头显分屏的
+  镜头畸变校正是固定经验系数，不对应具体镜片参数。VR 下会暂时隐藏弹幕。
+- LibVLC 内核的字幕由 VLC 自己渲染到视频输出上，VR 模式下会随球面弯曲；
+  系统内核使用 App 的字幕层，左右眼各排一份。手机全屏模式只显示左眼画面。
 
 阅读与听书限制：
 
@@ -113,5 +121,6 @@ MeBox 的原生 Android 客户端（Kotlin + Jetpack Compose）。
 [docs/ci-release.md](docs/ci-release.md)。
 
 后端契约与分阶段计划见 `plan/` 目录。播放内核（ExoPlayer / LibVLC）的架构与扩展方式见
-[docs/player-engines.md](docs/player-engines.md)。电视适配、遥控器按键与手机扫码输入的实现细节见
+[docs/player-engines.md](docs/player-engines.md)。播放器界面 token、控制栏布局、手势与面板规范见
+[docs/player-ui.md](docs/player-ui.md)。电视适配、遥控器按键与手机扫码输入的实现细节见
 [docs/tv-remote.md](docs/tv-remote.md)。

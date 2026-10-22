@@ -2,6 +2,7 @@ package app.mebox.android.core.player
 
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import app.mebox.android.core.player.vr.VrSettings
 
 /** 播放器内部统一的轨道类型，避免界面层直接依赖某个内核的常量。 */
 enum class EngineTrackType { VIDEO, AUDIO, TEXT }
@@ -113,6 +114,28 @@ interface VideoPlayerEngine {
 
     fun setSpeed(speed: Float)
     fun setResizeMode(mode: EngineResizeMode)
+
+    /**
+     * 内核是否支持 VR / 全景渲染。
+     *
+     * ExoPlayer 和 LibVLC 都能把解码帧输出到 SurfaceTexture，因此复用同一个
+     * OpenGL 渲染器；未来接入不支持纹理输出的内核时保持默认值即可。
+     */
+    val supportsVr: Boolean get() = false
+
+    /**
+     * 开启或关闭 VR。
+     *
+     * [settings] 需要是 `VrSettings.resolve` 后的具体值；传 null 恢复普通播放。
+     * 允许在播放中切换，内核负责在普通视图与 VR 视图之间迁移画面。
+     */
+    fun setVrSettings(settings: VrSettings?) = Unit
+
+    /** 把当前视线方向重设为正前方。 */
+    fun recenterVr() = Unit
+
+    /** 手指拖动微调视角，单位是像素位移。 */
+    fun rotateVr(dx: Float, dy: Float) = Unit
 
     /** null 表示交给内核自动选择（清晰度）/[selectTextTrack] 中表示关闭字幕。 */
     fun selectVideoTrack(trackId: String?)

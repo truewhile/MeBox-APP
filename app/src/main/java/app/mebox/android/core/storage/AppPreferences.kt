@@ -92,6 +92,26 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_SUBTITLE_PRIORITY, null)
         set(value) = prefs.edit().putString(KEY_SUBTITLE_PRIORITY, value).apply()
 
+    /** VR 投影方式；具体取值见 VrProjection.key。 */
+    var vrProjection: String?
+        get() = prefs.getString(KEY_VR_PROJECTION, null)
+        set(value) = prefs.edit().putString(KEY_VR_PROJECTION, value).apply()
+
+    /** VR 立体格式；具体取值见 VrStereo.key。 */
+    var vrStereo: String?
+        get() = prefs.getString(KEY_VR_STEREO, null)
+        set(value) = prefs.edit().putString(KEY_VR_STEREO, value).apply()
+
+    /** VR 显示方式；具体取值见 VrDisplayMode.key。 */
+    var vrDisplay: String?
+        get() = prefs.getString(KEY_VR_DISPLAY, null)
+        set(value) = prefs.edit().putString(KEY_VR_DISPLAY, value).apply()
+
+    /** 头显模式下的纸盒镜头畸变校正。 */
+    var vrLensCorrection: Boolean
+        get() = prefs.getBoolean(KEY_VR_LENS_CORRECTION, true)
+        set(value) = prefs.edit().putBoolean(KEY_VR_LENS_CORRECTION, value).apply()
+
     /**
      * 首页底部是否显示「继续阅读/收听」悬浮条。
      *
@@ -150,6 +170,10 @@ class AppPreferences(context: Context) {
         const val KEY_DECODER_MODE = "decoder_mode"
         const val KEY_SUBTITLES_AUTO_LOAD = "subtitles_auto_load"
         const val KEY_SUBTITLE_PRIORITY = "subtitle_priority"
+        const val KEY_VR_PROJECTION = "vr_projection"
+        const val KEY_VR_STEREO = "vr_stereo"
+        const val KEY_VR_DISPLAY = "vr_display"
+        const val KEY_VR_LENS_CORRECTION = "vr_lens_correction"
         const val KEY_HOME_READING_BAR = "home_reading_bar"
         const val KEY_AUDIO_MIX = "reader_audio_mix_other_apps"
         const val KEY_SERVER_SNAPSHOT_ADDRESS = "server_snapshot_address"

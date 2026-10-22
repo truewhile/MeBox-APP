@@ -2,7 +2,9 @@ package app.mebox.android.core.player
 
 import android.content.Context
 import android.graphics.Color
+import android.graphics.SurfaceTexture
 import android.net.Uri
+import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -37,6 +39,8 @@ import androidx.media3.ui.SubtitleView
 import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.media.SubtitleLabel
 import app.mebox.android.core.network.APP_USER_AGENT
+import app.mebox.android.core.player.vr.VrSettings
+import app.mebox.android.core.player.vr.VrVideoView
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -68,6 +72,12 @@ class ExoVideoPlayerEngine(
      */
     private var subtitleOverlay: SubtitleView? = null
     private var resizeMode: EngineResizeMode = EngineResizeMode.FIT
+
+    /** VR 模式下的全景视图；null 表示普通播放。 */
+    private var vrView: VrVideoView? = null
+    private var vrSettings: VrSettings? = null
+    /** ExoPlayer 当前视频输出面；VR 视图重建时会替换。 */
+    private var videoSurface: Surface? = null
     private var pendingMedia: EngineMedia? = null
     private var pendingStartMs: Long = 0L
     private var released: Boolean = false
@@ -234,24 +244,119 @@ class ExoVideoPlayerEngine(
         override fun onCues(cueGroup: CueGroup) {
             // 双语字幕会把中文、日文各下发成一条 cue，同一位置逐条绘制会重叠；
             // 合并成一条多行 cue 后再交给 SubtitleView 排版。
-            subtitleOverlay?.setCues(stackSubtitleCues(cueGroup.cues))
+            val cues = stackSubtitleCues(cueGroup.cues)
+            subtitleOverlay?.setCues(cues)
+            vrView?.setCues(cues)
         }
     }
+
+    override val supportsVr: Boolean = true
 
     override fun attach(host: FrameLayout) {
         if (released) return
         this.host = host
-        val view = playerView ?: PlayerView(context).apply {
+        mountVideoOutput(host)
+        startIfReady()
+    }
+
+    override fun setVrSettings(settings: VrSettings?) {
+        if (released || settings == vrSettings) return
+        vrSettings = settings
+        host?.let { mountVideoOutput(it) }
+    }
+
+    override fun recenterVr() {
+        vrView?.recenter()
+    }
+
+    override fun rotateVr(dx: Float, dy: Float) {
+        vrView?.dragBy(dx, dy)
+    }
+
+    /**
+     * 根据当前模式挂载普通画面或 VR 画面。
+     *
+     * 同一个播放器只允许一个视频输出面，切到 VR 时必须先解绑 PlayerView；
+     * 切回来时再由 PlayerView 重新接管。重复调用保持幂等，Compose 重组不会闪屏。
+     */
+    private fun mountVideoOutput(host: FrameLayout) {
+        val vr = vrSettings
+        if (vr != null) {
+            val existing = vrView
+            if (existing != null && host.childCount == 1 && host.getChildAt(0) === existing) {
+                existing.setSettings(vr)
+                return
+            }
+            detachNormalView()
+            val view = existing ?: VrVideoView(context).also { created ->
+                vrView = created
+                created.onSurfaceTextureReady = ::bindVrSurface
+                created.setCues(stackSubtitleCues(player.currentCues.cues))
+            }
+            view.setSettings(vr)
+            host.removeAllViews()
+            host.addView(
+                view,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                ),
+            )
+        } else {
+            releaseVrView()
+            val view = ensurePlayerView()
+            if (view.parent === host && host.childCount == 1) {
+                view.player = player
+                view.resizeMode = resizeMode.toExoValue()
+                return
+            }
+            host.removeAllViews()
+            mountSubtitleOverlay(view)
+            view.player = player
+            view.resizeMode = resizeMode.toExoValue()
+            host.addView(
+                view,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                ),
+            )
+        }
+    }
+
+    private fun ensurePlayerView(): PlayerView =
+        playerView ?: PlayerView(context).apply {
             useController = false
             keepScreenOn = true
             setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
             playerView = this
         }
-        mountSubtitleOverlay(view)
-        view.player = player
-        view.resizeMode = resizeMode.toExoValue()
-        host.attachPlayerView(view)
-        startIfReady()
+
+    private fun detachNormalView() {
+        val view = playerView ?: return
+        view.player = null
+        (view.parent as? ViewGroup)?.removeView(view)
+    }
+
+    private fun bindVrSurface(surfaceTexture: SurfaceTexture) {
+        if (released || vrSettings == null) return
+        videoSurface?.release()
+        val surface = Surface(surfaceTexture)
+        videoSurface = surface
+        player.setVideoSurface(surface)
+    }
+
+    private fun releaseVrView() {
+        if (vrView == null && videoSurface == null) return
+        vrView?.let { view ->
+            view.onSurfaceTextureReady = null
+            view.release()
+            (view.parent as? ViewGroup)?.removeView(view)
+        }
+        vrView = null
+        player.clearVideoSurface()
+        videoSurface?.release()
+        videoSurface = null
     }
 
     /**
@@ -322,7 +427,8 @@ class ExoVideoPlayerEngine(
     private fun startIfReady() {
         val media = pendingMedia ?: return
         // 画面视图还没挂上时先等待 attach，避免起播后又被重新 prepare。
-        if (released || playerView == null || mediaLoaded) return
+        // VR 模式下没有 PlayerView，但 vrView 已经接管输出面，同样可以起播。
+        if (released || host == null || mediaLoaded) return
         mediaLoaded = true
         player.setMediaItem(media.toMediaItem(), pendingStartMs)
         player.prepare()
@@ -425,8 +531,17 @@ class ExoVideoPlayerEngine(
         subtitleOverlay = null
         (playerView?.parent as? android.view.ViewGroup)?.removeView(playerView)
         playerView = null
+        vrView?.let { view ->
+            view.onSurfaceTextureReady = null
+            view.release()
+            (view.parent as? ViewGroup)?.removeView(view)
+        }
+        vrView = null
+        player.clearVideoSurface()
         host = null
         player.release()
+        videoSurface?.release()
+        videoSurface = null
         listener = null
     }
 

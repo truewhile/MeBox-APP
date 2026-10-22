@@ -132,6 +132,43 @@ ExoPlayer 的触发条件是 `ERROR_CODE_IO_BAD_HTTP_STATUS`；LibVLC 在打开�
 
 相关判断在 `PlayerEngineKind.shouldAutoFallback` / `automaticFallback`，有单元测试。
 
+## VR / 全景
+
+播放页「更多 → VR / 全景」可以在普通播放与全景播放之间切换，支持：
+
+- 投影：360°（等距柱状）与 180° 半球；
+- 立体格式：单目、左右并排（SBS）、上下并排（TB / OU）；
+- 显示方式：自动（立体片源自动分屏）、手机全屏、头显双眼分屏；
+- 头部追踪：优先 `TYPE_GAME_ROTATION_VECTOR`，没有时退回 `TYPE_ROTATION_VECTOR`；
+  两者都没有则只能手指拖动；
+- 纸盒镜头畸变校正与「重新居中」（只重置偏航，俯仰/横滚继续跟随重力）。
+
+实现不依赖第三方 VR SDK：
+
+1. 两个内核都把解码帧输出到 `SurfaceTexture`。ExoPlayer 用
+   `player.setVideoSurface(Surface)`；LibVLC 用
+   `mediaPlayer.vlcVout.setVideoSurface(SurfaceTexture)` 后 `attachViews()`。
+2. `VrVideoRenderer` 用全屏四边形做片元级射线：屏幕坐标 → 相机方向 →
+   世界方向 → 等距柱状 UV。没有球面网格，所以没有接缝，切换投影只改 uniform。
+3. 立体源在片元着色器里按左/右眼采样纹理的对应半幅；显示屏上是否分屏由
+   `VrDisplayMode` 决定。头显模式把 GL viewport 一分为二，并可选镜头畸变。
+4. 传感器部分直接使用 9 元旋转矩阵，不经过欧拉角：手机竖立或戴在头显里时
+   俯仰接近 ±90°，`SensorManager.getOrientation` 会进入万向锁。显示旋转
+   （90°/180°/270°）用 `remapCoordinateSystem` 映射到屏幕坐标。
+5. 投影/立体/显示方式/镜头校正保存在 `AppPreferences`；是否进入 VR 只对本次
+   播放有效，不跨片源保留。
+
+片源识别按标题/文件名猜测 360/180 与 SBS/TB，例如 `VR180`、`360`、`SBS`、
+`OU`、`左右`、`上下`；识别只用于「自动」选项，用户手动选择后不会被覆盖。
+服务端和容器目前没有可靠的球面元数据输入。
+
+已知限制：
+
+- LibVLC 的字幕由 VLC 渲染在视频输出上，进入 VR 后会随球面弯曲；系统内核使用
+  `VrVideoView` 里的两个 `SubtitleView`，左右眼各一份。
+- VR 下暂时隐藏弹幕层。
+- 镜头校正使用固定经验系数，不读取具体头显的镜片参数。
+- 手机全屏模式只显示左眼画面；没有立体偏移。
 
 ## 外挂字幕样式
 
@@ -206,6 +243,10 @@ ExoPlayer 的触发条件是 `ERROR_CODE_IO_BAD_HTTP_STATUS`；LibVLC 在打开�
 - `core/player/PlaybackSubtitleLoader.kt`：视频起播后的字幕会话、选择与取消（带单元测试）
 - `core/player/SubtitleDownloader.kt`：有期限和大小限制的原始字幕下载（带单元测试）
 - `core/player/PlaybackNetworkFallback.kt`：CDN 回退白名单与日志脱敏（带单元测试）
+- `core/player/vr/VrMode.kt`：投影/立体/显示方式、自动识别与参数展开（纯 Kotlin，带单元测试）
+- `core/player/vr/VrOrientation.kt`：传感器矩阵到着色器相机矩阵、重定位与手势旋转（纯 Kotlin，带单元测试）
+- `core/player/vr/VrVideoRenderer.kt`：OpenGL 全景射线渲染与左右眼采样
+- `core/player/vr/VrVideoView.kt`：GLSurfaceView、陀螺仪、左右眼字幕与生命周期
 - `feature/media/player/PlayerScreen.kt`：只依赖统一接口
 - `feature/AppScreens.kt`：我的 → 播放设置 / 字幕
 - `feature/tv/TvMediaScreens.kt`：电视端「我的」的同名字幕设置

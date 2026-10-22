@@ -13,12 +13,21 @@ import android.util.Rational
 import android.view.KeyEvent
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -78,6 +87,7 @@ import app.mebox.android.core.player.SubtitlePreference
 import app.mebox.android.core.player.SubtitleSelector
 import app.mebox.android.core.player.VideoPlayerEngineListener
 import app.mebox.android.core.player.createVideoPlayerEngine
+import app.mebox.android.core.player.vr.VrSettings
 import app.mebox.android.feature.media.DanmakuUiState
 import app.mebox.android.feature.media.PlaybackRequest
 import kotlinx.coroutines.delay
@@ -105,6 +115,8 @@ fun PlayerScreen(
     engine: PlayerEngineKind = PlayerEngineKind.EXO,
     subtitlePreference: SubtitlePreference = SubtitlePreference(),
     decoderMode: DecoderMode = DecoderMode.AUTO,
+    vrSettings: VrSettings = VrSettings(),
+    onVrSettingsChange: (VrSettings) -> Unit = {},
     isTv: Boolean = false,
     onEngineSelected: (PlayerEngineKind) -> Unit = {},
     onBack: () -> Unit,
@@ -223,6 +235,8 @@ fun PlayerScreen(
         initialEngine = engine,
         subtitlePreference = subtitlePreference,
         decoderMode = decoderMode,
+        storedVrSettings = vrSettings,
+        onVrSettingsChange = onVrSettingsChange,
         isTv = isTv,
         onEngineSelected = onEngineSelected,
         onBack = onBack,
@@ -280,6 +294,8 @@ private fun PlayerSurface(
     initialEngine: PlayerEngineKind,
     subtitlePreference: SubtitlePreference,
     decoderMode: DecoderMode,
+    storedVrSettings: VrSettings,
+    onVrSettingsChange: (VrSettings) -> Unit,
     isTv: Boolean,
     onEngineSelected: (PlayerEngineKind) -> Unit,
     onBack: () -> Unit,
@@ -332,6 +348,12 @@ private fun PlayerSurface(
     var autoNextCountdown by remember(initialKey) { mutableIntStateOf(0) }
     var playbackSpeed by remember(initialKey) { mutableStateOf(1f) }
     var resizeMode by remember(initialKey) { mutableStateOf(EngineResizeMode.FIT) }
+    // VR 是本次播放的开关，不跨片源保留；投影/立体/显示方式沿用上次选择。
+    var vrEnabled by remember(initialKey) { mutableStateOf(false) }
+    var vrSettings by remember(initialKey) { mutableStateOf(storedVrSettings) }
+    val resolvedVr = remember(vrSettings, title, request.streamUrl) {
+        vrSettings.resolve(title, request.streamUrl)
+    }
     var pinnedQuality by remember(initialKey) { mutableStateOf<TrackChoice?>(null) }
     var subtitlesOff by remember(initialKey) { mutableStateOf(true) }
     var trackState by remember(initialKey) { mutableStateOf(PlayerTrackState()) }
@@ -371,6 +393,12 @@ private fun PlayerSurface(
 
     var dragBaseMs by remember(initialKey) { mutableLongStateOf(0L) }
     var dragDeltaMs by remember(initialKey) { mutableLongStateOf(0L) }
+    var seekDragging by remember(initialKey) { mutableStateOf(false) }
+    // 长按临时倍速：>0 表示正在长按，松手后恢复到 playbackSpeed。
+    var boostSpeed by remember(initialKey) { mutableFloatStateOf(0f) }
+    // 任何交互都递增这个计数，用来重置 3 秒自动隐藏计时（控件本来就可见时，
+    // 只改 controlsVisible 不会触发 LaunchedEffect 重启）。
+    var controlsTick by remember(initialKey) { mutableIntStateOf(0) }
 
     // 一个内核实例绑定一集内容；切换内核会重建实例并从当前位置续播。
     val engine = remember(initialKey, engineKind, decoderMode) {
@@ -385,6 +413,34 @@ private fun PlayerSurface(
     }
 
     val progressCallback by rememberUpdatedState(onProgress)
+
+    // VR 开关/参数变化，以及切换内核后的新实例，都在这里统一下发。
+    LaunchedEffect(engine, vrEnabled, resolvedVr) {
+        engine.setVrSettings(if (vrEnabled) resolvedVr else null)
+    }
+
+    fun setVrEnabled(enabled: Boolean) {
+        vrEnabled = enabled
+        controlsVisible = true
+        controlsTick++
+        // 面板保持打开：开启后通常还要继续选投影/立体/显示方式。
+        if (enabled) {
+            engine.recenterVr()
+            hint = "VR 已开启：转动手机改变视角，拖动画面可微调"
+        } else {
+            hint = "已退出 VR"
+        }
+    }
+
+    fun updateVrSettings(next: VrSettings) {
+        vrSettings = next
+        onVrSettingsChange(next)
+    }
+
+    fun recenterVr() {
+        engine.recenterVr()
+        hint = "视角已重新居中"
+    }
 
     fun absolutePosition(): Long = engine.positionMs()
 
@@ -471,6 +527,17 @@ private fun PlayerSurface(
         if (persist) onEngineSelected(next)
     }
 
+    /** 重置控制栏自动隐藏计时；控件已可见时也要生效。 */
+    fun resetControlsTimer() {
+        controlsTick++
+    }
+
+    /** 交互同时确保控制栏可见，并重置计时。 */
+    fun touchControls() {
+        controlsVisible = true
+        controlsTick++
+    }
+
     fun togglePlayback() {
         if (playbackEnded) {
             seekTo(0L)
@@ -484,7 +551,30 @@ private fun PlayerSurface(
             session.onUserPlay()
             engine.play()
         }
-        controlsVisible = true
+        touchControls()
+    }
+
+    /**
+     * 长按临时倍速：按住时以 2× 播放，横滑按 0.25× 步进调整；
+     * 松手恢复用户原本选择的倍速，不写回偏好。
+     */
+    fun startBoost() {
+        if (boostSpeed > 0f) return
+        resetControlsTimer()
+        boostSpeed = 2f
+        engine.setSpeed(boostSpeed)
+    }
+
+    fun adjustBoost(delta: Float) {
+        if (boostSpeed <= 0f) return
+        boostSpeed = (boostSpeed + delta).coerceIn(0.5f, 4f)
+        engine.setSpeed(boostSpeed)
+    }
+
+    fun endBoost() {
+        if (boostSpeed <= 0f) return
+        boostSpeed = 0f
+        engine.setSpeed(playbackSpeed)
     }
 
     /** 错误页与遥控器共用的显式重试入口：重置本轮错误并继续播放。 */
@@ -763,11 +853,39 @@ private fun PlayerSurface(
         }
     }
 
-    // 控制栏自动隐藏：播放中 4.5 秒无操作后收起。暂停、结束和拖动时保持可见。
-    LaunchedEffect(controlsVisible, isPlaying, playbackEnded, locked) {
-        if (controlsVisible && isPlaying && !playbackEnded && !locked) {
-            delay(4_500)
+    // 控制栏自动隐藏：播放中 3 秒无操作后收起。暂停、结束、拖动进度、
+    // 长按倍速和面板打开期间保持可见/不打断。
+    LaunchedEffect(
+        controlsVisible,
+        controlsTick,
+        isPlaying,
+        isBuffering,
+        playbackEnded,
+        locked,
+        seekDragging,
+        boostSpeed,
+        settingsSection,
+        moreSheetVisible,
+    ) {
+        if (controlsVisible &&
+            isPlaying &&
+            !isBuffering &&
+            !playbackEnded &&
+            !locked &&
+            !seekDragging &&
+            boostSpeed == 0f &&
+            settingsSection == null &&
+            !moreSheetVisible
+        ) {
+            delay(3_000)
             controlsVisible = false
+        }
+    }
+    // 锁屏后只保留解锁按钮，3 秒后淡出；点按画面可再次唤出。
+    LaunchedEffect(locked, lockBarVisible) {
+        if (locked && lockBarVisible) {
+            delay(3_000)
+            lockBarVisible = false
         }
     }
     LaunchedEffect(hint) {
@@ -814,7 +932,10 @@ private fun PlayerSurface(
     // 自动匹配到多个作品时直接弹出候选面板，和 Web 播放页保持一致。
     // 以候选数量为 key，用户关闭后不会反复弹出。
     LaunchedEffect(danmaku.candidates.size, danmaku.loadedMediaId) {
-        if (danmaku.candidates.isNotEmpty() && settingsSection == null) {
+        if (danmaku.candidates.isNotEmpty() &&
+            settingsSection == null &&
+            !moreSheetVisible
+        ) {
             settingsSection = PlayerSettingsSection.DANMAKU
         }
     }
@@ -828,6 +949,7 @@ private fun PlayerSurface(
         window.attributes = attributes
         levelFeedback = PlayerLevel.BRIGHTNESS
         levelFraction = next
+        resetControlsTimer()
     }
 
     fun adjustVolume(delta: Float) {
@@ -838,6 +960,7 @@ private fun PlayerSurface(
         manager.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0)
         levelFeedback = PlayerLevel.VOLUME
         levelFraction = next.toFloat() / max
+        resetControlsTimer()
     }
 
     fun chooseTrack(choice: TrackChoice) {
@@ -880,6 +1003,39 @@ private fun PlayerSurface(
         engine.selectTextTrack(null)
     }
 
+    fun toggleDanmakuFromControls() {
+        touchControls()
+        if (danmaku.candidates.isNotEmpty()) {
+            // 匹配到多个作品时，点击弹幕按钮直接打开候选面板。
+            settingsSection = PlayerSettingsSection.DANMAKU
+        } else {
+            onDanmakuEnabledChange(!danmaku.enabled)
+        }
+    }
+
+    fun playNextNow() {
+        touchControls()
+        playbackEnded = false
+        autoNextCancelled = true
+        onPlayNext()
+    }
+
+    fun lockScreen() {
+        locked = true
+        controlsVisible = false
+        lockBarVisible = true
+        controlsTick++
+        hint = "屏幕已锁定"
+    }
+
+    fun unlockScreen() {
+        locked = false
+        lockBarVisible = false
+        controlsVisible = true
+        controlsTick++
+        hint = "屏幕已解锁"
+    }
+
     fun enterPictureInPicture() {
         if (!pipAvailable) return
         val params = PictureInPictureParams.Builder()
@@ -890,7 +1046,7 @@ private fun PlayerSurface(
 
     val duration = durationMs.coerceAtLeast(request.durationMs)
     val seekStep = 10_000L
-    val speedLabel = PlaybackPlan.formatSpeed(playbackSpeed)
+    val speedLabel = playerSpeedLabel(playbackSpeed)
     val qualityLabel = pinnedQuality?.label ?: "自动"
     val subtitleLabel = when {
         subtitlesOff -> "关闭"
@@ -948,7 +1104,7 @@ private fun PlayerSurface(
         val target = PlaybackPlan.seekTarget(absolutePosition(), deltaMs, currentDuration())
         seekTo(target)
         seekFeedback = SeekFeedbackState(deltaMs >= 0, deltaMs, target)
-        controlsVisible = true
+        touchControls()
     }
 
     fun handleTvKey(event: androidx.compose.ui.input.key.KeyEvent): Boolean {
@@ -1023,13 +1179,9 @@ private fun PlayerSurface(
         }
     }
 
-    BackHandler(enabled = locked) {
-        locked = false
-        lockBarVisible = false
-        controlsVisible = true
-    }
+    BackHandler(enabled = locked) { unlockScreen() }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
@@ -1044,6 +1196,9 @@ private fun PlayerSurface(
                 },
             ),
     ) {
+        // 手机横屏的可用高度通常只有 360–430dp，右侧竖排按钮会和底部控制栏
+        // 抢空间；矮屏下把锁定入口并入操作行，只保留底部一体化控制栏。
+        val compactControls = maxHeight < 600.dp
         AndroidView(
             factory = { ctx -> FrameLayout(ctx) },
             update = { frame ->
@@ -1054,9 +1209,10 @@ private fun PlayerSurface(
         )
 
         // 弹幕层位于视频之上、手势与控制层之下，不拦截播放器点击。
+        // VR 是沉浸式视图，弹幕会横跨两块镜片，开启 VR 时暂时隐藏。
         DanmakuOverlay(
             comments = danmaku.comments,
-            enabled = danmaku.enabled,
+            enabled = danmaku.enabled && !vrEnabled,
             opacity = danmaku.opacity,
             fontScale = danmaku.fontScale,
             areaFraction = danmaku.area,
@@ -1075,7 +1231,15 @@ private fun PlayerSurface(
                     .fillMaxSize()
                     .playerTouch(
                         enabled = true,
-                        onTap = { controlsVisible = !controlsVisible },
+                        vrMode = vrEnabled,
+                        onVrDrag = { dx, dy -> engine.rotateVr(dx, dy) },
+                        onTap = {
+                            if (controlsVisible) {
+                                controlsVisible = false
+                            } else {
+                                touchControls()
+                            }
+                        },
                         onDoubleTap = { forward ->
                             val delta = if (forward) seekStep else -seekStep
                             val target = PlaybackPlan.seekTarget(
@@ -1085,11 +1249,13 @@ private fun PlayerSurface(
                             )
                             seekTo(target)
                             seekFeedback = SeekFeedbackState(forward, delta, target)
-                            controlsVisible = true
+                            touchControls()
                         },
                         onSeekDragStart = {
                             dragBaseMs = absolutePosition()
                             dragDeltaMs = 0L
+                            seekDragging = true
+                            touchControls()
                         },
                         onSeekDrag = { fraction ->
                             dragDeltaMs += (fraction * 120_000).toLong()
@@ -1101,9 +1267,14 @@ private fun PlayerSurface(
                                 seekTo(PlaybackPlan.seekTarget(dragBaseMs, dragDeltaMs, currentDuration()))
                             }
                             dragDeltaMs = 0L
+                            seekDragging = false
+                            resetControlsTimer()
                         },
                         onVolumeDelta = { delta -> adjustVolume(delta) },
                         onBrightnessDelta = { delta -> adjustBrightness(delta) },
+                        onBoostStart = { startBoost() },
+                        onBoostChange = { delta -> adjustBoost(delta) },
+                        onBoostEnd = { endBoost() },
                     ),
             )
         } else {
@@ -1116,14 +1287,19 @@ private fun PlayerSurface(
             )
         }
 
-        if (controlsVisible && !locked) {
+        AnimatedVisibility(
+            visible = controlsVisible && !locked,
+            enter = fadeIn(animationSpec = tween(200)),
+            exit = fadeOut(animationSpec = tween(200)),
+            modifier = Modifier.align(Alignment.TopCenter),
+        ) {
             PlayerTopBar(
                 title = title,
                 subtitle = request.subtitle,
                 pictureInPictureAvailable = pipAvailable && !isTv,
                 onBack = ::leavePlayer,
                 onPictureInPicture = { enterPictureInPicture() },
-                modifier = Modifier.align(Alignment.TopCenter),
+                onOpenSettings = { moreSheetVisible = true },
             )
         }
 
@@ -1131,33 +1307,40 @@ private fun PlayerSurface(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 86.dp),
+                    .padding(top = 92.dp),
             ) {
                 Text(
                     "OK 播放/暂停 · ◀ ▶ 快退/快进 · 菜单键 播放设置 · 返回键 退出",
-                    color = Color(0xCCFFFFFF),
-                    style = MaterialTheme.typography.bodyMedium,
+                    color = PlayerSkin.TextSecondary,
+                    style = PlayerSkin.Overline,
                 )
             }
         }
 
-        // 播放中不显示中央按钮，避免遮挡画面；暂停或播放结束时才出现。
-        if (controlsVisible && !locked && !isBuffering && seekFeedback == null &&
-            (!isPlaying || playbackEnded)
+        AnimatedVisibility(
+            visible = controlsVisible && !locked && !compactControls,
+            enter = fadeIn(animationSpec = tween(200)),
+            exit = fadeOut(animationSpec = tween(200)),
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 12.dp),
         ) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .padding(bottom = 32.dp),
-            ) {
-                PlayerCenterButton(
-                    isPlaying = isPlaying && !playbackEnded,
-                    onClick = { togglePlayback() },
-                )
-            }
+            PlayerSideActions(
+                danmakuEnabled = danmaku.enabled,
+                pictureInPictureAvailable = pipAvailable && !isTv,
+                onLock = ::lockScreen,
+                onToggleDanmaku = ::toggleDanmakuFromControls,
+                onPictureInPicture = { enterPictureInPicture() },
+                onOpenSettings = { moreSheetVisible = true },
+            )
         }
 
-        if (controlsVisible && !locked) {
+        AnimatedVisibility(
+            visible = controlsVisible && !locked,
+            enter = fadeIn(animationSpec = tween(200)),
+            exit = fadeOut(animationSpec = tween(200)),
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
             PlayerBottomControls(
                 positionMs = positionMs,
                 durationMs = duration,
@@ -1165,34 +1348,30 @@ private fun PlayerSurface(
                 isPlaying = isPlaying && !playbackEnded,
                 hasNext = request.nextEpisode != null,
                 speedLabel = speedLabel,
+                qualityLabel = qualityLabel,
+                audioLabel = audioLabel,
                 subtitleLabel = subtitleLabel,
                 danmakuEnabled = danmaku.enabled,
-                danmakuLabel = "弹幕：$danmakuLabel",
-                onSeek = { position -> seekTo(position) },
+                onSeek = { position ->
+                    seekTo(position)
+                    resetControlsTimer()
+                },
+                onSeekDragStateChange = { dragging ->
+                    seekDragging = dragging
+                    if (dragging) touchControls()
+                },
                 onTogglePlay = { togglePlayback() },
-                onPlayNext = {
-                    playbackEnded = false
-                    autoNextCancelled = true
-                    onPlayNext()
-                },
-                onToggleDanmaku = {
-                    if (danmaku.candidates.isNotEmpty()) {
-                        // 匹配到多个作品时，点击弹幕按钮直接打开候选面板。
-                        settingsSection = PlayerSettingsSection.DANMAKU
-                    } else {
-                        onDanmakuEnabledChange(!danmaku.enabled)
-                    }
-                },
+                onSeekBack = { tvSeek(-seekStep) },
+                onPlayNext = ::playNextNow,
+                onToggleDanmaku = ::toggleDanmakuFromControls,
                 onOpenSubtitle = { settingsSection = PlayerSettingsSection.SUBTITLE },
                 onOpenSpeed = { settingsSection = PlayerSettingsSection.SPEED },
+                onOpenQuality = { settingsSection = PlayerSettingsSection.QUALITY },
+                onOpenAudio = { settingsSection = PlayerSettingsSection.AUDIO },
                 onOpenMore = { moreSheetVisible = true },
-                onLock = {
-                    locked = true
-                    controlsVisible = false
-                    lockBarVisible = true
-                    hint = "已锁定"
-                },
-                modifier = Modifier.align(Alignment.BottomCenter),
+                vrActive = vrEnabled,
+                onRecenterVr = ::recenterVr,
+                onLock = if (compactControls) ::lockScreen else null,
             )
         }
 
@@ -1217,6 +1396,15 @@ private fun PlayerSurface(
                     deltaMs = feedback.deltaMs,
                     targetMs = feedback.targetMs,
                 )
+            }
+        }
+
+        boostSpeed.takeIf { it > 0f }?.let { speed ->
+            Box(
+                modifier = Modifier.align(Alignment.Center),
+                contentAlignment = Alignment.Center,
+            ) {
+                PlayerBoostFeedback(speed = speed)
             }
         }
 
@@ -1247,81 +1435,44 @@ private fun PlayerSurface(
             }
         }
 
-        if (locked && lockBarVisible) {
-            PlayerLockButton(
-                onUnlock = {
-                    locked = false
-                    lockBarVisible = false
-                    controlsVisible = true
-                },
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .padding(start = 12.dp),
-            )
+        AnimatedVisibility(
+            visible = locked && lockBarVisible,
+            enter = fadeIn(animationSpec = tween(200)),
+            exit = fadeOut(animationSpec = tween(200)),
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 12.dp),
+        ) {
+            PlayerLockButton(onUnlock = ::unlockScreen)
         }
 
         failedMessage?.let { message ->
             val alternative = PlayerEngineKind.entries.firstOrNull { it != engineKind }
-            val retryFocus = remember { FocusRequester() }
-            // 电视端把焦点放到“重试”，方向键可以在重试/切换内核/返回之间移动。
-            LaunchedEffect(isTv, message) {
-                if (isTv) {
-                    delay(80)
-                    runCatching { retryFocus.requestFocus() }
-                }
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xCC000000))
-                    .pointerInput(Unit) { detectTapGestures { } },
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("无法播放该视频", color = Color.White)
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        message,
-                        color = Color(0xFFB0B0B0),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        if (errorIsDecode) {
-                            "当前内核无法解码该片源，可切换到另一个内核重试"
-                        } else {
-                            "检查网络或地址后重试，也可以切换播放内核"
-                        },
-                        color = Color(0xFF9E9E9E),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Spacer(Modifier.height(16.dp))
-                    TextButton(
-                        onClick = { retryPlayback() },
-                        modifier = Modifier.focusRequester(retryFocus),
-                    ) { Text("重试") }
-                    if (alternative != null) {
-                        TextButton(
-                            onClick = {
-                                // 手动切换会记住为默认内核；本次播放从当前位置续播。
-                                switchEngine(alternative)
-                            },
-                        ) { Text("切换到 ${alternative.shortLabel}") }
+            PlayerErrorOverlay(
+                message = message,
+                explanation = if (errorIsDecode) {
+                    "当前内核无法解码该片源，可切换到另一个内核重试"
+                } else {
+                    "检查网络或地址后重试，也可以切换播放内核"
+                },
+                alternativeLabel = alternative?.shortLabel,
+                onRetry = { retryPlayback() },
+                onSwitchAlternative = alternative?.let { next ->
+                    {
+                        // 手动切换会记住为默认内核；本次播放从当前位置续播。
+                        switchEngine(next)
                     }
-                    TextButton(onClick = ::leavePlayer) { Text("返回") }
-                }
-            }
+                },
+                onBack = ::leavePlayer,
+                isTv = isTv,
+            )
         }
 
         if (playbackEnded && failedMessage == null) {
             PlayerEndedOverlay(
                 nextTitle = request.nextEpisode?.title,
                 countdown = autoNextCountdown.takeIf { it > 0 && !autoNextCancelled },
-                onPlayNext = {
-                    playbackEnded = false
-                    autoNextCancelled = true
-                    onPlayNext()
-                },
+                onPlayNext = ::playNextNow,
                 onReplay = {
                     seekTo(0L)
                     playbackEnded = false
@@ -1333,6 +1484,7 @@ private fun PlayerSurface(
                     autoNextCountdown = 0
                 },
                 onBack = ::leavePlayer,
+                countdownTotal = AUTO_NEXT_SECONDS,
             )
         }
 
@@ -1345,6 +1497,7 @@ private fun PlayerSurface(
                     subtitle = subtitleLabel,
                     scale = resizeModeLabel(resizeMode),
                     danmaku = danmakuLabel,
+                    vr = if (vrEnabled) resolvedVr.summary() else "关闭",
                     engine = engineKind.shortLabel,
                 ),
                 onSelect = { section ->
@@ -1357,6 +1510,19 @@ private fun PlayerSurface(
         }
 
         settingsSection?.let { section ->
+            if (section == PlayerSettingsSection.VR) {
+                PlayerVrSheet(
+                    enabled = vrEnabled,
+                    settings = vrSettings,
+                    resolved = resolvedVr,
+                    onEnabledChange = ::setVrEnabled,
+                    onSettingsChange = ::updateVrSettings,
+                    onRecenter = ::recenterVr,
+                    onDismiss = { settingsSection = null },
+                    autoFocus = isTv,
+                )
+                return@let
+            }
             if (section == PlayerSettingsSection.DANMAKU) {
                 DanmakuSettingsSheet(
                     state = danmaku,
@@ -1397,6 +1563,7 @@ private fun PlayerSurface(
                 onSelect = { choice ->
                     when (section) {
                         PlayerSettingsSection.DANMAKU -> Unit
+                        PlayerSettingsSection.VR -> Unit
                         PlayerSettingsSection.SPEED -> {
                             playbackSpeed = choice.id.toFloatOrNull() ?: 1f
                             engine.setSpeed(playbackSpeed)
@@ -1453,41 +1620,75 @@ private fun settingsChoices(
 ): List<PlayerChoice> = when (section) {
     PlayerSettingsSection.DANMAKU -> emptyList()
 
+    // VR 需要同时调整投影/立体/显示方式，使用独立面板而不是单选列表。
+    PlayerSettingsSection.VR -> emptyList()
+
     PlayerSettingsSection.ENGINE ->
         PlayerEngineKind.entries.map { candidate ->
             PlayerChoice(
                 id = candidate.key,
                 label = candidate.label,
                 selected = candidate == engineKind,
+                badge = candidate.shortLabel.uppercase(),
             )
         }
 
     PlayerSettingsSection.SPEED ->
-        listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f).map { option ->
+        listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f).map { option ->
             PlayerChoice(
                 id = option.toString(),
-                label = PlaybackPlan.formatSpeed(option),
+                label = playerSpeedLabel(option),
                 selected = kotlin.math.abs(speed - option) < 0.01f,
             )
         }
 
     PlayerSettingsSection.QUALITY ->
-        listOf(PlayerChoice("auto", "自动", pinnedQuality == null)) +
-            trackState.video.map { track ->
-                PlayerChoice(track.id, track.label, pinnedQuality?.id == track.id)
-            }
+        listOf(
+            PlayerChoice(
+                id = "auto",
+                label = "自动",
+                selected = pinnedQuality == null,
+                badge = "AUTO",
+                detail = "按网络与解码能力自动选择",
+            ),
+        ) + trackState.video.map { track ->
+            PlayerChoice(
+                id = track.id,
+                label = track.label,
+                selected = pinnedQuality?.id == track.id,
+                badge = qualityBadgeFor(track.label),
+            )
+        }
 
     PlayerSettingsSection.AUDIO ->
-        trackState.audio.map { track -> PlayerChoice(track.id, track.label, track.selected) }
+        trackState.audio.mapIndexed { index, track ->
+            PlayerChoice(
+                id = track.id,
+                label = track.label,
+                selected = track.selected,
+                badge = "A${index + 1}",
+                detail = track.lang,
+            )
+        }
 
     PlayerSettingsSection.SUBTITLE -> buildList {
-        add(PlayerChoice("off", "关闭字幕", subtitlesOff))
-        trackState.text.forEach { track ->
+        add(
+            PlayerChoice(
+                id = "off",
+                label = "关闭字幕",
+                selected = subtitlesOff,
+                badge = "OFF",
+                detail = "不显示任何字幕轨",
+            ),
+        )
+        trackState.text.forEachIndexed { index, track ->
             add(
                 PlayerChoice(
-                    track.id,
-                    track.label,
-                    !subtitlesOff && track.selected,
+                    id = track.id,
+                    label = track.label,
+                    selected = !subtitlesOff && track.selected,
+                    badge = "S${index + 1}",
+                    detail = track.lang,
                 ),
             )
         }
@@ -1499,16 +1700,40 @@ private fun settingsChoices(
                     id = "switch-vlc",
                     label = "切换到 LibVLC 渲染 ASS 样式",
                     selected = false,
+                    badge = "ASS",
+                    detail = "保留字体、描边与特效",
                 ),
             )
         }
     }
 
     PlayerSettingsSection.SCALE -> listOf(
-        PlayerChoice("fit", "适应屏幕（完整画面）", resizeMode == EngineResizeMode.FIT),
-        PlayerChoice("fill", "拉伸铺满", resizeMode == EngineResizeMode.FILL),
-        PlayerChoice("zoom", "裁剪铺满", resizeMode == EngineResizeMode.ZOOM),
+        PlayerChoice(
+            "fit",
+            "适应屏幕（完整画面）",
+            resizeMode == EngineResizeMode.FIT,
+            badge = "FIT",
+        ),
+        PlayerChoice(
+            "fill",
+            "拉伸铺满",
+            resizeMode == EngineResizeMode.FILL,
+            badge = "FILL",
+        ),
+        PlayerChoice(
+            "zoom",
+            "裁剪铺满",
+            resizeMode == EngineResizeMode.ZOOM,
+            badge = "ZOOM",
+        ),
     )
+}
+
+private fun qualityBadgeFor(label: String): String {
+    val trimmed = label.trim()
+    if (trimmed.isEmpty()) return "HD"
+    val matched = Regex("(\\d{3,4}[pPiI]|4K|8K|2K|HD|SD|FHD|UHD)").find(trimmed)?.value
+    return (matched ?: trimmed).take(4).uppercase()
 }
 
 private fun resizeModeLabel(resizeMode: EngineResizeMode): String = when (resizeMode) {
@@ -1557,37 +1782,141 @@ private fun Modifier.playerTouch(
     onSeekDragEnd: () -> Unit,
     onVolumeDelta: (Float) -> Unit,
     onBrightnessDelta: (Float) -> Unit,
+    vrMode: Boolean = false,
+    onVrDrag: (Float, Float) -> Unit = { _, _ -> },
+    onBoostStart: (Float) -> Unit = {},
+    onBoostChange: (Float) -> Unit = {},
+    onBoostEnd: () -> Unit = {},
 ): Modifier {
     if (!enabled) return this
-    return this
-        .pointerInput(enabled) {
-            detectTapGestures(
-                onTap = { onTap() },
-                onDoubleTap = { offset -> onDoubleTap(offset.x >= size.width / 2f) },
-            )
-        }
-        .pointerInput(enabled) {
-            detectHorizontalDragGestures(
-                onDragStart = { onSeekDragStart() },
-                onDragEnd = { onSeekDragEnd() },
-                onDragCancel = { onSeekDragEnd() },
-            ) { change, dragAmount ->
+    val tap = pointerInput(enabled) {
+        // 屏幕左右边缘留给系统返回手势，不把边缘点击当作控件显隐。
+        val edge = 16.dp.toPx()
+        detectTapGestures(
+            onTap = { offset ->
+                if (offset.x >= edge && offset.x <= size.width - edge) onTap()
+            },
+            onDoubleTap = { offset ->
+                if (offset.x >= edge && offset.x <= size.width - edge) {
+                    onDoubleTap(offset.x >= size.width / 2f)
+                }
+            },
+            // 长按由下面统一的手势识别器处理；这里只负责吞掉“长按后松手”
+            // 产生的单击，避免退出倍速时顺带把控件栏切出来。
+            onLongPress = { },
+        )
+    }
+    if (vrMode) {
+        // VR 下拖动用来偏转视线，不再触发快进/亮度/音量手势。
+        return tap.pointerInput(vrMode) {
+            detectDragGestures { change, dragAmount ->
                 change.consume()
-                onSeekDrag(dragAmount / size.width)
+                onVrDrag(dragAmount.x, dragAmount.y)
             }
         }
-        .pointerInput(enabled) {
-            var rightHalf = false
-            detectVerticalDragGestures(
-                onDragStart = { offset -> rightHalf = offset.x >= size.width / 2f },
-                onVerticalDrag = { change, dragAmount ->
-                    change.consume()
-                    val delta = -dragAmount / size.height
-                    if (rightHalf) onVolumeDelta(delta) else onBrightnessDelta(delta)
-                },
-            )
+    }
+    return tap.pointerInput(enabled) {
+        val edgePx = 16.dp.toPx()
+        val longPressTimeout = viewConfiguration.longPressTimeoutMillis
+        val slop = viewConfiguration.touchSlop
+        val boostStepPx = 40.dp.toPx()
+
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val startX = down.position.x
+            // 屏幕左右边缘交给系统返回手势，不在这里横滑 seek。
+            if (startX < edgePx || startX > size.width - edgePx) {
+                waitForUpOrCancellation()
+                return@awaitEachGesture
+            }
+
+            var last = down.position
+            var total = androidx.compose.ui.geometry.Offset.Zero
+            var mode = GestureMode.Pending
+            var levelRight = startX >= size.width / 2f
+            var boostAccum = 0f
+            val downTime = down.uptimeMillis
+
+            while (true) {
+                // 手指按住不动时不会产生新事件，必须用超时来识别长按，
+                // 否则 awaitPointerEvent 会一直挂起，倍速提示永远不出现。
+                val event = if (mode == GestureMode.Pending) {
+                    val elapsed = SystemClock.uptimeMillis() - downTime
+                    val remaining = (longPressTimeout - elapsed).coerceAtLeast(1L)
+                    try {
+                        withTimeout(remaining) { awaitPointerEvent() }
+                    } catch (_: androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException) {
+                        null
+                    }
+                } else {
+                    awaitPointerEvent()
+                }
+                if (event == null) {
+                    if (mode == GestureMode.Pending) {
+                        mode = GestureMode.Boost
+                        onBoostStart(2f)
+                    }
+                    continue
+                }
+
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (!change.pressed) break
+
+                val delta = change.position - last
+                last = change.position
+                total += delta
+                val now = change.uptimeMillis
+
+                if (mode == GestureMode.Pending) {
+                    if (total.getDistance() > slop) {
+                        mode = if (kotlin.math.abs(total.x) >= kotlin.math.abs(total.y)) {
+                            GestureMode.Seek
+                        } else {
+                            GestureMode.Level
+                        }
+                        if (mode == GestureMode.Seek) onSeekDragStart()
+                    } else if (now - downTime >= longPressTimeout) {
+                        mode = GestureMode.Boost
+                        onBoostStart(2f)
+                    }
+                }
+
+                when (mode) {
+                    GestureMode.Seek -> {
+                        change.consume()
+                        onSeekDrag(delta.x / size.width)
+                    }
+
+                    GestureMode.Level -> {
+                        change.consume()
+                        val value = -delta.y / size.height
+                        if (levelRight) onVolumeDelta(value) else onBrightnessDelta(value)
+                    }
+
+                    GestureMode.Boost -> {
+                        change.consume()
+                        boostAccum += delta.x
+                        val steps = (boostAccum / boostStepPx).toInt()
+                        if (steps != 0) {
+                            boostAccum -= steps * boostStepPx
+                            onBoostChange(steps * 0.25f)
+                        }
+                    }
+
+                    GestureMode.Pending -> Unit
+                }
+            }
+
+            when (mode) {
+                GestureMode.Seek -> onSeekDragEnd()
+                GestureMode.Boost -> onBoostEnd()
+                else -> Unit
+            }
         }
+    }
 }
+
+private enum class GestureMode { Pending, Seek, Level, Boost }
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
