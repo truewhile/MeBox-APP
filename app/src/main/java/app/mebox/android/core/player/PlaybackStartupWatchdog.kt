@@ -27,6 +27,14 @@ internal class PlaybackStartupWatchdog(
         maxDemuxBytes = maxOf(maxDemuxBytes, demuxBytes)
     }
 
-    fun hasTimedOut(nowMs: Long): Boolean =
-        nowMs - lastProgressMs >= idleTimeoutMs || nowMs - startedAtMs >= maxStartupMs
+    /**
+     * [noProgressTimeoutMs] 只在「本轮一个字节都没读到、也没有任何轨道进展」
+     * 时生效，给调用方一个更短的兜底窗口：手上还有别的地址可换时（例如
+     * 115 直链的明文 http），没有必要把整整 [idleTimeoutMs] 耗在转圈上。
+     * 有过进展后回到正常的停滞判断，避免把慢但能用的链路判死。
+     */
+    fun hasTimedOut(nowMs: Long, noProgressTimeoutMs: Long = idleTimeoutMs): Boolean =
+        nowMs - lastProgressMs >= idleTimeoutMs ||
+            (!hasProgress && nowMs - startedAtMs >= noProgressTimeoutMs) ||
+            nowMs - startedAtMs >= maxStartupMs
 }

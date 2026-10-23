@@ -186,7 +186,9 @@ class MeBoxApiClient(
         call { api.favorites(bearer(accessToken)) }
 
     suspend fun watchHistory(accessToken: String, limit: Int = 200): ApiResult<List<WatchHistoryDto>> =
-        call { api.watchHistory(bearer(accessToken), limit) }
+        // include_media=false：详情页只按 media_id 挑续播目标，不需要每条都带上
+        // 整条 media，否则 300 条的响应会大出一个数量级。
+        call { api.watchHistory(bearer(accessToken), limit, includeMedia = false) }
 
     suspend fun clearWatchHistory(accessToken: String, mediaId: String? = null): ApiResult<Unit> =
         callEmpty { api.clearWatchHistory(bearer(accessToken), mediaId) }

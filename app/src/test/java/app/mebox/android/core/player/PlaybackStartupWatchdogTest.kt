@@ -49,4 +49,19 @@ class PlaybackStartupWatchdogTest {
         assertTrue(watchdog.hasProgress)
         assertTrue(watchdog.hasTimedOut(25_000))
     }
+
+    @Test
+    fun `no-data deadline fires earlier when a fallback address is available`() {
+        val watchdog = PlaybackStartupWatchdog(startedAtMs = 0)
+        assertFalse(watchdog.hasTimedOut(7_999, noProgressTimeoutMs = 8_000))
+        assertTrue(watchdog.hasTimedOut(8_000, noProgressTimeoutMs = 8_000))
+    }
+
+    @Test
+    fun `progress disables the early no-data deadline`() {
+        val watchdog = PlaybackStartupWatchdog(startedAtMs = 0)
+        watchdog.recordProgress(1_000)
+        assertFalse(watchdog.hasTimedOut(8_500, noProgressTimeoutMs = 8_000))
+        assertTrue(watchdog.hasTimedOut(21_000, noProgressTimeoutMs = 8_000))
+    }
 }

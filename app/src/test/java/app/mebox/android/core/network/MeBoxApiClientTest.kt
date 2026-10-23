@@ -200,7 +200,7 @@ class MeBoxApiClientTest {
         assertEquals(65_000L, item.positionMs)
         assertEquals(7_200_000L, item.durationMs)
         assertEquals("Movie", item.media?.title)
-        assertEquals("/api/watch-history?limit=200", server.takeRequest().path)
+        assertEquals("/api/watch-history?limit=200&include_media=false", server.takeRequest().path)
 
         server.enqueue(MockResponse().setResponseCode(200).setBody("""{"removed":1}"""))
         val removed = client.clearWatchHistory("token-1", mediaId = "m1")

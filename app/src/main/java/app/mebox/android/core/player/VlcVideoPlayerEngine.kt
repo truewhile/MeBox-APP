@@ -512,13 +512,32 @@ class VlcVideoPlayerEngine(
                 startupWatchdog.observeBytes(
                     now, stats?.readBytes?.toLong() ?: -1L, stats?.demuxReadBytes?.toLong() ?: -1L,
                 )
-                if (startupWatchdog.hasTimedOut(now)) {
+                if (startupWatchdog.hasTimedOut(now, noDataDeadlineMs())) {
                     handleOpenFailure(pendingMedia, stats, "LibVLC 起播超时（持续无进展或达到等待上限）")
                 } else {
                     mainHandler.postDelayed(this, STARTUP_POLL_MS)
                 }
             }
         }, STARTUP_POLL_MS)
+    }
+
+    /**
+     * 「一个字节都没读到」时最多等多久。
+     *
+     * 115 直链同时支持 http/https，而个别网络会把 LibVLC 的非浏览器 TLS 建连
+     * 直接黑洞掉：日志停在 `tls client: resolving ...`，20 秒内 read/demux 全是 0，
+     * 同一条链接换成明文 http 却 1 秒就起播。既然还有 http 兜底，就不该让
+     * 用户在这段空白里一直看转圈。有兜底时用短窗口，没有兜底时保持原来的
+     * 20 秒，避免把慢但能用的链路提前判死。
+     */
+    private fun noDataDeadlineMs(): Long {
+        if (httpAttempted) return STARTUP_IDLE_TIMEOUT_MS
+        val media = pendingMedia ?: return STARTUP_IDLE_TIMEOUT_MS
+        return if (httpVariantOf(media.url) != null) {
+            STARTUP_NO_DATA_FALLBACK_MS
+        } else {
+            STARTUP_IDLE_TIMEOUT_MS
+        }
     }
 
     /** getMedia() 会 retain，统计读取后必须 release，避免每秒泄漏一个原生引用。 */
@@ -1022,6 +1041,12 @@ class VlcVideoPlayerEngine(
 
         /** 定期观察进展，而不是固定十秒后中断。 */
         const val STARTUP_POLL_MS = 1_000L
+
+        /** 有 http 兜底、又完全没读到数据时，提前换地址而不是干等 20 秒。 */
+        const val STARTUP_NO_DATA_FALLBACK_MS = 8_000L
+
+        /** 没有兜底地址时，沿用看门狗默认的停滞窗口。 */
+        const val STARTUP_IDLE_TIMEOUT_MS = 20_000L
 
         /** 留在单条诊断消息的 8 KB 上限内，并优先保留最新错误。 */
         const val VLC_LOG_MAX_LINES = 160

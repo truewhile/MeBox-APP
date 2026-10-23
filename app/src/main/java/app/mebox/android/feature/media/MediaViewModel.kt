@@ -48,6 +48,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import kotlin.math.roundToInt
 
@@ -1034,7 +1035,7 @@ class MediaViewModel(
                         }
                     }
                 }
-                detailResumeJob = launch {
+                val resumeJob = launch {
                     // 剧集与观看历史并行请求：剧集一到就先渲染选集，历史稍后
                     // 再补「继续播放」。详情页的代表条目可能是 OVA 或特别篇，
                     // 直接读它的 /resume 会把继续播放指到一条旧记录，因此要按
@@ -1049,7 +1050,11 @@ class MediaViewModel(
                     val historyDeferred = async {
                         repo.watchHistory(WATCH_HISTORY_SCAN_LIMIT)
                     }
-                    val episodesResult = episodesDeferred.await()
+                    // 剧集接口正常是几百毫秒；卡住时宁可先按「只有代表条目」
+                    // 的集合去匹配历史，也不能让「继续播放」跟着一起等。
+                    val episodesResult = withTimeoutOrNull(EPISODES_LOOKUP_TIMEOUT_MS) {
+                        episodesDeferred.await()
+                    }
                     if (requestId != detailRequestId) return@launch
                     val episodes = (episodesResult as? ApiResult.Success)?.value?.items.orEmpty()
                     if (episodesResult is ApiResult.Success) {
@@ -1062,7 +1067,15 @@ class MediaViewModel(
                             }
                         }
                     }
-                    val historyResult = historyDeferred.await()
+                    // 观看历史是「整库最近 N 条」的扫描，慢链路上要等服务端
+                    // 30 秒读超时才算失败；超过这个上限就按「没有历史」处理，
+                    // 后面还有代表条目的 /resume 和本机记录兜底。
+                    val historyResult = withTimeoutOrNull(RESUME_LOOKUP_TIMEOUT_MS) {
+                        historyDeferred.await()
+                    }
+                    if (historyResult == null) {
+                        DiagnosticsLog.w("Detail", "观看历史解析超时，退回代表条目进度 $mediaId")
+                    }
                     if (requestId != detailRequestId) return@launch
                     val episodeIds = buildSet {
                         add(resolvedDetail.id)
@@ -1099,19 +1112,43 @@ class MediaViewModel(
                         resumeCompleted = duration > 0L &&
                             resumePositionMs >= duration - PlaybackPlan.FINISHED_MARGIN_MS
                     } else if (latest != null) {
+                        // include_media=false 时历史行没有内嵌 media：先按剧集 ID
+                        // 找，再按版本（STRM／不同清晰度）找，最后才退回代表条目。
                         resumeMedia = episodes.firstOrNull { it.id == latest.mediaId }
+                            ?: episodes.firstOrNull { episode ->
+                                episode.versions.any { it.id == latest.mediaId }
+                            }
                             ?: latest.media
                             ?: resolvedDetail
                         resumePositionMs = latest.positionMs
                         resumeCompleted = latest.completed
                     } else {
                         // 历史接口不可用或本剧还没有记录时，退回代表条目自己的进度。
-                        val resume = repo.resume(mediaId)
+                        val resume = withTimeoutOrNull(RESUME_LOOKUP_TIMEOUT_MS) {
+                            repo.resume(mediaId)
+                        }
                         if (requestId != detailRequestId) return@launch
                         if (resume is ApiResult.Success) {
                             resumePositionMs = resume.value.positionMs
                             resumeCompleted = resume.value.completed
                             if (resumePositionMs > 0L) resumeMedia = resolvedDetail
+                        } else {
+                            // 服务端两个接口都拿不到：至少用本机记录的进度，
+                            // 按钮仍然显示「继续播放」并能从那里起播。
+                            val local = progressStore.read(scope, mediaId)
+                            DiagnosticsLog.w(
+                                "Detail",
+                                "服务端续播不可用，改读本机进度 $mediaId " +
+                                    "local=${local?.positionMs ?: -1}",
+                            )
+                            if (local != null && local.positionMs > 0L) {
+                                resumePositionMs = local.positionMs
+                                resumeMedia = resolvedDetail
+                                val duration = local.durationMs
+                                resumeCompleted = duration > 0L &&
+                                    local.positionMs >=
+                                    duration - PlaybackPlan.FINISHED_MARGIN_MS
+                            }
                         }
                     }
                     _state.update { current ->
@@ -1133,6 +1170,20 @@ class MediaViewModel(
                             resolvedDetail.id
                         ) {
                             playDetailNow()
+                        }
+                    }
+                }
+                detailResumeJob = resumeJob
+                // 上面任何一步提前返回、抛异常或这一轮被新的详情页顶掉，
+                // 都不能把「正在获取续播…」留在按钮上：解析一结束就说明
+                // 可以用已经拿到的进度起播了。
+                resumeJob.invokeOnCompletion {
+                    if (requestId != detailRequestId) return@invokeOnCompletion
+                    _state.update { current ->
+                        if (current.detail?.id == resolvedDetail.id && current.detailResumeLoading) {
+                            current.copy(detailResumeLoading = false)
+                        } else {
+                            current
                         }
                     }
                 }
@@ -1877,6 +1928,17 @@ class MediaViewModel(
          * 「没有记录」而退回代表条目的旧进度。
          */
         const val WATCH_HISTORY_SCAN_LIMIT = 300
+
+        /**
+         * 详情页解析「继续播放」时，单个网络步骤最多等多久。
+         *
+         * 这两个请求在慢链路上会一路耗到 OkHttp 的 30 秒读超时，按钮就挂着
+         * 「正在获取续播…」不动；超过这个上限就按「拿不到」降级处理。
+         */
+        const val RESUME_LOOKUP_TIMEOUT_MS = 8_000L
+
+        /** 选集只影响「最新一集」落在哪一条，超时后按只有代表条目处理。 */
+        const val EPISODES_LOOKUP_TIMEOUT_MS = 12_000L
 
         /** 服务端默认弹幕字号；本地缩放比例以它为基准。 */
         const val STANDARD_DANMAKU_FONT = 24f

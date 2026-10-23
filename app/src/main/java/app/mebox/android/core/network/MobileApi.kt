@@ -182,6 +182,12 @@ interface MobileApi {
     suspend fun watchHistory(
         @Header("Authorization") authorization: String,
         @Query("limit") limit: Int,
+        /**
+         * 只要历史行、不要内嵌的 media：详情页只用 media_id 判断续播目标，
+         * 300 条带上 media 后响应约 420KB，手机上传输就要十几秒。
+         * 老服务端会忽略这个参数，行为不变。
+         */
+        @Query("include_media") includeMedia: Boolean? = null,
     ): Response<List<WatchHistoryDto>>
 
     @DELETE("api/watch-history")
