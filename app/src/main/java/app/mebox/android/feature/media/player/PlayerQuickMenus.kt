@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material.icons.outlined.Vrpano
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -78,6 +79,7 @@ fun PlayerQuickMenuCard(
     danmakuMatchLabel: String?,
     danmakuCount: Int,
     osdVisible: Boolean,
+    vrEnabled: Boolean,
     onSelectSpeed: (Float) -> Unit,
     onSelectAudio: (String?) -> Unit,
     onSelectSubtitle: (String?) -> Unit,
@@ -87,6 +89,7 @@ fun PlayerQuickMenuCard(
     onOpenDanmakuSearch: () -> Unit,
     onOpenDanmakuSettings: () -> Unit,
     onOpenEngine: () -> Unit,
+    onToggleVr: (Boolean) -> Unit,
     onToggleOsd: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -120,6 +123,16 @@ fun PlayerQuickMenuCard(
                     detail = "当前：$engineLabel",
                     onClick = onOpenEngine,
                     modifier = firstFocusModifier,
+                )
+                MenuDivider()
+                // VR 开关放在这里：进 VR 只需要点两下（⚡ → 本行），
+                // 不用再绕到设置里的「VR / 全景」，投影/立体等细项仍在那边调。
+                MenuRow(
+                    icon = Icons.Outlined.Vrpano,
+                    label = "切换为 VR 播放",
+                    detail = if (vrEnabled) "已开启，点击回到普通播放" else "全景球面 + 陀螺仪头部追踪",
+                    selected = vrEnabled,
+                    onClick = { onToggleVr(!vrEnabled) },
                 )
                 MenuDivider()
                 MenuRow(

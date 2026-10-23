@@ -20,5 +20,8 @@ fun createVideoPlayerEngine(
 ): VideoPlayerEngine =
     when (kind) {
         PlayerEngineKind.EXO -> ExoVideoPlayerEngine(context, httpClient, decoderMode)
-        PlayerEngineKind.VLC -> VlcVideoPlayerEngine(context.applicationContext, decoderMode, httpClient)
+        // 传原始 Context（通常是 Activity）：内核要用它创建画面视图，VR 视图
+        // 还要读窗口旋转；Application Context 读不到 display，一进 VR 就崩。
+        // LibVLC / 缓存目录这些长生命周期用途在内核内部自行取 applicationContext。
+        PlayerEngineKind.VLC -> VlcVideoPlayerEngine(context, decoderMode, httpClient)
     }

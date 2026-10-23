@@ -1821,6 +1821,7 @@ private fun PlayerSurface(
                 danmakuMatchLabel = danmaku.matchLabel,
                 danmakuCount = danmaku.comments.size,
                 osdVisible = osdVisible,
+                vrEnabled = vrEnabled,
                 onSelectSpeed = { value ->
                     playbackSpeed = value
                     engine.setSpeed(value)
@@ -1863,6 +1864,10 @@ private fun PlayerSurface(
                 onOpenEngine = {
                     quickMenu = null
                     settingsSection = PlayerSettingsSection.ENGINE
+                },
+                onToggleVr = { enabled ->
+                    quickMenu = null
+                    setVrEnabled(enabled)
                 },
                 onToggleOsd = {
                     osdVisible = !osdVisible

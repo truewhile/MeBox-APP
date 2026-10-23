@@ -8,7 +8,6 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.opengl.GLSurfaceView
-import android.os.Build
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.Surface
@@ -234,14 +233,13 @@ class VrVideoView(context: Context) : FrameLayout(context) {
 
     @Suppress("DEPRECATION")
     private fun displayRotation(): Int {
-        val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            context.display?.rotation
-        } else {
-            (context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
-                ?.defaultDisplay
-                ?.rotation
-        }
-        return rotation ?: Surface.ROTATION_0
+        // 用视图自身所属的 display，而不是 context.display：视图可能由
+        // Application 这类非可视 Context 创建，Android 11+ 的
+        // Context#getDisplay 会直接抛 UnsupportedOperationException。
+        // 视图没挂到窗口时 getDisplay() 返回 null，再退到 WindowManager。
+        display?.let { return it.rotation }
+        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+        return windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
     }
 
     private fun applySubtitleLayout() {
