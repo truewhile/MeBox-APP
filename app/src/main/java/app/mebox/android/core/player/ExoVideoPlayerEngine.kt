@@ -346,6 +346,15 @@ class ExoVideoPlayerEngine(
         val surface = Surface(surfaceTexture)
         videoSurface = surface
         player.setVideoSurface(surface)
+        // VR 画面发灰/过曝时，需要知道实际解码格式（位深、色彩空间）才能判断
+        // 是片源 HDR 还是取帧路径的问题，这里把色彩信息写进诊断日志。
+        player.videoFormat?.let { format ->
+            DiagnosticsLog.i(
+                "Player",
+                "EXO VR 输出 ${format.width}x${format.height} codec=${format.codecs}" +
+                    " color=${format.colorInfo}",
+            )
+        }
     }
 
     private fun releaseVrView() {

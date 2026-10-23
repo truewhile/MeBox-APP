@@ -258,7 +258,15 @@ class VlcVideoPlayerEngine(
 
     /** 宿主（Compose 给的 Framelayout）尺寸变化时重算画面框。 */
     private val hostLayoutListener = View.OnLayoutChangeListener { _, _, _, right, bottom, _, _, oldRight, oldBottom ->
-        if (right != oldRight || bottom != oldBottom) applySurfaceBox()
+        if (right != oldRight || bottom != oldBottom) {
+            // VR 模式的输出窗口就是宿主本身（纹理铺满），尺寸变了要同步给 VLC，
+            // 否则转屏/分屏后 VLC 仍按旧尺寸出图。普通模式由 applySurfaceBox 处理。
+            if (vrView != null) {
+                runCatching { mediaPlayer.vlcVout.setWindowSize(right, bottom) }
+            } else {
+                applySurfaceBox()
+            }
+        }
     }
 
     /**
@@ -386,8 +394,21 @@ class VlcVideoPlayerEngine(
             if (mediaPlayer.vlcVout.areViewsAttached()) {
                 mediaPlayer.vlcVout.detachViews()
             }
+            // 普通画面由 VLCVideoLayout 的布局回调调用 setWindowSize；VR 是自己
+            // 接纹理，少了这步 VLC 拿到的输出窗口是 0×0，画面缩放/清屏都会异常。
+            host?.let { frame ->
+                if (frame.width > 0 && frame.height > 0) {
+                    mediaPlayer.vlcVout.setWindowSize(frame.width, frame.height)
+                }
+            }
             mediaPlayer.vlcVout.setVideoSurface(surfaceTexture)
             mediaPlayer.vlcVout.attachViews()
+            DiagnosticsLog.i(
+                "Player",
+                "LibVLC VR 纹理输出已挂载 size=${host?.width}x${host?.height}" +
+                    " 软解=$softwareDecodeOnly" +
+                    " video=${mediaPlayer.currentVideoTrack?.let { "${it.width}x${it.height} projection=${it.projection}" }}",
+            )
         }.onFailure { error ->
             DiagnosticsLog.w(
                 "Player",
