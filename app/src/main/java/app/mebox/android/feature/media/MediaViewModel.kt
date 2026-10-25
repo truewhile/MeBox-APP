@@ -638,12 +638,24 @@ class MediaViewModel(
     fun refreshHistory() {
         _state.update { it.copy(historyLoading = true, historyError = null) }
         viewModelScope.launch {
-            when (val result = repo.watchHistory(HISTORY_LIMIT)) {
-                is ApiResult.Success -> _state.update {
-                    it.copy(
-                        historyLoading = false,
-                        historyItems = result.value.filter { item -> item.media != null },
-                    )
+            // 这里必须带 media：列表页要渲染封面/标题/时长，服务端不内嵌
+            // media 时每条的 media 都是 null，条目会被下面的过滤整片丢掉。
+            when (val result = repo.watchHistory(HISTORY_LIMIT, includeMedia = true)) {
+                is ApiResult.Success -> {
+                    val visible = result.value.filter { item -> item.media != null }
+                    _state.update {
+                        it.copy(
+                            historyLoading = false,
+                            historyItems = visible,
+                            // 服务端有记录但都没带 media（媒体已删除/不可见）
+                            // 时给出原因，而不是让页面停在「还没有观看记录」。
+                            historyError = if (visible.isEmpty() && result.value.isNotEmpty()) {
+                                "有 ${result.value.size} 条观看记录，但对应的媒体已不可用"
+                            } else {
+                                null
+                            },
+                        )
+                    }
                 }
                 is ApiResult.Failure -> _state.update {
                     it.copy(
@@ -1048,7 +1060,9 @@ class MediaViewModel(
                         }
                     }
                     val historyDeferred = async {
-                        repo.watchHistory(WATCH_HISTORY_SCAN_LIMIT)
+                        // 续播只按 media_id 匹配，不需要内嵌 media：300 条带上
+                        // media 会让响应大出一个数量级，慢链路上直接超时。
+                        repo.watchHistory(WATCH_HISTORY_SCAN_LIMIT, includeMedia = false)
                     }
                     // 剧集接口正常是几百毫秒；卡住时宁可先按「只有代表条目」
                     // 的集合去匹配历史，也不能让「继续播放」跟着一起等。

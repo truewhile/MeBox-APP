@@ -156,8 +156,18 @@ class MediaRepository(
     suspend fun favorites(): ApiResult<FavoriteListDto> =
         authorized { api.favorites(it) }
 
-    suspend fun watchHistory(limit: Int = 200): ApiResult<List<WatchHistoryDto>> =
-        authorized { api.watchHistory(it, limit) }
+    /**
+     * 观看历史。
+     *
+     * [includeMedia] 为 `true` 时服务端会在每条记录里内嵌 media，观看历史
+     * 页面依赖它渲染条目；详情页的续播扫描只需要 `media_id`，传 `false`
+     * 可显著缩小响应。
+     */
+    suspend fun watchHistory(
+        limit: Int = 200,
+        includeMedia: Boolean = true,
+    ): ApiResult<List<WatchHistoryDto>> =
+        authorized { api.watchHistory(it, limit, includeMedia) }
 
     suspend fun clearWatchHistory(mediaId: String? = null): ApiResult<Unit> =
         authorized { api.clearWatchHistory(it, mediaId) }

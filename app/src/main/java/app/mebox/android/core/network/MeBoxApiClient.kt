@@ -185,10 +185,22 @@ class MeBoxApiClient(
     suspend fun favorites(accessToken: String): ApiResult<FavoriteListDto> =
         call { api.favorites(bearer(accessToken)) }
 
-    suspend fun watchHistory(accessToken: String, limit: Int = 200): ApiResult<List<WatchHistoryDto>> =
-        // include_media=false：详情页只按 media_id 挑续播目标，不需要每条都带上
-        // 整条 media，否则 300 条的响应会大出一个数量级。
-        call { api.watchHistory(bearer(accessToken), limit, includeMedia = false) }
+    /**
+     * 拉取观看历史。
+     *
+     * [includeMedia] 决定服务端是否在每条记录里内嵌整条 media：
+     * - 观看历史页面要渲染封面、标题、时长，必须为 `true`（服务端默认值）；
+     * - 详情页只按 `media_id` 挑续播目标，传 `false` 可以省掉十倍以上的响应体积。
+     *
+     * 这是一个由调用方决定的参数，不能写死成 `false`：那样历史页面拿到的
+     * 每条记录 `media` 都是 null，列表会被整体过滤成空。
+     */
+    suspend fun watchHistory(
+        accessToken: String,
+        limit: Int = 200,
+        includeMedia: Boolean = true,
+    ): ApiResult<List<WatchHistoryDto>> =
+        call { api.watchHistory(bearer(accessToken), limit, includeMedia = includeMedia) }
 
     suspend fun clearWatchHistory(accessToken: String, mediaId: String? = null): ApiResult<Unit> =
         callEmpty { api.clearWatchHistory(bearer(accessToken), mediaId) }

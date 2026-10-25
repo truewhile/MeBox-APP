@@ -7,6 +7,7 @@ import okhttp3.mockwebserver.MockWebServer
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -200,7 +201,18 @@ class MeBoxApiClientTest {
         assertEquals(65_000L, item.positionMs)
         assertEquals(7_200_000L, item.durationMs)
         assertEquals("Movie", item.media?.title)
-        assertEquals("/api/watch-history?limit=200&include_media=false", server.takeRequest().path)
+        // 默认要 media：观看历史页面靠它渲染条目。
+        assertEquals("/api/watch-history?limit=200&include_media=true", server.takeRequest().path)
+
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """[{"id":"h1","media_id":"m1","position_ms":65000,"duration_ms":7200000}]"""
+            )
+        )
+        val slimHistory = client.watchHistory("token-1", limit = 300, includeMedia = false)
+        assertTrue(slimHistory is ApiResult.Success)
+        assertNull((slimHistory as ApiResult.Success).value.single().media)
+        assertEquals("/api/watch-history?limit=300&include_media=false", server.takeRequest().path)
 
         server.enqueue(MockResponse().setResponseCode(200).setBody("""{"removed":1}"""))
         val removed = client.clearWatchHistory("token-1", mediaId = "m1")
