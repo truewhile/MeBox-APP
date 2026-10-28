@@ -108,6 +108,12 @@ class ReaderAudioEngine(
     private var startedPlayback = false
     private var stopAtChapterEnd = false
 
+    /**
+     * 已自动重装的章节序号集合：同一步错误只自动重装一次。
+     * 真正的「源挂了」不能靠反复重装掩盖，也不能把书源打成限流。
+     */
+    private val autoReloadedChapters = mutableSetOf<Int>()
+
     /** 用户拖动进度条后的保护期，避免刚拖到结尾就被片尾跳过切走。 */
     private var seekGuardUntilMs = 0L
 
@@ -145,6 +151,16 @@ class ReaderAudioEngine(
                 "音频播放失败 ${error.errorCodeName} (${error.errorCode})",
                 error,
             )
+            // 音源票被 CDN 拒掉时，第一次失败往往是「服务端还没换到新票」或
+            // 「缓存里还是旧直链」。服务端现在会自己换票重拉，所以这里重装一次
+            // 同一章就能拿到新票，不必让用户看到「播放失败」再去手点重试。
+            // 每种错误只自动重试一次，避免上游真的挂了时无限重装。
+            if (shouldAutoReload(error)) {
+                val index = _state.value.chapterIndex
+                DiagnosticsLog.i("ReaderAudio", "自动重装本章 index=$index")
+                loadChapter(index, _state.value.positionMs.div(1000).toInt(), autoPlay = true)
+                return
+            }
             failChapterLoad(
                 playback.requestId,
                 _state.value.chapterIndex,
@@ -162,6 +178,15 @@ class ReaderAudioEngine(
             }
         }
     }
+
+    /**
+     * 这个播放错误值得「重装本章再来一次」吗？
+     *
+     * 针对的是音源直链签名票失效的两种表现（2004 HTTP 状态错误 / 3003 容器不支持），
+     * 判定与「每章只重装一次」的节流都在 [ReaderAudioRecovery] 里，便于单测。
+     */
+    private fun shouldAutoReload(error: PlaybackException): Boolean =
+        ReaderAudioRecovery.shouldAutoReload(error.errorCode, _state.value.chapterIndex, autoReloadedChapters)
 
     /**
      * 后台服务被系统回收或主动释放时，MediaController 会断开。
@@ -513,6 +538,7 @@ class ReaderAudioEngine(
         startedPlayback = false
         stopAtChapterEnd = false
         seekGuardUntilMs = 0L
+        ReaderAudioRecovery.clear(autoReloadedChapters)
         runCatching { controller?.stop() }
         runCatching { controller?.clearMediaItems() }
         book = null
@@ -645,6 +671,8 @@ class ReaderAudioEngine(
                     if (playback.playWhenReady) startedPlayback = true
                     playback.mediaInstalled(request)
                     advanceGuard.mediaInstalled()
+                    // 这一章成功装载：清掉自动重装标记，下次再进这一章仍可自动恢复一次。
+                    ReaderAudioRecovery.forgetChapter(index, autoReloadedChapters)
                     syncPlaybackState()
                     logStartupTiming("媒体已装载")
                     startTicker()
