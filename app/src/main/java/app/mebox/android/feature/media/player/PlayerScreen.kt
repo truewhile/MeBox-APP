@@ -147,8 +147,8 @@ fun PlayerScreen(
     onDanmakuSelectEpisode: (Long) -> Unit,
     onDanmakuSearch: (String) -> Unit = {},
     onDanmakuResetAuto: () -> Unit = {},
-    /** 电视端打开手机扫码输入弹幕关键词的对话框。 */
-    onOpenDanmakuPhoneInput: (() -> Unit)? = null,
+    /** 电视端弹幕搜索的手机扫码入口；非空时在弹幕面板内直接显示二维码。 */
+    danmakuPhoneInput: DanmakuPhoneInput? = null,
 ) {
     if (request == null) {
         BackHandler { onBack() }
@@ -247,7 +247,7 @@ fun PlayerScreen(
             onDanmakuSelectEpisode = onDanmakuSelectEpisode,
             onDanmakuSearch = onDanmakuSearch,
             onDanmakuResetAuto = onDanmakuResetAuto,
-            onOpenDanmakuPhoneInput = onOpenDanmakuPhoneInput,
+            danmakuPhoneInput = danmakuPhoneInput,
         )
     }
 }
@@ -311,7 +311,7 @@ private fun PlayerSurface(
     onDanmakuSelectEpisode: (Long) -> Unit,
     onDanmakuSearch: (String) -> Unit,
     onDanmakuResetAuto: () -> Unit,
-    onOpenDanmakuPhoneInput: (() -> Unit)?,
+    danmakuPhoneInput: DanmakuPhoneInput?,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -2182,7 +2182,7 @@ private fun PlayerSurface(
                     onSelectEpisode = onDanmakuSelectEpisode,
                     onSearch = onDanmakuSearch,
                     onResetAuto = onDanmakuResetAuto,
-                    onOpenPhoneSearch = onOpenDanmakuPhoneInput,
+                    phoneInput = danmakuPhoneInput,
                     autoFocus = isTv,
                     sideSheet = isTv,
                 )

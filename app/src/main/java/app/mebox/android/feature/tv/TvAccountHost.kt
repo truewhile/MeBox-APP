@@ -53,13 +53,14 @@ import app.mebox.android.feature.MainViewModel
 import app.mebox.android.feature.media.MainTab
 import app.mebox.android.feature.media.MediaScreen
 import app.mebox.android.feature.media.MediaViewModel
+import app.mebox.android.feature.media.player.DanmakuPhoneInput
 import app.mebox.android.feature.media.player.PlayerScreen
 import app.mebox.android.feature.reader.ReaderScreen
 import app.mebox.android.feature.reader.ReaderSourcesContent
 import app.mebox.android.feature.reader.ReaderViewModel
 import coil.compose.LocalImageLoader
 
-private enum class PhonePurpose { MEDIA_SEARCH, READER_SEARCH, DANMAKU_SEARCH }
+private enum class PhonePurpose { MEDIA_SEARCH, READER_SEARCH }
 
 /**
  * 登录后的电视主界面。
@@ -111,8 +112,7 @@ fun TvAccountHost(
     LaunchedEffect(Unit) {
         mainViewModel.phoneInput.events.collect { event ->
             if (event !is PhoneInputEvent.Search) return@collect
-            val purpose = phonePurpose ?: return@collect
-            when (purpose) {
+            when (phonePurpose) {
                 PhonePurpose.MEDIA_SEARCH -> {
                     mediaViewModel.selectTab(MainTab.MEDIA)
                     mediaViewModel.onSearchQueryChange(event.query)
@@ -125,9 +125,12 @@ fun TvAccountHost(
                     readerViewModel.submitSearch()
                 }
 
-                PhonePurpose.DANMAKU_SEARCH -> {
-                    // 播放页的弹幕面板保持打开，搜索结果直接回到面板里。
-                    mediaViewModel.searchDanmaku(event.query)
+                null -> {
+                    // 播放页的弹幕面板把二维码直接铺在面板里，扫码提交的关键词
+                    // 不需要额外的对话框承接：只要还在播放页就直接当弹幕搜索词。
+                    if (mediaViewModel.state.value.screen is MediaScreen.Player) {
+                        mediaViewModel.searchDanmaku(event.query)
+                    }
                 }
             }
             phonePurpose = null
@@ -185,9 +188,12 @@ fun TvAccountHost(
                     onDanmakuSelectEpisode = mediaViewModel::selectDanmakuLibrary,
                     onDanmakuSearch = mediaViewModel::searchDanmaku,
                     onDanmakuResetAuto = mediaViewModel::resetDanmakuMatch,
-                    onOpenDanmakuPhoneInput = {
-                        phonePurpose = PhonePurpose.DANMAKU_SEARCH
-                    },
+                    // 弹幕搜索直接复用局域网输入服务：二维码就铺在弹幕面板里，
+                    // 不再额外弹一层「手机扫码输入」对话框。
+                    danmakuPhoneInput = DanmakuPhoneInput(
+                        url = phoneUrl,
+                        onRefresh = onRefreshQr,
+                    ),
                 )
 
                 is MediaScreen.Detail -> TvDetailScreen(
@@ -250,7 +256,6 @@ fun TvAccountHost(
             TvPhoneInputDialog(
                 title = when (purpose) {
                     PhonePurpose.READER_SEARCH -> "手机输入阅读搜索"
-                    PhonePurpose.DANMAKU_SEARCH -> "手机输入弹幕关键词"
                     PhonePurpose.MEDIA_SEARCH -> "手机输入影视搜索"
                 },
                 url = phoneUrl,

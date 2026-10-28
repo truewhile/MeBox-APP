@@ -9,6 +9,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -60,7 +61,7 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.PictureInPictureAlt
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.QrCode2
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SkipNext
@@ -104,6 +105,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -116,6 +118,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import app.mebox.android.core.input.QrCodes
 import app.mebox.android.core.media.PlaybackPlan
 import app.mebox.android.core.player.vr.VrDisplayMode
 import app.mebox.android.core.player.vr.VrProjection
@@ -1566,6 +1569,18 @@ private fun PlayerChoiceRow(
 // 弹幕面板
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * 电视端弹幕搜索的手机扫码入口。
+ *
+ * 二维码直接内嵌在弹幕面板里，不再经过「先点按钮、再弹一层对话框」：
+ * [url] 为空表示当前没有局域网地址（例如电视没联网），[onRefresh] 用于
+ * 网络切换后重新绑定端口并换发 token。
+ */
+data class DanmakuPhoneInput(
+    val url: String?,
+    val onRefresh: () -> Unit,
+)
+
 @Composable
 fun DanmakuSettingsSheet(
     state: DanmakuUiState,
@@ -1576,8 +1591,8 @@ fun DanmakuSettingsSheet(
     onSelectEpisode: (Long) -> Unit,
     onSearch: (String) -> Unit = {},
     onResetAuto: () -> Unit = {},
-    /** 电视端没有键盘：非空时显示「手机扫码输入关键词」入口。 */
-    onOpenPhoneSearch: (() -> Unit)? = null,
+    /** 电视端没有键盘：非空时在面板里直接显示手机扫码二维码。 */
+    phoneInput: DanmakuPhoneInput? = null,
     autoFocus: Boolean = false,
     sideSheet: Boolean = false,
 ) {
@@ -1638,7 +1653,7 @@ fun DanmakuSettingsSheet(
                 state = state,
                 onSearch = onSearch,
                 onResetAuto = onResetAuto,
-                onOpenPhoneSearch = onOpenPhoneSearch,
+                phoneInput = phoneInput,
             )
         }
 
@@ -1726,7 +1741,7 @@ private fun DanmakuManualMatch(
     state: DanmakuUiState,
     onSearch: (String) -> Unit,
     onResetAuto: () -> Unit,
-    onOpenPhoneSearch: (() -> Unit)?,
+    phoneInput: DanmakuPhoneInput?,
 ) {
     // 只把外部关键词的变化同步回输入框；自动匹配完成时不要清掉用户正在
     // 输入但还没提交的文字。
@@ -1734,7 +1749,7 @@ private fun DanmakuManualMatch(
         mutableStateOf(state.manualKeyword.orEmpty())
     }
     Text(
-        if (onOpenPhoneSearch != null) {
+        if (phoneInput != null) {
             "手动匹配（电视上用手机扫码输入关键词）"
         } else {
             "手动匹配（留空则恢复自动匹配）"
@@ -1743,22 +1758,8 @@ private fun DanmakuManualMatch(
         style = PlayerSkin.Overline,
     )
     Spacer(Modifier.height(6.dp))
-    if (onOpenPhoneSearch != null) {
-        OutlinedButton(
-            onClick = onOpenPhoneSearch,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(10.dp),
-            border = BorderStroke(1.dp, PlayerSkin.White18),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = PlayerSkin.TextPrimary),
-        ) {
-            Icon(
-                Icons.Outlined.QrCode2,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text("手机扫码输入弹幕关键词", style = PlayerSkin.BodySmall)
-        }
+    if (phoneInput != null) {
+        DanmakuPhoneQrBlock(phoneInput)
     } else {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -1818,6 +1819,111 @@ private fun DanmakuManualMatch(
                 Text("恢复自动匹配", color = PlayerSkin.Accent, style = PlayerSkin.Overline)
             }
         }
+    }
+}
+
+/**
+ * 弹幕面板里的手机扫码区。
+ *
+ * 二维码直接铺在面板内，遥控器不用再多点一层；扫码后手机网页提交的关键词
+ * 会立刻回到这个面板触发 `/api/danmaku/:id?kw=` 搜索，候选弹幕库仍然在
+ * 面板里用遥控器选择。
+ */
+@Composable
+private fun DanmakuPhoneQrBlock(phoneInput: DanmakuPhoneInput) {
+    val qrSize = 148.dp
+    val shape = RoundedCornerShape(12.dp)
+    // 二维码内容只随 token/地址变化，重扫一次即可复用同一张 bitmap。
+    val bitmap = remember(phoneInput.url) {
+        phoneInput.url?.let { QrCodes.bitmap(it, sizePx = 512) }
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(PlayerSkin.White06)
+            .border(1.dp, PlayerSkin.White14, shape)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(qrSize)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color.White)
+                .padding(8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "手机扫码输入弹幕关键词二维码",
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                Text(
+                    "未连接局域网",
+                    color = Color(0xFF666666),
+                    style = PlayerSkin.Overline,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "手机扫码输入关键词",
+                color = PlayerSkin.TextPrimary,
+                style = PlayerSkin.BodySmall,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "扫码后在网页里填写番剧或电影名，提交后电视立即开始搜索",
+                color = PlayerSkin.TextSecondary,
+                style = PlayerSkin.Overline,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                phoneInput.url ?: "请先连接 Wi-Fi 或有线网络",
+                color = PlayerSkin.TextTertiary,
+                style = PlayerSkin.Overline,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(8.dp))
+            DanmakuQrRefreshButton(onClick = phoneInput.onRefresh)
+        }
+    }
+}
+
+/** 二维码刷新入口：换网后重新绑定端口并换发 token。 */
+@Composable
+private fun DanmakuQrRefreshButton(onClick: () -> Unit) {
+    val shape = RoundedCornerShape(10.dp)
+    var focused by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier
+            .clip(shape)
+            .background(if (focused) PlayerSkin.White08 else Color.Transparent)
+            .border(
+                1.dp,
+                if (focused) PlayerSkin.White28 else PlayerSkin.White14,
+                shape,
+            )
+            .playerTvFocus(focused, shape)
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Outlined.Refresh,
+            contentDescription = null,
+            tint = PlayerSkin.TextSecondary,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text("刷新二维码", color = PlayerSkin.TextPrimary, style = PlayerSkin.Overline)
     }
 }
 
