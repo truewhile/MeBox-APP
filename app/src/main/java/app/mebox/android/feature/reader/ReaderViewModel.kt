@@ -1807,12 +1807,20 @@ class ReaderViewModel(
                 when (val result = repo.browserPending(sourceId)) {
                     is ApiResult.Success -> _state.update { current ->
                         val active = current.browserPage
-                        val newest = result.value
-                            .filter { it.id != active?.id }
-                            .maxByOrNull { it.seq }
+                        // 服务端可能同时登记多个页面：上一个还在等用户操作，用户又点了
+                        // 另一个按钮（先「切换线路」再「书源设置」就是这样）。按 seq 取
+                        // 最新的那个展示——旧实现只要 active 非空就永不换页，新页面
+                        // 永远打不开，表现是「书源设置」点了没反应。
+                        val newest = result.value.maxByOrNull { it.seq }
                         current.copy(
                             pendingBrowsers = result.value,
-                            browserPage = active ?: newest,
+                            browserPage = when {
+                                newest == null -> active
+                                active == null -> newest
+                                newest.id == active.id -> active
+                                newest.seq > active.seq -> newest
+                                else -> active
+                            },
                         )
                     }
                     else -> Unit

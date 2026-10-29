@@ -1,11 +1,16 @@
 package app.mebox.android.feature.reader
 
 import android.annotation.SuppressLint
+import android.net.http.SslError
 import android.webkit.JavascriptInterface
+import android.webkit.SslErrorHandler
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,20 +50,23 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import app.mebox.android.core.log.DiagnosticsLog
 import app.mebox.android.core.network.ApiResult
 import app.mebox.android.core.network.ReaderBrowserPageDto
 import app.mebox.android.core.network.ReaderLoginFieldDto
@@ -87,11 +95,37 @@ internal fun ReaderBrowserPageDialog(
     origin: String,
     viewModel: ReaderViewModel,
 ) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var webView by remember { mutableStateOf<WebView?>(null) }
-    var currentUrl by remember { mutableStateOf(page.targetUrl.ifBlank { origin }) }
-    var submitting by remember { mutableStateOf(false) }
+    // page.id / reloadToken 变化时必须重建 WebView：AndroidView 的 factory 只在
+    // 节点首次组合时执行，沿用旧节点不会重新 loadUrl——「切换线路」之后再点
+    // 「书源设置」就会一直停在上一个页面（或空白），看起来像页面打不开。
+    var reloadToken by remember(page.id) { mutableIntStateOf(0) }
+    var webView by remember(page.id, reloadToken) { mutableStateOf<WebView?>(null) }
+    var currentUrl by remember(page.id, reloadToken) {
+        mutableStateOf(page.targetUrl.ifBlank { origin })
+    }
+    var submitting by remember(page.id, reloadToken) { mutableStateOf(false) }
+    val pageUrl = remember(page.id, origin, page.targetUrl) {
+        resolvePageUrl(origin, page.pageUrl, page.targetUrl)
+    }
+    var loading by remember(page.id, reloadToken) { mutableStateOf(pageUrl.isNotBlank()) }
+    // 页面加载失败（DNS / TLS / 4xx / 5xx）必须给用户看原因。
+    // 旧实现没有任何错误回调，WebView 失败就是一片白，无法判断是没登录还是页面坏了。
+    var error by remember(page.id, reloadToken) {
+        mutableStateOf(
+            if (pageUrl.isBlank()) "服务端没有返回页面地址，请重试或重新打开" else "",
+        )
+    }
+    // 站外跳转被拦截等说明：不影响「完成」，只做提示。
+    var notice by remember(page.id, reloadToken) { mutableStateOf("") }
+
+    // 只记 id/标题与是否有地址，不记带签名的完整 URL。
+    LaunchedEffect(page.id, reloadToken) {
+        DiagnosticsLog.i(
+            "Reader",
+            "承载书源页面 id=${page.id} title=${page.title} mode=${page.mode} urlBlank=${pageUrl.isBlank()}",
+        )
+    }
 
     Dialog(
         onDismissRequest = {
@@ -123,23 +157,35 @@ internal fun ReaderBrowserPageDialog(
                             .weight(1f)
                             .padding(horizontal = 12.dp),
                     )
+                    if (loading && error.isEmpty()) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
                     if (page.mode == "wait") {
                         if (submitting) {
                             CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(8.dp))
                         } else {
-                            Button(onClick = {
-                                submitting = true
-                                webView?.evaluateJavascript(
-                                    "(function(){return document.documentElement.outerHTML})()",
-                                ) { value ->
-                                    val html = runCatching {
-                                        JSONTokener(value).nextValue() as? String
-                                    }.getOrNull().orEmpty()
-                                    viewModel.submitBrowserResult(page, html, currentUrl)
-                                    submitting = false
-                                }
-                            }) {
+                            Button(
+                                // 页面没加载出来时回传的 DOM 是空的，书源解析必然失败，
+                                // 直接禁用并让用户先「重试」。
+                                enabled = error.isEmpty(),
+                                onClick = {
+                                    submitting = true
+                                    webView?.evaluateJavascript(
+                                        "(function(){return document.documentElement.outerHTML})()",
+                                    ) { value ->
+                                        val html = runCatching {
+                                            JSONTokener(value).nextValue() as? String
+                                        }.getOrNull().orEmpty()
+                                        viewModel.submitBrowserResult(page, html, currentUrl)
+                                        submitting = false
+                                    }
+                                },
+                            ) {
                                 Text("完成")
                             }
                             Spacer(Modifier.width(8.dp))
@@ -151,69 +197,171 @@ internal fun ReaderBrowserPageDialog(
                         Icon(Icons.Default.Close, contentDescription = "关闭")
                     }
                 }
-                Box(modifier = Modifier.weight(1f)) {
-                    AndroidView(
-                        factory = { ctx ->
-                            WebView(ctx).apply {
-                                settings.javaScriptEnabled = true
-                                settings.domStorageEnabled = true
-                                settings.databaseEnabled = true
-                                settings.allowFileAccess = false
-                                settings.allowContentAccess = false
-                                settings.loadWithOverviewMode = true
-                                settings.useWideViewPort = true
-                                settings.cacheMode = WebSettings.LOAD_DEFAULT
-                                addJavascriptInterface(
-                                    BrowserBridge(page.id, viewModel, scope, this),
-                                    BRIDGE_NAME,
-                                )
-                                webViewClient = object : WebViewClient() {
-                                    override fun onPageStarted(
-                                        view: WebView,
-                                        url: String?,
-                                        favicon: android.graphics.Bitmap?,
-                                    ) {
-                                        url?.let { currentUrl = it }
-                                        view.evaluateJavascript(BRIDGE_SCRIPT, null)
-                                    }
 
-                                    override fun onPageFinished(view: WebView, url: String?) {
-                                        url?.let { currentUrl = it }
-                                        view.evaluateJavascript(BRIDGE_SCRIPT, null)
-                                    }
-
-                                    override fun shouldOverrideUrlLoading(
-                                        view: WebView,
-                                        request: WebResourceRequest,
-                                    ): Boolean {
-                                        val target = request.url.toString()
-                                        // 只允许服务端同源页面/资源；外站导航在这里拦下，
-                                        // 避免承载页把用户带到未知站点并携带页面状态。
-                                        return !(target.startsWith(origin) ||
-                                            target.startsWith("about:") ||
-                                            target.startsWith("data:"))
-                                    }
-                                }
-                                loadUrl(resolvePageUrl(origin, page.pageUrl))
-                                webView = this
-                            }
-                        },
-                        onRelease = { view ->
-                            view.removeJavascriptInterface(BRIDGE_NAME)
-                            view.destroy()
-                            webView = null
-                        },
-                        modifier = Modifier.fillMaxSize(),
+                if (error.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.errorContainer)
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { reloadToken += 1 }) { Text("重试") }
+                    }
+                } else if (notice.isNotEmpty()) {
+                    Text(
+                        notice,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
                     )
+                }
+
+                Box(modifier = Modifier.weight(1f)) {
+                    if (pageUrl.isBlank()) {
+                        Text(
+                            "没有可显示的页面地址",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.align(Alignment.Center),
+                        )
+                    } else {
+                        key(page.id, reloadToken) {
+                            AndroidView(
+                                factory = { ctx ->
+                                    WebView(ctx).apply {
+                                        settings.javaScriptEnabled = true
+                                        settings.domStorageEnabled = true
+                                        settings.databaseEnabled = true
+                                        settings.allowFileAccess = false
+                                        settings.allowContentAccess = false
+                                        settings.loadWithOverviewMode = true
+                                        settings.useWideViewPort = true
+                                        settings.cacheMode = WebSettings.LOAD_DEFAULT
+                                        addJavascriptInterface(
+                                            BrowserBridge(page.id, viewModel, scope, this),
+                                            BRIDGE_NAME,
+                                        )
+                                        webViewClient = object : WebViewClient() {
+                                            override fun onPageStarted(
+                                                view: WebView,
+                                                url: String?,
+                                                favicon: android.graphics.Bitmap?,
+                                            ) {
+                                                url?.let { currentUrl = it }
+                                                loading = true
+                                                error = ""
+                                                view.evaluateJavascript(BRIDGE_SCRIPT, null)
+                                            }
+
+                                            override fun onPageFinished(view: WebView, url: String?) {
+                                                url?.let { currentUrl = it }
+                                                loading = false
+                                                view.evaluateJavascript(BRIDGE_SCRIPT, null)
+                                            }
+
+                                            override fun onReceivedError(
+                                                view: WebView,
+                                                request: WebResourceRequest,
+                                                err: WebResourceError,
+                                            ) {
+                                                // 子资源失败不影响页面本身，只看主文档。
+                                                if (!request.isForMainFrame) return
+                                                loading = false
+                                                error = "页面加载失败：${err.description}（错误码 ${err.errorCode}）"
+                                                DiagnosticsLog.w(
+                                                    "Reader",
+                                                    "承载页加载失败 id=${page.id} code=${err.errorCode} desc=${err.description}",
+                                                )
+                                            }
+
+                                            override fun onReceivedHttpError(
+                                                view: WebView,
+                                                request: WebResourceRequest,
+                                                resp: WebResourceResponse,
+                                            ) {
+                                                if (!request.isForMainFrame) return
+                                                loading = false
+                                                error = "页面返回 HTTP ${resp.statusCode}，书源登录态可能已失效"
+                                                DiagnosticsLog.w(
+                                                    "Reader",
+                                                    "承载页 HTTP 错误 id=${page.id} status=${resp.statusCode}",
+                                                )
+                                            }
+
+                                            override fun onReceivedSslError(
+                                                view: WebView,
+                                                handler: SslErrorHandler,
+                                                sslError: SslError,
+                                            ) {
+                                                // 不忽略证书错误：忽略会把书源 Cookie 暴露给中间人。
+                                                handler.cancel()
+                                                loading = false
+                                                error = "HTTPS 证书校验失败（${sslError.primaryError}），请检查服务器地址"
+                                                DiagnosticsLog.w(
+                                                    "Reader",
+                                                    "承载页证书错误 id=${page.id} primary=${sslError.primaryError}",
+                                                )
+                                            }
+
+                                            override fun shouldOverrideUrlLoading(
+                                                view: WebView,
+                                                request: WebResourceRequest,
+                                            ): Boolean {
+                                                val target = request.url.toString()
+                                                // 只允许服务端同源页面/资源；外站导航在这里拦下，
+                                                // 避免承载页把用户带到未知站点并携带页面状态。
+                                                if (target.startsWith(origin) ||
+                                                    target.startsWith("about:") ||
+                                                    target.startsWith("data:")
+                                                ) {
+                                                    return false
+                                                }
+                                                // 拦截也要说出来：页面里的「保存」如果提交到站外，
+                                                // 静默拦下会表现成「点了没反应」。
+                                                notice = "已阻止跳转到站外地址：${request.url.host ?: target}"
+                                                return true
+                                            }
+                                        }
+                                        loadUrl(pageUrl)
+                                        webView = this
+                                    }
+                                },
+                                onRelease = { view ->
+                                    view.removeJavascriptInterface(BRIDGE_NAME)
+                                    if (webView === view) webView = null
+                                    view.destroy()
+                                },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-private fun resolvePageUrl(origin: String, pageUrl: String): String {
+/**
+ * 把服务端下发的承载地址解析成 WebView 可加载的绝对地址。
+ *
+ * 正常情况 pageUrl 是 `/api/reader/browser/page?id=…&s=…`（同源相对地址）；
+ * 老版本服务端不返回 page_url 时退回 target_url，至少还能打开原始页面。
+ */
+private fun resolvePageUrl(origin: String, pageUrl: String, targetUrl: String = ""): String {
     if (pageUrl.startsWith("http://") || pageUrl.startsWith("https://")) return pageUrl
-    return origin.trimEnd('/') + (if (pageUrl.startsWith("/")) pageUrl else "/$pageUrl")
+    if (pageUrl.isNotBlank()) {
+        return origin.trimEnd('/') + (if (pageUrl.startsWith("/")) pageUrl else "/$pageUrl")
+    }
+    return targetUrl
 }
 
 private const val BRIDGE_NAME = "MeBoxAndroid"

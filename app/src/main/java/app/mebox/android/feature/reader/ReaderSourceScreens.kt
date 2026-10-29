@@ -217,11 +217,13 @@ internal fun ReaderSourcesContent(
         )
     }
 
-    if (state.sourceLoginOpen) {
-        ReaderSourceLoginSheet(state, viewModel)
-    }
     state.browserPage?.let { page ->
         ReaderBrowserPageDialog(page, origin, viewModel)
+    }
+    // 登录面板是 ModalBottomSheet（独立窗口），和承载页面的全屏 Dialog 同时存在时
+    // 后者可能拿不到可见窗口（白屏且不发请求）。页面展示期间先收起它。
+    if (state.sourceLoginOpen && state.browserPage == null) {
+        ReaderSourceLoginSheet(state, viewModel)
     }
 }
 

@@ -233,10 +233,13 @@ internal fun ReaderReadingScreen(
     if (state.infoOpen) {
         ReaderInfoSheet(state, origin, sheetPalette, viewModel)
     }
+    // 承载页面与登录面板不要同时创建窗口：登录面板是 ModalBottomSheet（自己就是一个
+    // 独立窗口），再叠一个全屏 Dialog 时后者可能拿不到可见窗口——表现是白屏、连页面
+    // 请求都不会发出。页面展示期间先收起登录面板，关掉页面后它按 state 自动回来。
     state.browserPage?.let { page ->
         ReaderBrowserPageDialog(page, origin, viewModel)
     }
-    if (state.sourceLoginOpen) {
+    if (state.sourceLoginOpen && state.browserPage == null) {
         ReaderSourceLoginSheet(state, viewModel)
     }
     if (state.originPickerOpen) {
