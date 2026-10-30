@@ -41,8 +41,31 @@ class ReaderRepository(
     suspend fun chapters(bookId: String): ApiResult<List<ReaderChapterDto>> =
         authorized { api.readerChapters(it, bookId) }.mapSuccess { it.chapters.orEmpty() }
 
-    suspend fun content(bookId: String, chapterIndex: Int): ApiResult<ReaderChapterContentDto> =
-        authorized { api.readerContent(it, bookId, chapterIndex) }
+    /**
+     * 取章节正文。
+     *
+     * [mediaDirect] 为真时请求服务端保留上游媒体地址，由 App 自己去下载音频/
+     * 漫画图片字节。是否真的直连取决于书源开关：响应里的 `mediaDirect` 为 false
+     * 时说明服务端仍给了代理地址，调用方按普通地址使用即可。
+     */
+    suspend fun content(
+        bookId: String,
+        chapterIndex: Int,
+        mediaDirect: Boolean = false,
+    ): ApiResult<ReaderChapterContentDto> =
+        authorized { api.readerContent(it, bookId, chapterIndex, mediaDirect) }
+
+    /**
+     * 直连取媒体失败后的退路：让服务端代理这一次。
+     *
+     * 直连失败常见于防盗链头不足、票失效或客户端网络被上游限流；这时不该要求
+     * 用户去改书源设置，直接按代理地址重取一章即可继续播放/阅读。
+     */
+    suspend fun contentViaProxy(
+        bookId: String,
+        chapterIndex: Int,
+    ): ApiResult<ReaderChapterContentDto> =
+        authorized { api.readerContent(it, bookId, chapterIndex, mediaDirect = false, forceProxy = true) }
 
     suspend fun saveProgress(
         bookId: String,
@@ -122,7 +145,14 @@ class ReaderRepository(
         authorized { api.readerImportSources(it, text) }.mapSuccess { it.imported }
 
     suspend fun setSourceEnabled(sourceId: String, enabled: Boolean): ApiResult<Unit> =
-        authorized { api.readerUpdateSource(it, sourceId, enabled) }.mapSuccess { }
+        authorized { api.readerUpdateSource(it, sourceId, enabled, null) }.mapSuccess { }
+
+    /**
+     * 切换书源「媒体直连」：开启后 App 自己去上游下载音频/漫画图片，
+     * 服务端只解析地址与下发请求头。关闭时恢复服务端代理。
+     */
+    suspend fun setSourceMediaDirect(sourceId: String, direct: Boolean): ApiResult<Unit> =
+        authorized { api.readerUpdateSource(it, sourceId, null, direct) }.mapSuccess { }
 
     suspend fun deleteSource(sourceId: String): ApiResult<Unit> =
         authorized { api.readerDeleteSource(it, sourceId) }.mapSuccess { }
@@ -195,8 +225,9 @@ class ReaderRepository(
     suspend fun contentBatch(
         bookId: String,
         chapterIndexes: List<Int>,
+        mediaDirect: Boolean = false,
     ): ApiResult<ReaderContentBatchDto> =
-        authorized { api.readerContentBatch(it, bookId, chapterIndexes) }
+        authorized { api.readerContentBatch(it, bookId, chapterIndexes, mediaDirect) }
 
     private suspend fun <T> authorized(block: suspend (String) -> ApiResult<T>): ApiResult<T> =
         if (offlineOnly) ApiResult.NetworkError("离线模式仅可读取本机缓存")

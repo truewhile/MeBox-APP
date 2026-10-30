@@ -117,6 +117,9 @@ class ReaderAudioEngine(
     /** 用户拖动进度条后的保护期，避免刚拖到结尾就被片尾跳过切走。 */
     private var seekGuardUntilMs = 0L
 
+    /** 当前章的音轨是否由 App 直连下载：直连失败重装时据此退回服务端代理。 */
+    private var currentChapterWentDirect = false
+
     private var repo: ReaderRepository? = null
     private var accountScope: AccountScope? = null
     private var origin: String = ""
@@ -158,7 +161,15 @@ class ReaderAudioEngine(
             if (shouldAutoReload(error)) {
                 val index = _state.value.chapterIndex
                 DiagnosticsLog.i("ReaderAudio", "自动重装本章 index=$index")
-                loadChapter(index, _state.value.positionMs.div(1000).toInt(), autoPlay = true)
+                // 重装时如果没有拿到新的直连地址，就退回服务端代理：
+                // 直连失败（防盗链头不足、票失效、上游限流）靠重装同一个地址
+                // 是好不了的，代理至少能继续播。
+                loadChapter(
+                    index,
+                    _state.value.positionMs.div(1000).toInt(),
+                    autoPlay = true,
+                    forceProxy = currentChapterWentDirect,
+                )
                 return
             }
             failChapterLoad(
@@ -572,6 +583,7 @@ class ReaderAudioEngine(
         startSec: Int,
         autoPlay: Boolean,
         providedContent: ReaderChapterContentDto? = null,
+        forceProxy: Boolean = false,
     ) {
         val currentBook = book ?: return
         val repository = repo ?: return
@@ -605,7 +617,13 @@ class ReaderAudioEngine(
         loadJob = scope.launch {
             try {
                 val content = providedContent ?: run {
-                    val result = repository.content(currentBook.id, index)
+                    // 与阅读页一致：申请直连，是否生效由服务端按书源开关决定。
+                    // forceProxy 用于直连失败后的重装：这一次直接要代理地址。
+                    val result = if (forceProxy) {
+                        repository.contentViaProxy(currentBook.id, index)
+                    } else {
+                        repository.content(currentBook.id, index, mediaDirect = true)
+                    }
                     if (!playback.isCurrent(request)) return@launch
                     when (result) {
                         is ApiResult.Success -> result.value
@@ -634,6 +652,15 @@ class ReaderAudioEngine(
                     failChapterLoad(request, index, "本章不是音频内容")
                     return@launch
                 }
+                // 直连书源：登记本章音轨的防盗链头，播放器拉流时由拦截器补上。
+                ReaderMediaHeaders.registerChapter(
+                    mediaDirect = content.mediaDirect,
+                    headers = content.directHeaders,
+                    tracks = content.tracks,
+                    images = content.images,
+                    content = content.content,
+                )
+                currentChapterWentDirect = content.mediaDirect
                 val urls = content.tracks.orEmpty()
                     .mapNotNull { ReaderUrls.resolve(currentOrigin, it) }
                 if (urls.isEmpty()) {

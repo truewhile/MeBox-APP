@@ -436,6 +436,32 @@ private fun SourceRow(
             if (state.sourceDebugId == source.id) {
                 SourceDebugPanel(source = source, state = state, viewModel = viewModel)
             }
+            // 媒体直连：部分书源的音频/图片经服务端代理容易失败，改为 App 自己去取。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "App 直连取媒体",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Text(
+                        if (source.mediaDirect) {
+                            "音频/图片由本机下载，服务端只解析地址"
+                        } else {
+                            "音频/图片经服务端代理下载"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = source.mediaDirect,
+                    onCheckedChange = { viewModel.setSourceMediaDirect(source, it) },
+                    enabled = !pending && source.enabled,
+                )
+            }
         }
     }
 }

@@ -231,12 +231,33 @@ class MeBoxApiClient(
     ): ApiResult<ReaderChaptersDto> =
         call { api.readerChapters(bearer(accessToken), bookId) }
 
+    /**
+     * 取章节正文。
+     *
+     * [mediaDirect] 为真时请求服务端保留上游媒体地址（音频/漫画图片），
+     * 由 App 自己下载字节；服务端是否同意还取决于该书源是否开启「媒体直连」，
+     * 未开启时响应里的 `media_direct` 仍为 false，调用方按代理地址处理即可。
+     * [forceProxy] 本次强制走服务端代理（直连失败后的退路）。
+     */
     suspend fun readerContent(
         accessToken: String,
         bookId: String,
         chapterIndex: Int,
+        mediaDirect: Boolean = false,
+        forceProxy: Boolean = false,
     ): ApiResult<ReaderChapterContentDto> =
-        call { api.readerContent(bearer(accessToken), bookId, chapterIndex) }
+        call {
+            api.readerContent(
+                bearer(accessToken),
+                bookId,
+                chapterIndex,
+                when {
+                    mediaDirect -> MEDIA_DIRECT
+                    forceProxy -> MEDIA_PROXY
+                    else -> null
+                },
+            )
+        }
 
     suspend fun readerSaveProgress(
         accessToken: String,
@@ -351,9 +372,15 @@ class MeBoxApiClient(
     suspend fun readerUpdateSource(
         accessToken: String,
         sourceId: String,
-        enabled: Boolean,
-    ): ApiResult<ReaderOkResponse> =
-        call { api.readerUpdateSource(bearer(accessToken), sourceId, ReaderSourceEnabledRequest(enabled)) }
+        enabled: Boolean?,
+        mediaDirect: Boolean? = null,
+    ): ApiResult<ReaderOkResponse> = call {
+        api.readerUpdateSource(
+            bearer(accessToken),
+            sourceId,
+            ReaderSourcePatchRequest(enabled = enabled, mediaDirect = mediaDirect),
+        )
+    }
 
     suspend fun readerDeleteSource(
         accessToken: String,
@@ -474,11 +501,13 @@ class MeBoxApiClient(
         accessToken: String,
         bookId: String,
         chapterIndexes: List<Int>,
+        mediaDirect: Boolean = false,
     ): ApiResult<ReaderContentBatchDto> = call {
         api.readerContentBatch(
             bearer(accessToken),
             bookId,
             ReaderContentBatchRequest(chapterIndexes),
+            if (mediaDirect) MEDIA_DIRECT else null,
         )
     }
 
@@ -565,5 +594,13 @@ class MeBoxApiClient(
         409 -> "PROGRESS_CONFLICT"
         429 -> "RATE_LIMITED"
         else -> if (status >= 500) "SERVICE_UNAVAILABLE" else "INVALID_ARGUMENT"
+    }
+
+    companion object {
+        /** 正文接口 `media` 参数取值：媒体地址直连，由 App 自行下载字节。 */
+        const val MEDIA_DIRECT = "direct"
+
+        /** 正文接口 `media` 参数取值：本次强制走服务端代理。 */
+        const val MEDIA_PROXY = "proxy"
     }
 }

@@ -14,6 +14,7 @@ import app.mebox.android.core.media.WatchProgressStore
 import app.mebox.android.core.reader.ReaderAudioCheckpointStore
 import app.mebox.android.core.reader.ReaderAudioEngine
 import app.mebox.android.core.reader.ReaderCacheStore
+import app.mebox.android.core.reader.ReaderMediaHeaderInterceptor
 import app.mebox.android.core.reader.ReaderPreferences
 import app.mebox.android.core.security.CredentialStore
 import app.mebox.android.core.security.KeystoreCredentialStore
@@ -58,14 +59,24 @@ class AppContainer(context: Context) {
         .pingInterval(20, TimeUnit.SECONDS)
         .cache(Cache(File(appContext.cacheDir, "http-cache"), HTTP_CACHE_BYTES))
         .eventListener(NetTimingListener())
+        // 书源直连媒体：把服务端下发的防盗链头/登录 Cookie 补到音频与图片请求上。
+        // 必须排在统一 UA 之前——书源常按 UA 校验，取媒体要用书源要求的 UA。
+        // 没有登记的地址原样透传，代理链路与普通接口都不受影响。
+        .addInterceptor(ReaderMediaHeaderInterceptor())
         // 统一 UA：115 直链绑定换取时的 UA，播放地址解析与播放器拉流必须
         // 一致，否则信息接口预置的直链在播放时会被 403。
         .addInterceptor { chain ->
-            chain.proceed(
-                chain.request().newBuilder()
-                    .header("User-Agent", APP_USER_AGENT)
-                    .build(),
-            )
+            val request = chain.request()
+            if (request.header("User-Agent") != null) {
+                // 书源直连媒体已按书源要求设好 UA，不能覆盖成 MeBox 的。
+                chain.proceed(request)
+            } else {
+                chain.proceed(
+                    request.newBuilder()
+                        .header("User-Agent", APP_USER_AGENT)
+                        .build(),
+                )
+            }
         }
         // 网络拦截器：在写缓存之前补齐 Cache-Control，应用拦截器做不到
         // 这一点（CacheInterceptor 在网络链更内层）。

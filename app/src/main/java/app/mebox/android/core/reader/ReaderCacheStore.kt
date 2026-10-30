@@ -181,7 +181,15 @@ class ReaderCacheStore(
                     } else line
                 }.joinToString("\n")
             } else content.content
-            val cached = content.copy(content = text, images = images, tracks = tracks)
+            // 落盘前清掉直连取媒体用的请求头：里面可能带书源登录 Cookie，
+            // 而缓存文件是本机明文；离线读取时资源已换成本地 file:// 地址，
+            // 也不再需要这些头。
+            val cached = content.copy(
+                content = text,
+                images = images,
+                tracks = tracks,
+                mediaHeaders = null,
+            )
             ensureActive()
             guardedWrite(scope, bookId, expected) {
                 writeAtomically(chapterFile(scope, bookId, chapterIndex), json.encodeToString(ReaderChapterContentDto.serializer(), cached))

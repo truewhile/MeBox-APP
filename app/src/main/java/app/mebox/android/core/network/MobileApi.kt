@@ -233,6 +233,8 @@ interface MobileApi {
         @Header("Authorization") authorization: String,
         @Path("id") bookId: String,
         @Query("chapter") chapter: Int,
+        /** 传 `direct` 让服务端保留上游媒体地址，由 App 自行下载（服务端只解析地址）。 */
+        @Query("media") media: String? = null,
     ): Response<ReaderChapterContentDto>
 
     @PUT("api/reader/books/{id}/progress")
@@ -328,7 +330,7 @@ interface MobileApi {
     suspend fun readerUpdateSource(
         @Header("Authorization") authorization: String,
         @Path("id") sourceId: String,
-        @Body request: ReaderSourceEnabledRequest,
+        @Body request: ReaderSourcePatchRequest,
     ): Response<ReaderOkResponse>
 
     @DELETE("api/reader/sources/{id}")
@@ -420,6 +422,8 @@ interface MobileApi {
         @Header("Authorization") authorization: String,
         @Path("id") bookId: String,
         @Body request: ReaderContentBatchRequest,
+        /** 与单章接口一致：`direct` 表示媒体地址直连，由 App 自己去取。 */
+        @Query("media") media: String? = null,
     ): Response<ReaderContentBatchDto>
 
     @Serializable

@@ -38,6 +38,7 @@ import kotlinx.coroutines.CancellationException
 import app.mebox.android.core.reader.ReaderParagraph
 import app.mebox.android.core.reader.ReaderPreferences
 import app.mebox.android.core.reader.ReaderRepository
+import app.mebox.android.core.reader.ReaderMediaHeaders
 import app.mebox.android.core.reader.ReaderSearchScope
 import app.mebox.android.core.reader.ReaderShelf
 import app.mebox.android.core.reader.ReaderStyle
@@ -1375,7 +1376,10 @@ class ReaderViewModel(
                 } else _state.update { it.copy(chapterLoading = false, chapterError = "本章未完整缓存，请联网下载后再阅读") }
                 return@launch
             }
-            when (val result = repo.content(book.id, index)) {
+            // 始终向服务端申请直连媒体：是否真的直连由服务端按书源开关决定，
+            // 未开启时响应里 mediaDirect 仍为 false，地址就是原来的签名代理。
+            // 这样 App 不必镜像一份书源配置，管控逻辑只留在服务端。
+            when (val result = repo.content(book.id, index, mediaDirect = true)) {
                 is ApiResult.Success -> {
                     if (token != loadToken) return@launch
                     applyChapterContent(book, index, result.value, offline = false)
@@ -1432,6 +1436,15 @@ class ReaderViewModel(
         content: ReaderChapterContentDto,
         offline: Boolean,
     ) {
+        // 直连书源：把这一章的防盗链头/登录 Cookie 登记到媒体请求上，
+        // 随后 Coil 取图与音频播放都会自动带上。代理模式在这里是空操作。
+        ReaderMediaHeaders.registerChapter(
+            mediaDirect = content.mediaDirect,
+            headers = content.directHeaders,
+            tracks = content.tracks,
+            images = content.images,
+            content = content.content,
+        )
         val paragraphs = if (content.type == "text") {
             ReaderText.parse(content.content)
         } else {
@@ -1919,6 +1932,56 @@ class ReaderViewModel(
                 is ApiResult.NetworkError -> rollbackSourceEnabled(source.id, !enabled, "网络不可用，请稍后重试")
                 ApiResult.Stale -> rollbackSourceEnabled(source.id, !enabled, "请求已失效，请重试")
             }
+        }
+    }
+
+    /**
+     * 切换书源「媒体直连」：开启后 App 自己去上游下载音频/漫画图片，
+     * 服务端只解析地址并下发所需请求头。
+     *
+     * 与启停开关一样先改界面再发请求，失败回滚。切换后已缓存的章节地址仍是
+     * 旧形态，重新进入章节时才会按新设置取。
+     */
+    fun setSourceMediaDirect(source: ReaderSourceDto, direct: Boolean) {
+        if (source.id in _state.value.sourcePendingIds) return
+        _state.update { state ->
+            state.copy(
+                sourcePendingIds = state.sourcePendingIds + source.id,
+                sourcesError = null,
+                sourcesNotice = null,
+                sources = state.sources.map {
+                    if (it.id == source.id) it.copy(mediaDirect = direct) else it
+                },
+            )
+        }
+        viewModelScope.launch {
+            when (val result = repo.setSourceMediaDirect(source.id, direct)) {
+                is ApiResult.Success -> _state.update { state ->
+                    state.copy(
+                        sourcePendingIds = state.sourcePendingIds - source.id,
+                        sourcesNotice = if (direct) {
+                            "「${source.name}」已改为 App 直连取媒体"
+                        } else {
+                            "「${source.name}」恢复服务端代理取媒体"
+                        },
+                    )
+                }
+                is ApiResult.Failure -> rollbackSourceMediaDirect(source.id, !direct, readerError(result))
+                is ApiResult.NetworkError -> rollbackSourceMediaDirect(source.id, !direct, "网络不可用，请稍后重试")
+                ApiResult.Stale -> rollbackSourceMediaDirect(source.id, !direct, "请求已失效，请重试")
+            }
+        }
+    }
+
+    private fun rollbackSourceMediaDirect(sourceId: String, direct: Boolean, error: String) {
+        _state.update { state ->
+            state.copy(
+                sourcePendingIds = state.sourcePendingIds - sourceId,
+                sourcesError = error,
+                sources = state.sources.map {
+                    if (it.id == sourceId) it.copy(mediaDirect = direct) else it
+                },
+            )
         }
     }
 
@@ -2418,11 +2481,20 @@ class ReaderViewModel(
             try {
                 indexes.chunked(20).forEach { chunk ->
                     if (cache.generation(scope, book.id) != expected) throw CancellationException("缓存代次已变化")
-                    val result = repo.contentBatch(book.id, chunk)
+                    // 与单章一致：申请直连，是否生效由服务端按书源开关决定。
+                    val result = repo.contentBatch(book.id, chunk, mediaDirect = true)
                     val items = (result as? ApiResult.Success)?.value?.items.orEmpty().associateBy { it.chapterIndex }
                     chunk.forEach { index ->
                         val item = items[index]
                         if (item != null && item.error.isBlank() && item.type.isNotBlank()) {
+                            // 直连书源：先登记防盗链头，cache.save 下载资源时才带得上。
+                            ReaderMediaHeaders.registerChapter(
+                                mediaDirect = item.mediaDirect,
+                                headers = item.mediaHeaders.orEmpty(),
+                                tracks = item.tracks,
+                                images = item.images,
+                                content = item.content,
+                            )
                             if (!(item.type == "audio" && item.hls)) {
                                 try {
                                     cache.save(scope, book.id, index, item.toChapterContent(), origin, expected)
@@ -2486,6 +2558,8 @@ class ReaderViewModel(
             imageStyle = imageStyle,
             comments = comments,
             hls = hls,
+            mediaDirect = mediaDirect,
+            mediaHeaders = mediaHeaders,
         )
 
     fun rebuildToc() {

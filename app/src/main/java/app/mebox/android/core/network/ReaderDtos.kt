@@ -109,7 +109,18 @@ data class ReaderChapterContentDto(
     val comments: List<ReaderContentCommentDto>? = null,
     val transcoding: Boolean = false,
     val hls: Boolean = false,
-)
+    /**
+     * 媒体直连：`tracks`/`images` 是上游原始地址，由 App 自己下载。
+     * 为 false（默认）时这些地址是服务端的签名代理，App 直接当播放地址用。
+     */
+    @SerialName("media_direct") val mediaDirect: Boolean = false,
+    /** 直连取媒体所需的请求头（防盗链 Referer/UA、登录 Cookie 等）。 */
+    @SerialName("media_headers") val mediaHeaders: Map<String, String>? = null,
+) {
+    /** 直连书源下取媒体的请求头；代理模式为空，此时不该附带任何书源头。 */
+    val directHeaders: Map<String, String>
+        get() = if (mediaDirect) mediaHeaders.orEmpty() else emptyMap()
+}
 
 @Serializable
 data class ReaderSearchRequest(
@@ -234,6 +245,11 @@ data class ReaderSourceDto(
     @SerialName("has_login") val hasLogin: Boolean = false,
     @SerialName("needs_browser") val needsBrowser: Boolean = false,
     val comment: String = "",
+    /**
+     * 媒体直连：允许 App 自己去上游下载音频/漫画图片，服务端只解析地址与
+     * 下发请求头。默认关闭，关闭时仍由服务端代理字节。
+     */
+    @SerialName("media_direct") val mediaDirect: Boolean = false,
 )
 
 @Serializable
@@ -247,6 +263,13 @@ data class ReaderSourceImportResponseDto(val imported: Int = 0)
 
 @Serializable
 data class ReaderSourceEnabledRequest(val enabled: Boolean)
+
+/** 书源开关补丁：只提交需要变更的字段。 */
+@Serializable
+data class ReaderSourcePatchRequest(
+    val enabled: Boolean? = null,
+    @SerialName("media_direct") val mediaDirect: Boolean? = null,
+)
 
 @Serializable
 data class ReaderSourceDebugRequest(val key: String)
@@ -387,6 +410,9 @@ data class ReaderContentBatchItemDto(
     val comments: List<ReaderContentCommentDto>? = null,
     val cached: Boolean = false,
     val error: String = "",
+    /** 同 [ReaderChapterContentDto.mediaDirect]：本章媒体地址是否由 App 直连。 */
+    @SerialName("media_direct") val mediaDirect: Boolean = false,
+    @SerialName("media_headers") val mediaHeaders: Map<String, String>? = null,
 )
 
 @Serializable
