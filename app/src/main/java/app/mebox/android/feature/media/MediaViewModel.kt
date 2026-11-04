@@ -1007,9 +1007,31 @@ class MediaViewModel(
             )
         }
         viewModelScope.launch {
+            // 剧集与观看历史不依赖详情响应，先和 mediaDetail 一起发出去。
+            // 以前它们都要等详情回来才启动，慢链路上等于白白多等一个 RTT；
+            // 而这三个请求互不依赖，并发才是正常的。
+            val episodesDeferred = async {
+                if (seriesKey != null && libraryId != null) {
+                    repo.seriesEpisodes(libraryId, seriesKey)
+                } else {
+                    repo.mediaEpisodes(mediaId)
+                }
+            }
+            val historyDeferred = async {
+                // 续播只按 media_id 匹配，不需要内嵌 media：300 条带上
+                // media 会让响应大出一个数量级，慢链路上直接超时。
+                repo.watchHistory(WATCH_HISTORY_SCAN_LIMIT, includeMedia = false)
+            }
             val detail = repo.mediaDetail(mediaId)
-            if (requestId != detailRequestId) return@launch
+            if (requestId != detailRequestId) {
+                // 已经切到别的详情页：把这两个并发请求一起收掉，别让它们白跑。
+                episodesDeferred.cancel()
+                historyDeferred.cancel()
+                return@launch
+            }
             if (detail !is ApiResult.Success) {
+                episodesDeferred.cancel()
+                historyDeferred.cancel()
                 pendingDetailPlayId = null
                 _state.update {
                     it.copy(
@@ -1048,22 +1070,10 @@ class MediaViewModel(
                     }
                 }
                 val resumeJob = launch {
-                    // 剧集与观看历史并行请求：剧集一到就先渲染选集，历史稍后
-                    // 再补「继续播放」。详情页的代表条目可能是 OVA 或特别篇，
-                    // 直接读它的 /resume 会把继续播放指到一条旧记录，因此要按
-                    // 剧集 ID 集合从历史里挑真正最新的一条。
-                    val episodesDeferred = async {
-                        if (seriesKey != null && libraryId != null) {
-                            repo.seriesEpisodes(libraryId, seriesKey)
-                        } else {
-                            repo.mediaEpisodes(mediaId)
-                        }
-                    }
-                    val historyDeferred = async {
-                        // 续播只按 media_id 匹配，不需要内嵌 media：300 条带上
-                        // media 会让响应大出一个数量级，慢链路上直接超时。
-                        repo.watchHistory(WATCH_HISTORY_SCAN_LIMIT, includeMedia = false)
-                    }
+                    // 剧集与观看历史在详情请求之前就已经发出（见上面两个
+                    // async），这里只是等结果。详情页的代表条目可能是 OVA 或
+                    // 特别篇，直接读它的 /resume 会把继续播放指到一条旧记录，
+                    // 因此要按剧集 ID 集合从历史里挑真正最新的一条。
                     // 剧集接口正常是几百毫秒；卡住时宁可先按「只有代表条目」
                     // 的集合去匹配历史，也不能让「继续播放」跟着一起等。
                     val episodesResult = withTimeoutOrNull(EPISODES_LOOKUP_TIMEOUT_MS) {
@@ -1211,13 +1221,27 @@ class MediaViewModel(
 
     fun playDetail() {
         val detail = _state.value.detail ?: return
-        // 续播目标还在解析：记住这次点击，等结果出来再起播。
-        // 直接播放代表条目会又回到 OVA，这正是之前的问题。
-        if (_state.value.detailResumeLoading) {
-            pendingDetailPlayId = detail.id
+        if (!_state.value.detailResumeLoading) {
+            playDetailNow()
             return
         }
-        playDetailNow()
+        // 续播目标还在解析：记住这次点击，解析完就按正确的那一集起播。
+        // 直接播放代表条目会又回到 OVA，这正是之前的问题。
+        if (pendingDetailPlayId == detail.id) return
+        pendingDetailPlayId = detail.id
+        // 但解析要等「剧集 + 整库观看历史」两个请求回来（慢链路上各有一个
+        // RTT，超时上限 8/12 秒），这期间按钮一直显示「正在获取续播…」、
+        // 点了也不动，比播放历史页「点一下就播」慢得多。这里只再等一小会儿，
+        // 超时就用当前已知的目标（上次本地进度 / 代表条目）起播；解析结果
+        // 仍会写回详情页，返回时看到的就是正确的续播集。
+        viewModelScope.launch {
+            withTimeoutOrNull(RESUME_PLAY_GRACE_MS) { detailResumeJob?.join() }
+            if (pendingDetailPlayId != detail.id) return@launch
+            pendingDetailPlayId = null
+            if ((_state.value.screen as? MediaScreen.Detail)?.mediaId != detail.id) return@launch
+            if (_state.value.detail?.id != detail.id) return@launch
+            playDetailNow()
+        }
     }
 
     private fun playDetailNow() {
@@ -1950,6 +1974,14 @@ class MediaViewModel(
          * 「正在获取续播…」不动；超过这个上限就按「拿不到」降级处理。
          */
         const val RESUME_LOOKUP_TIMEOUT_MS = 8_000L
+
+        /**
+         * 详情页点击播放时，等「续播目标解析」的最长时间。
+         *
+         * 解析要串上剧集与观看历史两个请求，慢链路上能拖到十几秒；超过这个
+         * 上限就先用已知目标起播，不再让按钮停在「正在获取续播…」。
+         */
+        const val RESUME_PLAY_GRACE_MS = 800L
 
         /** 选集只影响「最新一集」落在哪一条，超时后按只有代表条目处理。 */
         const val EPISODES_LOOKUP_TIMEOUT_MS = 12_000L

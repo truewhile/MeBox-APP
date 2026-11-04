@@ -45,6 +45,16 @@ internal object HttpCachePolicy {
     /** 继续观看：刚看完一集就要能立刻看到新进度。 */
     private const val CONTINUE_TTL = 20
 
+    /**
+     * 详情页的「续播扫描」（include_media=false）。
+     *
+     * 详情页每次打开都要拉 300 条历史来判断这部片子该从哪一集继续，来回
+     * 翻详情时这一段是纯重复下载。只缓存这一个变体：URL 键包含查询串，
+     * 观看历史页（include_media=true）与删除操作走另外的键，不会被盖住；
+     * 刚退出播放器的场景由本机进度兜底，不依赖这份历史的新鲜度。
+     */
+    private const val HISTORY_SCAN_TTL = 15
+
     /** 媒体详情与剧集：稳定数据，但刮削会更新。 */
     private const val DETAIL_TTL = 120
     private const val EPISODES_TTL = 300
@@ -90,6 +100,9 @@ internal object HttpCachePolicy {
                 if (last == "config") LIBRARY_TTL else DANMAKU_TTL
 
             resource == "watch-history" && segments.size == 3 && last == "continue" -> CONTINUE_TTL
+
+            resource == "watch-history" && segments.size == 2 &&
+                url.queryParameter("include_media") == "false" -> HISTORY_SCAN_TTL
 
             resource == "reader" && segments.size == 3 -> when (last) {
                 "books", "profile", "book-groups" -> READER_TTL

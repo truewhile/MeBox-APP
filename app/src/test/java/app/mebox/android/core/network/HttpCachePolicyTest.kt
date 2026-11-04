@@ -27,6 +27,8 @@ class HttpCachePolicyTest {
         assertEquals(30, ttl("/api/libraries?with_preview=1&include_total=0"))
         assertEquals(30, ttl("/api/media/recent?limit=18"))
         assertEquals(20, ttl("/api/watch-history/continue?limit=12"))
+        // 详情页的续播扫描（只带历史行）可以短缓存；带 media 的历史页列表不缓存。
+        assertEquals(15, ttl("/api/watch-history?limit=300&include_media=false"))
         assertEquals(120, ttl("/api/media/media-1"))
         assertEquals(3600, ttl("/api/media/media-1/subtitles?include_embedded=false"))
         assertEquals(300, ttl("/api/media/media-1/episodes"))
@@ -44,6 +46,7 @@ class HttpCachePolicyTest {
         assertNull(ttl("/api/media/media-1/favorite/status"))
         assertNull(ttl("/api/favourites"))
         assertNull(ttl("/api/watch-history"))
+        assertNull(ttl("/api/watch-history?limit=200&include_media=true"))
         assertNull(ttl("/api/history", post = true))
         assertNull(ttl("/api/media"))
     }
