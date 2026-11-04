@@ -636,6 +636,31 @@ private fun PlayerSurface(
         }
     }
 
+    fun playNextNow() {
+        touchControls()
+        if (request.nextEpisode == null) {
+            hint = "没有下一集"
+            return
+        }
+        report(force = true)
+        playbackEnded = false
+        autoNextCancelled = true
+        onPlayNext()
+    }
+
+    fun playPreviousNow() {
+        touchControls()
+        val previous = request.previousEpisode
+        if (previous == null) {
+            hint = "没有上一集"
+            return
+        }
+        report(force = true)
+        playbackEnded = false
+        autoNextCancelled = true
+        onSelectEpisode(previous.mediaId)
+    }
+
     /** 长按左右半屏：按设置执行倍速、慢速、连续快进/快退或上/下一集。 */
     fun beginLongPress(right: Boolean) {
         val action = if (right) uiSettings.longPressRight else uiSettings.longPressLeft
@@ -648,22 +673,11 @@ private fun PlayerSurface(
             PlayerLongPressAction.SEEK_BACK -> startHoldSeek(-1L)
             PlayerLongPressAction.NEXT_EPISODE -> {
                 longPressActive = false
-                if (request.nextEpisode != null) {
-                    playbackEnded = false
-                    autoNextCancelled = true
-                    onPlayNext()
-                } else {
-                    hint = "没有下一集"
-                }
+                playNextNow()
             }
             PlayerLongPressAction.PREVIOUS_EPISODE -> {
                 longPressActive = false
-                if (absolutePosition() > 3_000L) {
-                    seekTo(0L)
-                    hint = "已回到本集开头"
-                } else {
-                    hint = "已经是本集开头"
-                }
+                playPreviousNow()
             }
         }
     }
@@ -1206,13 +1220,6 @@ private fun PlayerSurface(
         }
     }
 
-    fun playNextNow() {
-        touchControls()
-        playbackEnded = false
-        autoNextCancelled = true
-        onPlayNext()
-    }
-
     fun lockScreen() {
         locked = true
         controlsVisible = false
@@ -1437,7 +1444,7 @@ private fun PlayerSurface(
                 }
 
                 KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
-                    tvSeek(-absolutePosition())
+                    playPreviousNow()
                     return true
                 }
             }
@@ -1513,7 +1520,7 @@ private fun PlayerSurface(
             }
 
             KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
-                tvSeek(-absolutePosition())
+                playPreviousNow()
                 true
             }
 
@@ -1741,6 +1748,7 @@ private fun PlayerSurface(
                 durationMs = duration,
                 bufferedMs = bufferedMs,
                 isPlaying = isPlaying && !playbackEnded,
+                hasPrevious = request.previousEpisode != null,
                 hasNext = request.nextEpisode != null,
                 speedLabel = speedLabel,
                 settings = uiSettings,
@@ -1755,6 +1763,7 @@ private fun PlayerSurface(
                 onTogglePlay = { togglePlayback() },
                 onSeekBack = { seekBy(-seekBackStep) },
                 onSeekForward = { seekBy(seekForwardStep) },
+                onPlayPrevious = ::playPreviousNow,
                 onPlayNext = ::playNextNow,
                 onOpenSpeed = {
                     touchControls()

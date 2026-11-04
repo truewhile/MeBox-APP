@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -31,6 +33,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Comment
 import androidx.compose.material.icons.outlined.Bolt
@@ -47,6 +50,8 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay
 import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.SkipNext
+import androidx.compose.material.icons.outlined.SkipPrevious
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -58,6 +63,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
@@ -291,6 +297,7 @@ fun PlayerTopChrome(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PlayerBottomChrome(
     landscape: Boolean,
@@ -301,6 +308,7 @@ fun PlayerBottomChrome(
     durationMs: Long,
     bufferedMs: Long,
     isPlaying: Boolean,
+    hasPrevious: Boolean,
     hasNext: Boolean,
     speedLabel: String,
     settings: PlayerUiSettings,
@@ -309,6 +317,7 @@ fun PlayerBottomChrome(
     onTogglePlay: () -> Unit,
     onSeekBack: () -> Unit,
     onSeekForward: () -> Unit,
+    onPlayPrevious: () -> Unit,
     onPlayNext: () -> Unit,
     onOpenSpeed: () -> Unit,
     onOpenQuality: () -> Unit,
@@ -389,20 +398,23 @@ fun PlayerBottomChrome(
                 onDraggingChange = onSeekDragStateChange,
             )
             Spacer(Modifier.height(if (tv) 6.dp else 3.dp))
-            Row(
+            // 窄横屏或打开额外操作时允许换行，避免切集按钮把右侧入口挤出屏幕。
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 PlayerTransport(
                     isPlaying = isPlaying,
+                    hasPrevious = hasPrevious,
                     hasNext = hasNext,
                     onTogglePlay = onTogglePlay,
                     onSeekBack = onSeekBack,
                     onSeekForward = onSeekForward,
+                    onPlayPrevious = onPlayPrevious,
                     onPlayNext = onPlayNext,
                     playFocusRequester = playFocusRequester,
                 )
-                Spacer(Modifier.weight(1f))
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(if (tv) 12.dp else 10.dp),
@@ -467,7 +479,21 @@ fun PlayerBottomChrome(
                 onSeek = onSeek,
                 onDraggingChange = onSeekDragStateChange,
             )
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                PlayerTransport(
+                    isPlaying = isPlaying,
+                    hasPrevious = hasPrevious,
+                    hasNext = hasNext,
+                    onTogglePlay = onTogglePlay,
+                    onSeekBack = onSeekBack,
+                    onSeekForward = onSeekForward,
+                    onPlayPrevious = onPlayPrevious,
+                    onPlayNext = onPlayNext,
+                    playFocusRequester = playFocusRequester,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
@@ -564,31 +590,48 @@ fun PlayerSideChrome(
 @Composable
 private fun PlayerTransport(
     isPlaying: Boolean,
+    hasPrevious: Boolean,
     hasNext: Boolean,
     onTogglePlay: () -> Unit,
     onSeekBack: () -> Unit,
     onSeekForward: () -> Unit,
+    onPlayPrevious: () -> Unit,
     onPlayNext: () -> Unit,
     playFocusRequester: FocusRequester?,
 ) {
     val tv = LocalPlayerIsTv.current
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(if (tv) 12.dp else 6.dp),
+    ) {
+        PlayerCircleTransportButton(
+            icon = Icons.Outlined.SkipPrevious,
+            contentDescription = "上一集",
+            onClick = onPlayPrevious,
+            enabled = hasPrevious,
+            label = "上一集",
+        )
         PlayerCircleTransportButton(
             icon = Icons.Outlined.Replay,
             contentDescription = "快退",
             onClick = onSeekBack,
         )
-        Spacer(Modifier.width(if (tv) 20.dp else 14.dp))
         PlayerChromePlayButton(
             isPlaying = isPlaying,
             onClick = onTogglePlay,
             focusRequester = playFocusRequester,
         )
-        Spacer(Modifier.width(if (tv) 20.dp else 14.dp))
         PlayerCircleTransportButton(
             icon = Icons.Outlined.Refresh,
             contentDescription = "快进",
             onClick = onSeekForward,
+        )
+        PlayerCircleTransportButton(
+            icon = Icons.Outlined.SkipNext,
+            contentDescription = "下一集",
+            onClick = onPlayNext,
+            enabled = hasNext,
+            label = "下一集",
         )
     }
 }
@@ -599,6 +642,8 @@ private fun PlayerCircleTransportButton(
     icon: ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
+    enabled: Boolean = true,
+    label: String? = null,
 ) {
     val interaction = remember { MutableInteractionSource() }
     var focused by remember { mutableStateOf(false) }
@@ -606,18 +651,22 @@ private fun PlayerCircleTransportButton(
     val outerSize = if (tv) 54.dp else 44.dp
     val innerSize = if (tv) 38.dp else 30.dp
     val iconSize = if (tv) 20.dp else 16.dp
-    Box(
+    val shape = if (label == null) CircleShape else RoundedCornerShape(8.dp)
+    Column(
         modifier = Modifier
             .size(outerSize)
-            .clip(CircleShape)
-            .playerTvFocus(focused, CircleShape)
+            .alpha(if (enabled) 1f else 0.35f)
+            .clip(shape)
+            .playerTvFocus(focused, shape)
             .onFocusChanged { focused = it.isFocused }
             .clickable(
+                enabled = enabled,
                 interactionSource = interaction,
                 indication = null,
                 onClick = onClick,
             ),
-        contentAlignment = Alignment.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
     ) {
         Box(
             modifier = Modifier
@@ -630,6 +679,14 @@ private fun PlayerCircleTransportButton(
                 contentDescription = contentDescription,
                 tint = Color(0xFF161616),
                 modifier = Modifier.size(iconSize),
+            )
+        }
+        if (label != null) {
+            Text(
+                text = label,
+                color = ChromeText,
+                style = TextStyle(fontSize = 10.sp, lineHeight = 12.sp),
+                maxLines = 1,
             )
         }
     }

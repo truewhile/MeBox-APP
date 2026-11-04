@@ -131,7 +131,14 @@ data class PlaybackRequest(
     val episodes: List<PlaybackEpisode> = emptyList(),
     /** 设备解码能力说明，例如“本机没有 HEVC 解码器”。 */
     val decoderNote: String? = null,
-)
+) {
+    /** 沿用分集列表顺序；首集或当前媒体不在列表中时，不提供上一集。 */
+    val previousEpisode: PlaybackEpisode?
+        get() {
+            val index = episodes.indexOfFirst { it.mediaId == mediaId }
+            return if (index > 0) episodes[index - 1] else null
+        }
+}
 
 /**
  * 播放页的弹幕状态。渲染参数来自服务端返回的用户偏好；开关和面板调整会
