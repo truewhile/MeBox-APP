@@ -266,6 +266,7 @@ class ReaderViewModel(
 ) : ViewModel() {
 
     private val progressGeneration = progressStore.generation(scope)
+    private val preloader = repo.chapterPreloader(cache, origin)
 
     /** 退出登录会提升缓存代次；旧任务（含自动缓存）此后不得再写盘。 */
     private val cacheAccountGeneration = cache.generation(scope).account
@@ -1140,6 +1141,8 @@ class ReaderViewModel(
         pendingChapterIndex = startChapterIndex
         contentJob?.cancel()
         cacheJob?.cancel()
+        // 从悬浮条重开正在听的同一本书时保留后台窗口，避免取消后因无需重装而不再补齐。
+        if (!audio.ownsPreloader(repo) || audio.state.value.bookId != book.id) preloader.cancel()
         // 服务端进度可能落后于本地最后几秒；只在不指定起始章节时应用本地检查点。
         val localResume = if (
             book.isAudio &&
@@ -1348,6 +1351,7 @@ class ReaderViewModel(
         token: Long,
         restorePage: Int,
         notice: String? = null,
+        forceReload: Boolean = false,
     ) {
         val book = _state.value.book ?: return
         contentJob?.cancel()
@@ -1365,12 +1369,16 @@ class ReaderViewModel(
             )
         }
         contentJob = viewModelScope.launch {
+            if (forceReload) withContext(Dispatchers.IO) { cache.invalidateChapter(scope, book.id, index) }
+            // 预加载读盘也会挂起；同一本书快速连点章节时不能让旧章迟到覆盖新章。
+            fun isCurrentChapter() = token == loadToken && _state.value.book?.id == book.id &&
+                _state.value.chapterIndex == index
             if (offlineOnly) {
                 val cached = withContext(Dispatchers.IO) {
                     if (cache.status(scope, book.id, index) == ReaderCacheStatus.COMPLETE)
                         cache.read(scope, book.id, index) else null
                 }
-                if (token != loadToken) return@launch
+                if (!isCurrentChapter()) return@launch
                 if (cached != null && cached.type in setOf("text", "image")) {
                     applyChapterContent(book, index, cached.copy(comments = null), offline = true)
                 } else _state.update { it.copy(chapterLoading = false, chapterError = "本章未完整缓存，请联网下载后再阅读") }
@@ -1379,9 +1387,13 @@ class ReaderViewModel(
             // 始终向服务端申请直连媒体：是否真的直连由服务端按书源开关决定，
             // 未开启时响应里 mediaDirect 仍为 false，地址就是原来的签名代理。
             // 这样 App 不必镜像一份书源配置，管控逻辑只留在服务端。
-            when (val result = repo.content(book.id, index, mediaDirect = true)) {
+            val preloaded = if (forceReload) null else preloader.get(book, index)
+            val result = if (preloaded != null) ApiResult.Success(preloaded)
+                else repo.content(book.id, index, mediaDirect = true)
+            if (!isCurrentChapter()) return@launch
+            when (result) {
                 is ApiResult.Success -> {
-                    if (token != loadToken) return@launch
+                    if (!isCurrentChapter()) return@launch
                     applyChapterContent(book, index, result.value, offline = false)
                 }
                 is ApiResult.Failure -> {
@@ -1389,6 +1401,7 @@ class ReaderViewModel(
                     val cached = withContext(Dispatchers.IO) {
                         cache.read(scope, book.id, index)
                     }
+                    if (!isCurrentChapter()) return@launch
                     if (cached != null) {
                         applyChapterContent(book, index, cached, offline = true)
                     } else {
@@ -1407,6 +1420,7 @@ class ReaderViewModel(
                     val cached = withContext(Dispatchers.IO) {
                         cache.read(scope, book.id, index)
                     }
+                    if (!isCurrentChapter()) return@launch
                     if (cached != null) {
                         applyChapterContent(book, index, cached, offline = true)
                     } else {
@@ -1464,9 +1478,6 @@ class ReaderViewModel(
                 },
             )
         }
-        if (content.type == "text") {
-            autoCacheText(book, index, content)
-        }
         if (content.type == "audio") {
             audio.updateChapters(book.id, _state.value.chapters)
             val audioState = audio.state.value
@@ -1503,23 +1514,17 @@ class ReaderViewModel(
             // 同一本书从音频章节切到文本/漫画时停止音频，避免两个内容同时继续。
             audio.stop()
         }
+        if (!offline && content.type != "audio") {
+            preloadChapters(book, index, content)
+        }
     }
 
-    private fun autoCacheText(book: ReaderBookDto, index: Int, content: ReaderChapterContentDto) {
-        if (content.type != "text" || offlineOnly || !cacheWritable()) return
-        val expected = cache.generation(scope, book.id)
+    private fun preloadChapters(book: ReaderBookDto, index: Int, content: ReaderChapterContentDto) {
+        if (offlineOnly || !cacheWritable()) return
+        val task = preloader.preload(viewModelScope, book, _state.value.chapters, index, content)
         viewModelScope.launch {
-            val already = withContext(Dispatchers.IO) {
-                cache.hasChapter(scope, book.id, index)
-            }
-            if (!already) {
-                runCatching {
-                    withContext(Dispatchers.IO) {
-                        cache.save(scope, book.id, index, content, origin, expected)
-                    }
-                }
-                refreshCacheStatus(book.id)
-            }
+            task?.join()
+            refreshCacheStatus(book.id)
         }
     }
 
@@ -2531,6 +2536,7 @@ class ReaderViewModel(
     }
 
     fun clearBookCache() {
+        preloader.cancel()
         val current = _state.value
         val book = current.book ?: return
         if (current.cacheBusy) return
@@ -2557,12 +2563,14 @@ class ReaderViewModel(
             images = images,
             imageStyle = imageStyle,
             comments = comments,
+            transcoding = transcoding,
             hls = hls,
             mediaDirect = mediaDirect,
             mediaHeaders = mediaHeaders,
         )
 
     fun rebuildToc() {
+        preloader.cancel()
         val current = _state.value
         val book = current.book ?: return
         if (current.tocRebuilding || book.isLocal) return
@@ -2614,13 +2622,14 @@ class ReaderViewModel(
     }
 
     fun retryChapter() {
+        preloader.cancel()
         val current = _state.value
         val book = current.book ?: return
         if (current.chapters.isEmpty()) {
             openBook(book)
             return
         }
-        loadChapterContent(current.chapterIndex, loadToken, current.restorePage)
+        loadChapterContent(current.chapterIndex, loadToken, current.restorePage, forceReload = true)
     }
 
     fun stepChapter(delta: Int) {
@@ -2772,6 +2781,8 @@ class ReaderViewModel(
         persistProgress(snapshot, currentPage, syncImmediately = true)
         // 听书可能在离开阅读页后继续播放；先落一次本地位置。
         audio.persistCheckpoint(synchronous = true)
+        // 听书窗口归应用级声音引擎持有，离开页面后仍需继续预加载。
+        if (snapshot.content?.type != "audio") preloader.cancel()
         loadToken += 1
         contentJob?.cancel()
         progressJob?.cancel()
@@ -2910,6 +2921,11 @@ class ReaderViewModel(
         val chapters: List<ReaderChapterDto>,
         val error: String? = null,
     )
+
+    override fun onCleared() {
+        if (!audio.ownsPreloader(repo)) preloader.cancel()
+        super.onCleared()
+    }
 
     class Factory(
         private val repository: ReaderRepository,

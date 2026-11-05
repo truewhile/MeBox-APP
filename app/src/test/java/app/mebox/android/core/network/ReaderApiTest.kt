@@ -7,6 +7,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -124,13 +125,72 @@ class ReaderApiTest {
         assertTrue(text is ApiResult.Success)
         assertEquals("text", (text as ApiResult.Success).value.type)
         assertTrue(text.value.content.contains("第一段"))
+        assertFalse(text.value.transcoding)
         assertTrue(comic is ApiResult.Success)
         assertEquals(listOf("/api/reader/media?b=1&u=a"), (comic as ApiResult.Success).value.images)
         assertTrue(failed is ApiResult.Failure)
         assertEquals("章节缓存为空，请先在详情页刷新目录", (failed as ApiResult.Failure).message)
-        assertEquals("/api/reader/books/b1/content?chapter=1", server.takeRequest().path)
-        assertEquals("/api/reader/books/b1/content?chapter=2", server.takeRequest().path)
-        assertEquals("/api/reader/books/b1/content?chapter=3", server.takeRequest().path)
+        assertEquals("/api/reader/books/b1/content?chapter=1&audio=native", server.takeRequest().path)
+        assertEquals("/api/reader/books/b1/content?chapter=2&audio=native", server.takeRequest().path)
+        assertEquals("/api/reader/books/b1/content?chapter=3&audio=native", server.takeRequest().path)
+    }
+
+    @Test
+    fun `single content always requests native audio independently of media mode`() = runTest {
+        for (media in listOf(null, "direct", "proxy")) {
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"type":"audio","tracks":["/api/reader/media?u=a"],"transcoding":true}""",
+                ),
+            )
+
+            val result = client.readerContent(
+                "token", "b1", 4,
+                mediaDirect = media == "direct",
+                forceProxy = media == "proxy",
+            )
+
+            assertTrue(result is ApiResult.Success)
+            val content = (result as ApiResult.Success).value
+            assertTrue(content.transcoding)
+            assertFalse(content.hls)
+            val request = server.takeRequest()
+            assertEquals("GET", request.method)
+            assertEquals("Bearer token", request.getHeader("Authorization"))
+            assertEquals("/api/reader/books/b1/content", request.requestUrl?.encodedPath)
+            assertEquals("4", request.requestUrl?.queryParameter("chapter"))
+            assertEquals(listOf("native"), request.requestUrl?.queryParameterValues("audio"))
+            assertEquals(media, request.requestUrl?.queryParameter("media"))
+        }
+    }
+
+    @Test
+    fun `batch content always requests native audio independently of media mode`() = runTest {
+        for (mediaDirect in listOf(false, true)) {
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"items":[{"chapter_index":1,"type":"audio","transcoding":true},
+                                {"chapter_index":2,"type":"audio"}]}""",
+                ),
+            )
+
+            val result = client.readerContentBatch("token", "b1", listOf(1, 2), mediaDirect = mediaDirect)
+
+            assertTrue(result is ApiResult.Success)
+            val items = (result as ApiResult.Success).value.items.orEmpty()
+            assertTrue(items[0].transcoding)
+            assertFalse(items[1].transcoding)
+            assertFalse(items[0].hls)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("Bearer token", request.getHeader("Authorization"))
+            assertEquals("/api/reader/books/b1/content-batch", request.requestUrl?.encodedPath)
+            assertEquals(listOf("native"), request.requestUrl?.queryParameterValues("audio"))
+            assertEquals(if (mediaDirect) "direct" else null, request.requestUrl?.queryParameter("media"))
+            val body = json.decodeFromString<ReaderContentBatchRequest>(request.body.readUtf8())
+            assertEquals(listOf(1, 2), body.chapterIndexes)
+            assertFalse(body.applyReplace)
+        }
     }
 
     @Test
@@ -307,7 +367,7 @@ class ReaderApiTest {
         assertTrue(switched is ApiResult.Success)
         assertEquals("https://new", (switched as ApiResult.Success).value.origin)
 
-        assertEquals("/api/reader/books/b1/content-batch", server.takeRequest().path)
+        assertEquals("/api/reader/books/b1/content-batch?audio=native", server.takeRequest().path)
         val originRequest = server.takeRequest()
         assertEquals("/api/reader/books/b1/origin", originRequest.path)
         assertTrue(originRequest.body.readUtf8().contains("\"origin\":\"https://new\""))

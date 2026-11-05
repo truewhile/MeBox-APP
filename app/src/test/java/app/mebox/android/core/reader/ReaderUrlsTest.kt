@@ -40,6 +40,13 @@ class ReaderUrlsTest {
     }
 
     @Test
+    fun `java file URI single slash is preserved instead of appended to server origin`() {
+        val local = "file:/data/user/0/app/files/reader-cache/audio.mp3"
+        assertEquals(local, ReaderUrls.resolve(origin, local))
+        assertTrue(ReaderUrls.isRenderable(local))
+    }
+
+    @Test
     fun `blank urls resolve to null`() {
         assertEquals(null, ReaderUrls.resolve(origin, null))
         assertEquals(null, ReaderUrls.resolve(origin, "  "))

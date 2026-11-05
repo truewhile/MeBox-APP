@@ -75,8 +75,27 @@ class ReaderCacheStore(
         expected: ReaderCacheGeneration = generation(scope, bookId),
     ) = guardedWrite(scope, bookId, expected) {
         if (chapters.isNotEmpty()) {
+            // 本机正文按章节位置保存。目录插章/删章/重排后不能把旧位置的正文当新章。
+            val previous = readChapters(scope, bookId)
+            val mappingChanged = previous != null && (previous.size != chapters.size ||
+                previous.zip(chapters).any { (old, new) ->
+                    old.url != new.url || old.isVolume != new.isVolume ||
+                        (old.url.isBlank() && old.title != new.title)
+                })
+            if (mappingChanged) clear(scope, bookId)
             writeAtomically(File(bookDir(scope, bookId), CHAPTERS_FILE), json.encodeToString(ListSerializer(ReaderChapterDto.serializer()), chapters))
         }
+    }
+
+    /** 明确重试时移除本章及其媒体文件，防止非空但损坏的音频被再次当成完整缓存。 */
+    fun invalidateChapter(scope: AccountScope, bookId: String, chapterIndex: Int) = synchronized(writeLock) {
+        val key = scope to bookId
+        bookGenerations[key] = (bookGenerations[key] ?: 0L) + 1L
+        activeCalls.filterValues { it == key }.keys.forEach { it.cancel() }
+        chapterFile(scope, bookId, chapterIndex).delete()
+        File(bookDir(scope, bookId), "assets").listFiles().orEmpty()
+            .filter { it.name.startsWith("c$chapterIndex-") }.forEach { it.delete() }
+        Unit
     }
 
     fun readShelf(scope: AccountScope): List<ReaderBookDto>? = runCatching {
@@ -285,7 +304,7 @@ class ReaderCacheStore(
     }
     private fun extensionOf(url: String): String {
         val extension = url.substringBefore('?').substringAfterLast('/').substringAfterLast('.').lowercase()
-        return if (extension in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "mp3", "m4a", "aac", "flac", "ogg", "wav", "opus")) ".$extension" else ""
+        return if (extension in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "mp3", "m4a", "aac", "flac", "ogg", "wav", "opus", "wma", "asf", "ape", "wv", "ac3", "dts", "amr", "tta", "dsf", "dff")) ".$extension" else ""
     }
     private fun shortHash(value: String) = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray()).take(6).joinToString("") { "%02x".format(it) }

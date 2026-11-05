@@ -135,4 +135,7 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
+
+    androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }

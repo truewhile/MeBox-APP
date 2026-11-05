@@ -235,6 +235,8 @@ interface MobileApi {
         @Query("chapter") chapter: Int,
         /** 传 `direct` 让服务端保留上游媒体地址，由 App 自行下载（服务端只解析地址）。 */
         @Query("media") media: String? = null,
+        /** 传 `native` 使用 App 原生音频能力，与媒体直连/代理选择独立。 */
+        @Query("audio") audio: String? = null,
     ): Response<ReaderChapterContentDto>
 
     @PUT("api/reader/books/{id}/progress")
@@ -424,6 +426,8 @@ interface MobileApi {
         @Body request: ReaderContentBatchRequest,
         /** 与单章接口一致：`direct` 表示媒体地址直连，由 App 自己去取。 */
         @Query("media") media: String? = null,
+        /** 与单章接口一致：`native` 表示使用 App 原生音频能力。 */
+        @Query("audio") audio: String? = null,
     ): Response<ReaderContentBatchDto>
 
     @Serializable

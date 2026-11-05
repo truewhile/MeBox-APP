@@ -17,6 +17,9 @@ import androidx.media3.session.MediaSessionService
 import app.mebox.android.MeBoxApplication
 import app.mebox.android.core.network.APP_USER_AGENT
 import app.mebox.android.core.reader.ReaderAudioEngine
+import app.mebox.android.core.reader.ReaderAudioNativePlayer
+import app.mebox.android.core.reader.ReaderAudioLocalSource
+import java.io.File
 import app.mebox.android.core.reader.createReaderAudioHttpClient
 import app.mebox.android.core.storage.AppPreferences
 
@@ -31,7 +34,7 @@ import app.mebox.android.core.storage.AppPreferences
 @OptIn(UnstableApi::class)
 class ReaderAudioService : MediaSessionService() {
 
-    private var player: ExoPlayer? = null
+    private var player: Player? = null
     private var mediaSession: MediaSession? = null
     private var mixWithOtherApps = true
 
@@ -59,12 +62,17 @@ class ReaderAudioService : MediaSessionService() {
             // 这是前台媒体服务之外的必要补充（需 WAKE_LOCK 权限）。
             setWakeMode(C.WAKE_MODE_NETWORK)
         }
-        player = exoPlayer
+        val nativePlayer = ReaderAudioNativePlayer(
+            this, exoPlayer,
+            ReaderAudioLocalSource(File(cacheDir, "reader-local-audio"), createReaderAudioHttpClient(sharedHttpClient)),
+            mixWithOtherApps,
+        )
+        player = nativePlayer
         // 播放器里始终只装着当前章的音轨，媒体会话因此认为「没有下一项」，
         // 系统媒体卡片和锁屏就不显示下一章按钮。这里包一层播放器，把
         // 「本书还有上一章/下一章」翻译成播放命令，并把系统、耳机、通知栏
         // 发出的跳章命令交回声音引擎，而不是让 ExoPlayer 在播放列表里找。
-        val sessionPlayer = object : ForwardingPlayer(exoPlayer) {
+        val sessionPlayer = object : ForwardingPlayer(nativePlayer) {
             override fun getAvailableCommands(): Player.Commands {
                 val builder = Player.Commands.Builder().addAll(super.getAvailableCommands())
                 val engine = readerAudio()

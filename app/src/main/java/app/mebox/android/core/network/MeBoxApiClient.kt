@@ -256,6 +256,7 @@ class MeBoxApiClient(
                     forceProxy -> MEDIA_PROXY
                     else -> null
                 },
+                audio = "native",
             )
         }
 
@@ -508,6 +509,7 @@ class MeBoxApiClient(
             bookId,
             ReaderContentBatchRequest(chapterIndexes),
             if (mediaDirect) MEDIA_DIRECT else null,
+            audio = "native",
         )
     }
 

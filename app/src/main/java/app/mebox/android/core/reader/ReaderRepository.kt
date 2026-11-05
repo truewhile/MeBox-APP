@@ -35,6 +35,20 @@ class ReaderRepository(
     private val scope: AccountScope,
     private val offlineOnly: Boolean = false,
 ) {
+    /** 阅读页和后台声音引擎必须复用同一个窗口，不能各自重复下载。 */
+    private var preloader: ReaderChapterPreloader? = null
+    private val sessionGeneration = coordinator.currentGeneration()
+
+    fun chapterPreloader(cache: ReaderCacheStore, origin: String): ReaderChapterPreloader =
+        preloader ?: ReaderChapterPreloader(
+            cache = cache,
+            account = scope,
+            origin = origin,
+            loadContent = { bookId, index -> content(bookId, index, mediaDirect = true) },
+            enabled = !offlineOnly,
+            isSessionCurrent = { coordinator.currentGeneration() == sessionGeneration },
+        ).also { preloader = it }
+
     suspend fun shelf(fresh: Boolean = false): ApiResult<List<ReaderBookDto>> =
         authorized { api.readerBooks(it, fresh) }.mapSuccess { it.books.orEmpty() }
 

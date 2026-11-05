@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
@@ -164,11 +165,13 @@ class ReaderAudioEngine(
                 // 重装时如果没有拿到新的直连地址，就退回服务端代理：
                 // 直连失败（防盗链头不足、票失效、上游限流）靠重装同一个地址
                 // 是好不了的，代理至少能继续播。
+                repo?.chapterPreloader(cache, origin)?.cancel()
                 loadChapter(
                     index,
                     _state.value.positionMs.div(1000).toInt(),
                     autoPlay = true,
                     forceProxy = currentChapterWentDirect,
+                    forceReload = true,
                 )
                 return
             }
@@ -243,6 +246,9 @@ class ReaderAudioEngine(
         this.chapters = chapters
     }
 
+    /** 页面销毁时判断共享窗口是否仍由后台听书持有。 */
+    fun ownsPreloader(repository: ReaderRepository): Boolean = repo === repository && _state.value.active
+
     /** 只返回仍连接会话的控制器；服务被回收后旧控制器不能再发命令。 */
     private fun liveController(): MediaController? =
         controller?.takeIf { it.isConnected }
@@ -263,6 +269,9 @@ class ReaderAudioEngine(
         speed: Float,
         content: ReaderChapterContentDto? = null,
     ) {
+        if (this.repo !== repository || this.book?.id != book.id) {
+            this.repo?.chapterPreloader(cache, this.origin)?.cancel()
+        }
         this.book = book
         this.chapters = chapters
         this.repo = repository
@@ -336,6 +345,7 @@ class ReaderAudioEngine(
 
     /** 控制器断连或音轨丢失后，按最后位置重新连接并装载当前章节。 */
     private fun reloadCurrent(autoPlay: Boolean) {
+        repo?.chapterPreloader(cache, origin)?.cancel()
         if (book == null || chapters.isEmpty()) {
             _state.update { it.copy(error = "还没有可播放的章节") }
             return
@@ -345,6 +355,7 @@ class ReaderAudioEngine(
             index = index,
             startSec = (currentPositionMs() / 1_000L).toInt().coerceAtLeast(0),
             autoPlay = autoPlay,
+            forceReload = true,
         )
     }
 
@@ -540,6 +551,7 @@ class ReaderAudioEngine(
     fun stop() {
         persistCheckpoint(synchronous = true)
         loadJob?.cancel()
+        repo?.chapterPreloader(cache, origin)?.cancel()
         playback.reset()
         connectWaiters.clear()
         startupStartedAtNs = 0L
@@ -584,6 +596,7 @@ class ReaderAudioEngine(
         autoPlay: Boolean,
         providedContent: ReaderChapterContentDto? = null,
         forceProxy: Boolean = false,
+        forceReload: Boolean = false,
     ) {
         val currentBook = book ?: return
         val repository = repo ?: return
@@ -593,6 +606,7 @@ class ReaderAudioEngine(
         val request = playback.begin(autoPlay)
         val currentScope = accountScope
         val currentOrigin = origin
+        val preloader = repository.chapterPreloader(cache, currentOrigin)
         startupStartedAtNs = System.nanoTime()
         advanceGuard.beginLoad()
         _state.update {
@@ -616,7 +630,11 @@ class ReaderAudioEngine(
         DiagnosticsLog.i("ReaderAudio", "准备音轨 book=${currentBook.id} index=$index")
         loadJob = scope.launch {
             try {
-                val content = providedContent ?: run {
+                if (forceReload) withContext(Dispatchers.IO) {
+                    currentScope?.let { cache.invalidateChapter(it, currentBook.id, index) }
+                }
+                val preloaded = if (forceProxy || forceReload) null else preloader.get(currentBook, index)
+                val content = providedContent ?: preloaded ?: run {
                     // 与阅读页一致：申请直连，是否生效由服务端按书源开关决定。
                     // forceProxy 用于直连失败后的重装：这一次直接要代理地址。
                     val result = if (forceProxy) {
@@ -686,6 +704,8 @@ class ReaderAudioEngine(
                     val items = urls.mapIndexed { trackIndex, url ->
                         MediaItem.Builder()
                             .setUri(url)
+                            // 代理地址没有 .m3u8 后缀，显式类型才能直接交给本机 HLS 播放器。
+                            .setMimeType(if (content.hls) MimeTypes.APPLICATION_M3U8 else null)
                             .setMediaId("reader:${currentBook.id}:$index:$trackIndex")
                             .setMediaMetadata(metadata)
                             .build()
@@ -703,6 +723,8 @@ class ReaderAudioEngine(
                     syncPlaybackState()
                     logStartupTiming("媒体已装载")
                     startTicker()
+                    // 应用级作用域：关闭阅读页、息屏后仍滚动补齐当前章和后五章。
+                    preloader.preload(scope, currentBook, chapters, index, content)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled

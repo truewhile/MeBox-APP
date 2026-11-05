@@ -406,6 +406,7 @@ data class ReaderContentBatchItemDto(
     val tracks: List<String>? = null,
     val images: List<String>? = null,
     @SerialName("image_style") val imageStyle: String = "",
+    val transcoding: Boolean = false,
     val hls: Boolean = false,
     val comments: List<ReaderContentCommentDto>? = null,
     val cached: Boolean = false,

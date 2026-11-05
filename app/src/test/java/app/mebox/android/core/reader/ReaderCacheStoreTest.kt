@@ -154,6 +154,44 @@ class ReaderCacheStoreTest {
         assertEquals(ReaderCacheStatus.COMPLETE, cache.status(scope, "book", 0))
     }
 
+    @Test fun `changed TOC index mapping invalidates cached chapter content`() = runBlocking {
+        val cache = store(temporary.newFolder())
+        val old = listOf(
+            app.mebox.android.core.network.ReaderChapterDto(index = 0, title = "一", url = "/one"),
+            app.mebox.android.core.network.ReaderChapterDto(index = 1, title = "二", url = "/two"),
+        )
+        cache.saveChapters(scope, "book", old)
+        cache.save(scope, "book", 1, ReaderChapterContentDto(content = "第二章"), "https://server")
+        val before = cache.generation(scope, "book")
+        cache.saveChapters(scope, "book", old.map { it.copy(title = "改名" + it.title) })
+        assertEquals(before, cache.generation(scope, "book"))
+        assertTrue(cache.hasChapter(scope, "book", 1))
+        val inserted = listOf(old[0], old[1].copy(url = "/inserted"), old[1].copy(index = 2))
+        cache.saveChapters(scope, "book", inserted)
+        assertFalse(cache.hasChapter(scope, "book", 1))
+        assertNotEquals(before, cache.generation(scope, "book"))
+        assertEquals(inserted, cache.readChapters(scope, "book"))
+    }
+
+    @Test fun `invalidating damaged audio removes asset so retry can download replacement`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("not-really-audio"))
+            server.enqueue(MockResponse().setBody("replacement-audio"))
+            val cache = store(temporary.newFolder())
+            val audio = ReaderChapterContentDto(type = "audio", tracks = listOf("/track.mp3"))
+            cache.save(scope, "book", 0, audio, server.url("/").toString())
+            val damaged = File(URI(cache.read(scope, "book", 0)!!.tracks!!.single()))
+            assertTrue(damaged.exists())
+            cache.invalidateChapter(scope, "book", 0)
+            assertFalse(damaged.exists())
+            assertFalse(cache.hasChapter(scope, "book", 0))
+            cache.save(scope, "book", 0, audio, server.url("/").toString())
+            assertEquals(2, server.requestCount)
+            val replaced = File(URI(cache.read(scope, "book", 0)!!.tracks!!.single()))
+            assertEquals("replacement-audio", replaced.readText())
+        }
+    }
+
     @Test fun `failed download leaves no temporary file`() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(403))

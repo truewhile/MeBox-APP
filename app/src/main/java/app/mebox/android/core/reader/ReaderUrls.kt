@@ -15,7 +15,7 @@ object ReaderUrls {
         val lower = value.lowercase()
         return lower.startsWith("http://") ||
             lower.startsWith("https://") ||
-            lower.startsWith("file://") ||
+            lower.startsWith("file:") ||
             lower.startsWith("content://") ||
             lower.startsWith("data:image/") ||
             value.startsWith("/")
@@ -26,7 +26,7 @@ object ReaderUrls {
         if (value.isEmpty()) return null
         return when {
             value.startsWith("http://") || value.startsWith("https://") -> value
-            value.startsWith("file://") || value.startsWith("content://") -> value
+            value.startsWith("file:") || value.startsWith("content://") -> value
             value.startsWith("data:") -> value
             value.startsWith("/") -> origin.trimEnd('/') + value
             else -> origin.trimEnd('/') + "/" + value
