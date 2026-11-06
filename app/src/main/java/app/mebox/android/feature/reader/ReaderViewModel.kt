@@ -45,6 +45,8 @@ import app.mebox.android.core.reader.ReaderStyle
 import app.mebox.android.core.reader.ReaderText
 import app.mebox.android.feature.ErrorMessages
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -293,6 +295,8 @@ class ReaderViewModel(
     private var progressJob: Job? = null
     private var profileSaveJob: Job? = null
     private var browserPollJob: Job? = null
+    private val sourceLoginSession = ReaderSourceLoginSession(viewModelScope)
+    private val browserPages = ReaderBrowserPages()
     private var cacheJob: Job? = null
     private var cacheTaskToken = 0L
     private var detailTocToken = 0
@@ -1134,6 +1138,7 @@ class ReaderViewModel(
     ) {
         if (offlineOnly && book.type !in setOf(0, 2)) return
         saveProgressNow()
+        closeSourceLogin()
         cancelCacheDownload()
         loadToken += 1
         val token = loadToken
@@ -1781,29 +1786,39 @@ class ReaderViewModel(
     }
 
     fun closeBrowserPage(cancelled: Boolean = false) {
-        val page = _state.value.browserPage ?: return
-        if (cancelled) {
-            // 取消也要回传：等待 DOM 的书源 JS 会在服务端阻塞到超时，主动解除更干净。
-            viewModelScope.launch {
-                repo.browserResult(page.id, "", page.targetUrl, cancelled = true)
-            }
+        val current = _state.value
+        val page = current.browserPage ?: return
+        browserPages.finish(page, current.pendingBrowsers)
+        _state.update {
+            it.copy(browserPage = null, pendingBrowsers = browserPages.pending(it.pendingBrowsers, page.sourceId))
         }
-        _state.update { it.copy(browserPage = null) }
+        // open 模式也要解除服务端待办；先本地屏蔽，再异步通知，失败也不能反复弹回。
+        viewModelScope.launch {
+            repo.browserResult(page.id, "", page.targetUrl, cancelled = cancelled || page.mode == "wait")
+        }
     }
 
     fun submitBrowserResult(page: ReaderBrowserPageDto, html: String, url: String) {
+        if (_state.value.browserPage?.id != page.id) return
         viewModelScope.launch {
-            when (val result = repo.browserResult(page.id, html, url, cancelled = false)) {
+            val result = repo.browserResult(page.id, html, url, cancelled = false)
+            // evaluateJavascript/HTTP 回调可能晚于关闭或切换页面，不能关掉后来打开的新页。
+            if (_state.value.browserPage?.id != page.id) return@launch
+            browserPages.finish(page, _state.value.pendingBrowsers)
+            _state.update {
+                it.copy(browserPage = null, pendingBrowsers = browserPages.pending(it.pendingBrowsers, page.sourceId))
+            }
+            when (result) {
                 is ApiResult.Success -> _state.update {
-                    it.copy(browserPage = null, sourceLoginNotice = "页面操作已提交")
+                    it.copy(sourceLoginNotice = "页面操作已提交")
                 }
                 is ApiResult.Failure -> _state.update {
-                    it.copy(browserPage = null, sourceLoginError = readerError(result))
+                    it.copy(sourceLoginError = readerError(result))
                 }
                 is ApiResult.NetworkError -> _state.update {
-                    it.copy(browserPage = null, sourceLoginError = "网络不可用，页面结果未提交")
+                    it.copy(sourceLoginError = "网络不可用，页面结果未提交，请重新打开后重试")
                 }
-                ApiResult.Stale -> _state.update { it.copy(browserPage = null) }
+                ApiResult.Stale -> Unit
             }
         }
     }
@@ -1818,28 +1833,26 @@ class ReaderViewModel(
         repo.browserXhr(pageId, url, method, headers, body)
 
     private fun startBrowserPolling(sourceId: String) {
-        if (sourceId.isBlank()) return
+        if (sourceId.isBlank() || !_state.value.sourceLoginOpen ||
+            _state.value.currentSource?.id != sourceId
+        ) return
+        val session = sourceLoginSession.job ?: return
         browserPollJob?.cancel()
-        browserPollJob = viewModelScope.launch {
+        browserPollJob = viewModelScope.launch(session) {
             while (isActive) {
-                when (val result = repo.browserPending(sourceId)) {
+                val result = repo.browserPending(sourceId)
+                ensureActive()
+                when (result) {
                     is ApiResult.Success -> _state.update { current ->
-                        val active = current.browserPage
-                        // 服务端可能同时登记多个页面：上一个还在等用户操作，用户又点了
-                        // 另一个按钮（先「切换线路」再「书源设置」就是这样）。按 seq 取
-                        // 最新的那个展示——旧实现只要 active 非空就永不换页，新页面
-                        // 永远打不开，表现是「书源设置」点了没反应。
-                        val newest = result.value.maxByOrNull { it.seq }
-                        current.copy(
-                            pendingBrowsers = result.value,
-                            browserPage = when {
-                                newest == null -> active
-                                active == null -> newest
-                                newest.id == active.id -> active
-                                newest.seq > active.seq -> newest
-                                else -> active
-                            },
-                        )
+                        if (!current.sourceLoginOpen || current.currentSource?.id != sourceId) {
+                            current
+                        } else {
+                            val pending = browserPages.pending(result.value, sourceId)
+                            current.copy(
+                                pendingBrowsers = pending,
+                                browserPage = browserPages.newest(current.browserPage, pending),
+                            )
+                        }
                     }
                     else -> Unit
                 }
@@ -1869,7 +1882,7 @@ class ReaderViewModel(
     }
 
     fun closeSources() {
-        stopBrowserPolling()
+        closeSourceLogin()
         _state.update {
             it.copy(
                 screen = ReaderScreen.Shelf,
@@ -2204,9 +2217,10 @@ class ReaderViewModel(
                 sourceLoginNotice = null,
             )
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sourceLoginSession.start()) {
             val source = (repo.sources() as? ApiResult.Success)?.value
                 ?.firstOrNull { it.sourceUrl == book.origin }
+            ensureActive()
             if (source == null) {
                 _state.update {
                     it.copy(sourceLoginLoading = false, sourceLoginError = "未找到这本书对应的书源")
@@ -2233,14 +2247,16 @@ class ReaderViewModel(
                 sourceLoginNotice = null,
             )
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sourceLoginSession.start()) {
             startBrowserPolling(source.id)
             loadSourceLoginInternal(source.id)
         }
     }
 
     private suspend fun loadSourceLoginInternal(sourceId: String) {
-        when (val result = repo.sourceLogin(sourceId)) {
+        val result = repo.sourceLogin(sourceId)
+        currentCoroutineContext().ensureActive()
+        when (result) {
             is ApiResult.Success -> _state.update {
                 it.copy(
                     sourceLoginLoading = false,
@@ -2282,11 +2298,13 @@ class ReaderViewModel(
     fun submitSourceLogin(action: String? = null) {
         val current = _state.value
         val source = current.currentSource ?: return
-        val login = current.sourceLogin ?: return
-        if (current.sourceLoginBusy) return
+        val session = sourceLoginSession.job ?: return
+        if (!current.sourceLoginOpen || current.sourceLogin == null || current.sourceLoginBusy) return
         _state.update { it.copy(sourceLoginBusy = true, sourceLoginError = null, sourceLoginNotice = null) }
-        viewModelScope.launch {
-            when (val result = repo.runSourceLogin(source.id, action.orEmpty(), current.sourceLoginFields)) {
+        viewModelScope.launch(session) {
+            val result = repo.runSourceLogin(source.id, action.orEmpty(), current.sourceLoginFields)
+            ensureActive()
+            when (result) {
                 is ApiResult.Success -> {
                     val value = result.value
                     _state.update { state ->
@@ -2324,10 +2342,15 @@ class ReaderViewModel(
     }
 
     fun logoutSource() {
-        val source = _state.value.currentSource ?: return
+        val current = _state.value
+        val source = current.currentSource ?: return
+        val session = sourceLoginSession.job ?: return
+        if (!current.sourceLoginOpen || current.sourceLoginBusy) return
         _state.update { it.copy(sourceLoginBusy = true, sourceLoginError = null) }
-        viewModelScope.launch {
-            when (val result = repo.sourceLogout(source.id)) {
+        viewModelScope.launch(session) {
+            val result = repo.sourceLogout(source.id)
+            ensureActive()
+            when (result) {
                 is ApiResult.Success -> {
                     _state.update {
                         it.copy(
@@ -2353,10 +2376,13 @@ class ReaderViewModel(
     fun saveSourceLoginInfo() {
         val current = _state.value
         val source = current.currentSource ?: return
-        if (current.sourceLoginBusy) return
+        val session = sourceLoginSession.job ?: return
+        if (!current.sourceLoginOpen || current.sourceLoginBusy) return
         _state.update { it.copy(sourceLoginBusy = true, sourceLoginError = null, sourceLoginNotice = null) }
-        viewModelScope.launch {
-            when (val result = repo.saveSourceLoginInfo(source.id, current.sourceLoginFields)) {
+        viewModelScope.launch(session) {
+            val result = repo.saveSourceLoginInfo(source.id, current.sourceLoginFields)
+            ensureActive()
+            when (result) {
                 is ApiResult.Success -> _state.update {
                     it.copy(sourceLoginBusy = false, sourceLoginNotice = "已保存登录信息")
                 }
@@ -2375,10 +2401,13 @@ class ReaderViewModel(
     fun saveSourceVariable(variable: String) {
         val current = _state.value
         val source = current.currentSource ?: return
-        if (current.sourceLoginBusy) return
+        val session = sourceLoginSession.job ?: return
+        if (!current.sourceLoginOpen || current.sourceLoginBusy) return
         _state.update { it.copy(sourceLoginBusy = true, sourceLoginError = null, sourceLoginNotice = null) }
-        viewModelScope.launch {
-            when (val result = repo.saveSourceVariable(source.id, variable)) {
+        viewModelScope.launch(session) {
+            val result = repo.saveSourceVariable(source.id, variable)
+            ensureActive()
+            when (result) {
                 is ApiResult.Success -> {
                     _state.update { it.copy(sourceLoginBusy = false, sourceLoginNotice = "源变量已保存") }
                     loadSourceLoginInternal(source.id)
@@ -2395,11 +2424,14 @@ class ReaderViewModel(
     }
 
     fun closeSourceLogin() {
-        stopBrowserPolling()
+        sourceLoginSession.close()
         closeBrowserPage(cancelled = true)
+        stopBrowserPolling()
         _state.update {
             it.copy(
                 sourceLoginOpen = false,
+                sourceLoginLoading = false,
+                sourceLoginBusy = false,
                 sourceLogin = null,
                 sourceLoginFields = emptyMap(),
                 sourceLoginError = null,
@@ -2799,7 +2831,7 @@ class ReaderViewModel(
         loadToken += 1
         contentJob?.cancel()
         progressJob?.cancel()
-        stopBrowserPolling()
+        closeSourceLogin()
         _state.update {
             it.copy(
                 screen = ReaderScreen.Shelf,
