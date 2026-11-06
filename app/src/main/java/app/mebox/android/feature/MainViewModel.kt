@@ -27,6 +27,9 @@ import app.mebox.android.core.player.vr.VrProjection
 import app.mebox.android.core.player.vr.VrSettings
 import app.mebox.android.core.player.vr.VrStereo
 import app.mebox.android.di.AppContainer
+import app.mebox.android.feature.cache.ReaderStorageUiState
+import app.mebox.android.core.reader.ReaderCacheKind
+import app.mebox.android.core.reader.mergeReaderBookStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -192,6 +195,73 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         autoLoad = container.preferences.subtitlesAutoLoad,
         priority = SubtitlePriority.fromKey(container.preferences.subtitlePriority),
     )
+
+    private val _readerStorage = MutableStateFlow(ReaderStorageUiState())
+    val readerStorage: StateFlow<ReaderStorageUiState> = _readerStorage.asStateFlow()
+    private var storageJob: Job? = null
+    private var storageRequest = 0L
+
+    fun refreshReaderStorage() {
+        if (_readerStorage.value.busy) return
+        val account = (_state.value as? AppUiState.Account)?.scope ?: return
+        val token = ++storageRequest
+        storageJob?.cancel()
+        _readerStorage.value = app.mebox.android.feature.cache.ReaderStorageUiState(loading = true)
+        storageJob = viewModelScope.launch {
+            try {
+                val books = withContext(Dispatchers.IO) {
+                    app.mebox.android.core.reader.mergeReaderBookStorage(
+                        container.readerCache.listBookStorage(account),
+                        container.readerAudioLocalSource.listBookStorage(account),
+                    )
+                }
+                if (token == storageRequest && (_state.value as? AppUiState.Account)?.scope == account) {
+                    _readerStorage.value = app.mebox.android.feature.cache.ReaderStorageUiState(books = books)
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) {
+                if (token == storageRequest && (_state.value as? AppUiState.Account)?.scope == account) {
+                    _readerStorage.value = app.mebox.android.feature.cache.ReaderStorageUiState(error = "无法读取本机存储，请重试")
+                }
+            }
+        }
+    }
+
+    fun clearReaderBookStorage(bookId: String, kind: ReaderCacheKind) {
+        val account = (_state.value as? AppUiState.Account)?.scope ?: return
+        if (_readerStorage.value.busy || _readerStorage.value.books.none { it.bookId == bookId }) return
+        val token = ++storageRequest
+        storageJob?.cancel()
+        _readerStorage.value = _readerStorage.value.copy(busy = true, error = null, notice = null)
+        // 删除当前音轨前解除文件占用；不影响其它书正在播放的内容。
+        if (container.readerAudio.storageContext()?.let { it.first == account && it.second.id == bookId } == true) {
+            container.readerAudio.stop()
+        }
+        storageJob = viewModelScope.launch {
+            try {
+                val (success, books) = withContext(Dispatchers.IO) {
+                    val mainCleared = container.readerCache.clearContent(account, bookId, kind)
+                    val localCleared = if (kind != app.mebox.android.core.reader.ReaderCacheKind.DOWNLOAD) {
+                        container.readerAudioLocalSource.clearBook(account, bookId)
+                    } else true
+                    (mainCleared && localCleared) to app.mebox.android.core.reader.mergeReaderBookStorage(
+                        container.readerCache.listBookStorage(account), container.readerAudioLocalSource.listBookStorage(account),
+                    )
+                }
+                if (token == storageRequest && (_state.value as? AppUiState.Account)?.scope == account) {
+                    _readerStorage.value = app.mebox.android.feature.cache.ReaderStorageUiState(
+                        books = books, notice = if (success) "已清理所选内容" else null,
+                        error = if (success) null else "部分文件未能删除，请重试",
+                    )
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) {
+                if (token == storageRequest && (_state.value as? AppUiState.Account)?.scope == account) {
+                    _readerStorage.value = _readerStorage.value.copy(busy = false, error = "清理未完成，请重试")
+                }
+            }
+        }
+    }
 
     /** 电视端手机扫码输入服务；手机端不启动，但保留同一个入口方便共用 ViewModel。 */
     val phoneInput get() = container.phoneInput
@@ -361,10 +431,14 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             val remote = repo.logout(current.scope)
             container.watchProgress.clear(current.scope)
             container.readerAudio.stop()
+            storageRequest++
+            storageJob?.cancel()
+            _readerStorage.value = app.mebox.android.feature.cache.ReaderStorageUiState()
             container.readerAudioCheckpoints.clearAccount(current.scope)
             withContext(Dispatchers.IO) {
                 // 磁盘清理放到 IO：缓存目录删除与进度文件清理都不应阻塞界面。
                 container.readerCache.clearAccount(current.scope)
+                container.readerAudioLocalSource.clearAccount(current.scope)
                 container.readerProgress.clearAccount(current.scope)
             }
             container.preferences.clearAccount()

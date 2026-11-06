@@ -56,6 +56,40 @@ class ReaderChapterPreloaderTest {
         assertEquals((0..6).toSet(), cache.cachedIndexes(account, book.id))
     }
 
+    @Test fun `advancing trims automatic history outside previous five and keeps manual download`() = runBlocking {
+        val cache = cache()
+        val preloader = ReaderChapterPreloader(cache, account, "https://server", { _, index ->
+            ApiResult.Success(text.copy(content = "正文$index"))
+        })
+        cache.save(account, book.id, 0, text, "https://server", kind = ReaderCacheKind.DOWNLOAD)
+        for (index in 1..8) {
+            preloader.preload(this, book, chapters, index, text.copy(content = "正文$index"))!!.join()
+        }
+        assertEquals(setOf(0) + (3..12).toSet(), cache.cachedIndexes(account, book.id))
+        val storage = cache.listBookStorage(account).single()
+        assertEquals(1, storage.downloadChapters)
+        assertEquals(10, storage.automaticChapters)
+        assertEquals(book.name.ifBlank { book.id }, storage.name)
+    }
+
+    @Test fun `profile cleanup invalidates memory and late preload writes`() = runBlocking {
+        val cache = cache()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val preloader = ReaderChapterPreloader(cache, account, "https://server", { _, _ ->
+            entered.complete(Unit)
+            release.await()
+            ApiResult.Success(text)
+        })
+        val task = preloader.preload(this, book, chapters, 0, text)!!
+        entered.await()
+        cache.clearContent(account, book.id, ReaderCacheKind.AUTOMATIC)
+        release.complete(Unit)
+        task.join()
+        assertNull(preloader.get(book, 1))
+        assertTrue(cache.cachedIndexes(account, book.id).isEmpty())
+    }
+
     @Test fun `one failed chapter does not stop rest and parsing concurrency is bounded`() = runBlocking {
         val cache = cache()
         val running = AtomicInteger()

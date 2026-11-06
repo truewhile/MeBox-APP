@@ -246,6 +246,13 @@ class ReaderAudioEngine(
         this.chapters = chapters
     }
 
+    /** 本地解码缓存的账号/书籍归属；只在主线程读取，不向播放器传登录凭据。 */
+    fun storageContext(): Pair<AccountScope, ReaderBookDto>? {
+        val account = accountScope ?: return null
+        val currentBook = book ?: return null
+        return account to currentBook
+    }
+
     /** 页面销毁时判断共享窗口是否仍由后台听书持有。 */
     fun ownsPreloader(repository: ReaderRepository): Boolean = repo === repository && _state.value.active
 
@@ -552,6 +559,7 @@ class ReaderAudioEngine(
         persistCheckpoint(synchronous = true)
         loadJob?.cancel()
         repo?.chapterPreloader(cache, origin)?.cancel()
+        cache.releaseCurrent("reader-audio")
         playback.reset()
         connectWaiters.clear()
         startupStartedAtNs = 0L
@@ -711,6 +719,7 @@ class ReaderAudioEngine(
                             .build()
                     }
                     seekGuardUntilMs = System.currentTimeMillis() + SEEK_GUARD_MS
+                    currentScope?.let { cache.pinCurrent("reader-audio", it, currentBook.id, index) }
                     controller.setMediaItems(items, 0, startMs)
                     controller.setPlaybackSpeed(_state.value.speed)
                     controller.prepare()

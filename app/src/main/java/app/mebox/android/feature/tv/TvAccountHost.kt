@@ -50,6 +50,7 @@ import app.mebox.android.core.input.PhoneInputEvent
 import app.mebox.android.core.network.ServerAddress
 import app.mebox.android.feature.AppUiState
 import app.mebox.android.feature.MainViewModel
+import app.mebox.android.feature.cache.ReaderStorageDialog
 import app.mebox.android.feature.media.MainTab
 import app.mebox.android.feature.media.MediaScreen
 import app.mebox.android.feature.media.MediaViewModel
@@ -108,6 +109,7 @@ fun TvAccountHost(
     }
 
     var phonePurpose by remember { mutableStateOf<PhonePurpose?>(null) }
+    var showReaderStorage by remember(account.scope) { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         mainViewModel.phoneInput.events.collect { event ->
@@ -247,8 +249,16 @@ fun TvAccountHost(
                         phonePurpose = purpose
                     },
                     onOpenLogShare = onOpenLogShare,
+                    onOpenReaderStorage = { showReaderStorage = true },
                 )
             }
+        }
+
+        if (showReaderStorage) {
+            ReaderStorageDialog(
+                mainViewModel = mainViewModel,
+                onDismiss = { showReaderStorage = false },
+            )
         }
 
         val purpose = phonePurpose
@@ -292,6 +302,7 @@ private fun TvMainScaffold(
     decoderMode: app.mebox.android.core.player.DecoderMode,
     onOpenPhoneSearch: (PhonePurpose) -> Unit,
     onOpenLogShare: () -> Unit,
+    onOpenReaderStorage: () -> Unit,
 ) {
     val tabs = listOf(
         TvTab(MainTab.HOME, Icons.Default.Home, "首页"),
@@ -438,6 +449,7 @@ private fun TvMainScaffold(
                     onOpenFavorites = mediaViewModel::openFavorites,
                     onOpenHistory = mediaViewModel::openHistory,
                     onOpenPhoneInput = { onOpenPhoneSearch(PhonePurpose.MEDIA_SEARCH) },
+                    onOpenReaderStorage = onOpenReaderStorage,
                     onOpenLogShare = onOpenLogShare,
                     onLogout = mainViewModel::logout,
                 )

@@ -49,6 +49,8 @@ internal class ReaderAudioNativePlayer(
     private val exo: ExoPlayer,
     private val localSource: ReaderAudioLocalSource,
     initialMixWithOtherApps: Boolean,
+    private val storageContext: () -> Pair<app.mebox.android.core.model.AccountScope,
+        app.mebox.android.core.network.ReaderBookDto>? = { null },
 ) : ForwardingSimpleBasePlayer(exo) {
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -195,9 +197,14 @@ internal class ReaderAudioNativePlayer(
         updateLocks()
         invalidateState()
         val uri = items.getOrNull(itemIndex)?.localConfiguration?.uri ?: return failLocal("本章没有可播放地址")
+        val storage = storageContext()
         prepareJob = scope.launch {
             try {
-                val source = localSource.prepare(uri.toString())
+                val source = if (storage == null) localSource.prepare(uri.toString())
+                    else localSource.prepare(uri.toString(), storage.first, storage.second,
+                        items.getOrNull(itemIndex)?.mediaId?.substringBeforeLast(':')
+                            ?.substringAfterLast(':')?.toIntOrNull() ?: storage.second.durChapterIndex,
+                        items.getOrNull(itemIndex)?.mediaId?.substringAfterLast(':')?.toIntOrNull() ?: 0)
                 if (token != version || !localMode) return@launch
                 installVlc(source, token)
             } catch (cancelled: CancellationException) {

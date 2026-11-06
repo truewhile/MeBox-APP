@@ -53,6 +53,7 @@ class ReaderChapterPreloader(
     private data class Entry(val content: ReaderChapterContentDto, val savedAt: Long)
 
     private val lock = Any()
+    private val storageOwner = "preloader:${System.identityHashCode(this)}"
     private val accountGeneration = cache.generation(account).account
     private var session: Session? = null
     private var request = 0L
@@ -100,6 +101,16 @@ class ReaderChapterPreloader(
             entries[current] = Entry(content, clock())
             val token = ++request
             scope.launch {
+                // 维护窗口会撤销旧写入；保留本轮返回的新代次，但绝不能越过用户清理产生的代次。
+                val updated = withContext(ioDispatcher) {
+                    if (!valid(token, next)) return@withContext null
+                    val generation = cache.maintainWindow(account, book, chapters, current, next.generation, owner = storageOwner)
+                    next.copy(generation = generation)
+                } ?: return@launch
+                synchronized(lock) {
+                    if (request == token && session == next) session = updated
+                }
+                if (!valid(token, updated)) return@launch
                 // 地址先到内存，媒体下载慢也不阻塞换章时复用已解析的结果。
                 val semaphore = Semaphore(2)
                 coroutineScope {
@@ -107,13 +118,13 @@ class ReaderChapterPreloader(
                         async {
                             semaphore.withPermit {
                                 try {
-                                    if (!valid(token, next)) return@withPermit null
+                                    if (!valid(token, updated)) return@withPermit null
                                     val ready = get(book, index) ?: when (val result = loadContent(book.id, index)) {
                                         is ApiResult.Success -> result.value
                                         else -> null
                                     }
                                     ensureActive()
-                                    if (ready != null && valid(token, next)) {
+                                    if (ready != null && valid(token, updated)) {
                                         synchronized(lock) {
                                             val previous = entries[index]
                                             if (request == token && (previous?.content != ready ||
@@ -136,13 +147,13 @@ class ReaderChapterPreloader(
                     for (deferred in resolved) {
                         val (index, ready) = deferred.await() ?: continue
                         ensureActive()
-                        if (!valid(token, next)) return@coroutineScope
+                        if (!valid(token, updated)) return@coroutineScope
                         try {
                             if (withContext(ioDispatcher) { cache.hasChapter(account, book.id, index) }) continue
                             ReaderMediaHeaders.registerChapter(
                                 ready.mediaDirect, ready.directHeaders, ready.tracks, ready.images, ready.content,
                             )
-                            cache.save(account, book.id, index, ready, origin, next.generation)
+                            cache.save(account, book.id, index, ready, origin, updated.generation, kind = ReaderCacheKind.AUTOMATIC)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (error: Exception) {
@@ -166,6 +177,7 @@ class ReaderChapterPreloader(
         job = null
         session = null
         entries.clear()
+        cache.releaseCurrent(storageOwner)
     }
 
     private companion object {

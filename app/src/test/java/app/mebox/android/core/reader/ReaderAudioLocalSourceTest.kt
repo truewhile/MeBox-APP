@@ -1,5 +1,8 @@
 package app.mebox.android.core.reader
 
+import app.mebox.android.core.model.AccountScope
+import app.mebox.android.core.network.ReaderBookDto
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -52,6 +55,23 @@ class ReaderAudioLocalSourceTest {
             return error as T
         }
         throw AssertionError("Expected ${T::class.java.simpleName}")
+    }
+
+    @Test fun `same chapter track ticket refresh replaces only that track variant`() = runBlocking {
+        MockWebServer().use { server ->
+            repeat(3) { server.enqueue(MockResponse().setBody("audio-$it")) }
+            val root = temporary.newFolder()
+            val source = ReaderAudioLocalSource(root, client())
+            val account = app.mebox.android.core.model.AccountScope("server", "user")
+            val book = app.mebox.android.core.network.ReaderBookDto("book", name = "书")
+            val first = File(URI(source.prepare(server.url("/a.wma?ticket=one").toString(), account, book, 3, 0)))
+            val other = File(URI(source.prepare(server.url("/b.wma").toString(), account, book, 3, 1)))
+            val refreshed = File(URI(source.prepare(server.url("/a.wma?ticket=two").toString(), account, book, 3, 0)))
+            assertFalse(first.exists())
+            assertTrue(other.exists())
+            assertTrue(refreshed.exists())
+            assertEquals(1, source.listBookStorage(account).single().automaticChapters)
+        }
     }
 
     @Test fun `local URIs pass through without even creating the cache directory`() = runBlocking {
@@ -335,6 +355,245 @@ class ReaderAudioLocalSourceTest {
                 assertTrue(withTimeout(2_000) { task.await() }.isFailure)
                 assertTrue(root.listFiles()!!.isEmpty())
             }
+        }
+    }
+
+    @Test fun `book sources are attributed privately and survive restart without secrets`() = runBlocking {
+        MockWebServer().use { server ->
+            val root = temporary.newFolder()
+            val shared = client()
+            val source = ReaderAudioLocalSource(root, shared)
+            val account = AccountScope("server/../one", "user/one")
+            val book = ReaderBookDto("book/../one", name = "My book", origin = "secret-origin",
+                bookUrl = "https://secret-book-url", coverUrl = "https://secret-cover", durChapterIndex = 7)
+            val url = server.url("/track.wma?token=secret-url-token").toString()
+            server.enqueue(MockResponse().setBody("complete audio"))
+            val file = File(URI(source.prepare(url, account, book)))
+            val trackDir = file.parentFile!!
+            val chapterDir = trackDir.parentFile!!
+            val bookDir = chapterDir.parentFile!!
+            assertEquals("t0", trackDir.name)
+            assertEquals("c7", chapterDir.name)
+            assertTrue(bookDir.name.matches(Regex("[a-f0-9]{64}")))
+            assertTrue(bookDir.parentFile!!.name.matches(Regex("[a-f0-9]{64}")))
+            assertEquals(root.canonicalFile, bookDir.parentFile!!.parentFile!!.canonicalFile)
+            assertEquals(file.toURI().toString(), source.prepare(url, account, book))
+            assertEquals(1, server.requestCount)
+            val metadata = File(bookDir, "book.json").readText()
+            val fields = kotlinx.serialization.json.Json.parseToJsonElement(metadata)
+                as kotlinx.serialization.json.JsonObject
+            assertEquals(setOf("id", "name", "serverId", "userId"), fields.keys)
+            root.walkTopDown().filter { it.isFile }.forEach {
+                val text = it.name + it.readText()
+                listOf("secret-url-token", "secret-origin", "secret-book-url", "secret-cover").forEach { secret ->
+                    assertFalse(text.contains(secret))
+                }
+            }
+            val restarted = ReaderAudioLocalSource(root, shared)
+            val stats = restarted.listBookStorage(account).single()
+            assertEquals(book.id, stats.bookId)
+            assertEquals(book.name, stats.name)
+            assertEquals(root.walkTopDown().filter { it.isFile }.sumOf { it.length() }, stats.automaticBytes)
+            assertEquals(1, stats.automaticChapters)
+            assertEquals(0L, stats.downloadBytes)
+            assertEquals(0, stats.downloadChapters)
+            assertTrue(restarted.listBookStorage(account.copy(userId = "other")).isEmpty())
+        }
+    }
+
+    @Test fun `attributed local URIs are not copied or counted twice`() = runBlocking {
+        val root = temporary.newFolder()
+        val existing = temporary.newFile("manual.wma").apply { writeText("manual download") }
+        val source = ReaderAudioLocalSource(root, client())
+        val account = AccountScope("server", "user")
+        val book = ReaderBookDto("book")
+        listOf(existing.toURI().toString(), "content://reader/manual/1").forEach {
+            assertEquals(it, source.prepare(it, account, book))
+            assertEquals(it, source.prepare(it, account, book, 42))
+        }
+        assertTrue(source.listBookStorage(account).isEmpty())
+        assertTrue(root.listFiles()!!.isEmpty())
+        assertTrue(source.clearBook(account, book.id))
+        assertTrue(source.clearAccount(account))
+        assertTrue(existing.exists())
+    }
+
+    @Test fun `selective cleanup isolates accounts books and unowned legacy audio`() = runBlocking {
+        MockWebServer().use { server ->
+            val root = temporary.newFolder()
+            val source = ReaderAudioLocalSource(root, client())
+            val account = AccountScope("server", "one")
+            val other = AccountScope("server", "two")
+            val otherServer = AccountScope("other-server", "one")
+            val first = ReaderBookDto("first", name = "First")
+            val second = ReaderBookDto("second", name = "Second")
+            val url = server.url("/audio.ape").toString()
+            repeat(5) { server.enqueue(MockResponse().setBody("audio")) }
+            val legacy = File(URI(source.prepare(url)))
+            val owned = File(URI(source.prepare(url, account, first)))
+            val secondBook = File(URI(source.prepare(url, account, second)))
+            val otherAccount = File(URI(source.prepare(url, other, first)))
+            val anotherServer = File(URI(source.prepare(url, otherServer, first)))
+            assertEquals(3, source.listBookStorage(account).size)
+            val legacyStats = source.listBookStorage(account).single { it.bookId == ReaderAudioLocalSource.LEGACY_BOOK_ID }
+            assertEquals(legacy.length(), legacyStats.automaticBytes)
+            assertTrue(source.clearBook(account, first.id))
+            assertFalse(owned.exists())
+            assertTrue(secondBook.exists())
+            assertTrue(otherAccount.exists())
+            assertTrue(source.clearAccount(account))
+            assertFalse(secondBook.exists())
+            assertTrue(otherAccount.exists())
+            assertTrue(anotherServer.exists())
+            assertTrue(legacy.exists())
+            assertTrue(source.clearBook(account, ReaderAudioLocalSource.LEGACY_BOOK_ID))
+            assertFalse(legacy.exists())
+            source.invalidate(url)
+            assertFalse(otherAccount.exists())
+            assertFalse(anotherServer.exists())
+            assertTrue(source.listBookStorage(other).isEmpty())
+        }
+    }
+
+    @Test fun `book and account clear cancel active attributed downloads without late files`() = runBlocking {
+        MockWebServer().use { server ->
+            val root = temporary.newFolder()
+            val source = ReaderAudioLocalSource(root, client())
+            val account = AccountScope("server", "user")
+            val book = ReaderBookDto("book")
+            repeat(2) { index ->
+                server.enqueue(MockResponse().setBody("late audio").setBodyDelay(1, TimeUnit.SECONDS))
+                val task = async(Dispatchers.Default) {
+                    runCatching { source.prepare(server.url("/late-$index.wma").toString(), account, book) }
+                }
+                assertNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+                if (index == 0) assertTrue(source.clearBook(account, book.id))
+                else assertTrue(source.clearAccount(account))
+                assertTrue(withTimeout(2_000) { task.await() }.isFailure)
+                assertTrue(source.listBookStorage(account).isEmpty())
+                assertTrue(root.walkTopDown().none { it.isFile })
+            }
+            server.enqueue(MockResponse().setBody("fresh"))
+            assertEquals("fresh", File(URI(source.prepare(server.url("/fresh.wma").toString(), account, book))).readText())
+            source.clear()
+            assertTrue(source.listBookStorage(account).isEmpty())
+        }
+    }
+
+    @Test fun `selective clear during attributed body streaming cleans partials and permits retry`() = runBlocking {
+        MockWebServer().use { server ->
+            val root = temporary.newFolder()
+            val source = ReaderAudioLocalSource(root, client())
+            val account = AccountScope("server", "user")
+            val book = ReaderBookDto("book")
+            repeat(2) { index ->
+                server.enqueue(MockResponse().setBody(Buffer().write(ByteArray(128 * 1024) { 42 }))
+                    .throttleBody(1024, 1, TimeUnit.SECONDS))
+                val task = async(Dispatchers.Default) {
+                    runCatching { source.prepare(server.url("/stream-$index.wma").toString(), account, book) }
+                }
+                assertNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+                withTimeout(3_000) {
+                    while (root.walkTopDown().none { it.extension == "part" && it.length() > 0 }) delay(10)
+                }
+                // 清理无关账号/书不能中断当前请求。
+                assertTrue(source.clearAccount(account.copy(userId = "other")))
+                assertTrue(source.clearBook(account, "other-book"))
+                assertFalse(task.isCompleted)
+                if (index == 0) assertTrue(source.clearBook(account, book.id))
+                else assertTrue(source.clearAccount(account))
+                assertTrue(withTimeout(2_000) { task.await() }.isFailure)
+                assertTrue(root.walkTopDown().none { it.isFile })
+            }
+            server.enqueue(MockResponse().setBody("retried"))
+            assertEquals("retried", File(URI(source.prepare(server.url("/retry.wma").toString(), account, book))).readText())
+        }
+    }
+
+    @Test fun `clear also invalidates attributed work queued behind another download`() = runBlocking {
+        MockWebServer().use { server ->
+            val source = ReaderAudioLocalSource(temporary.newFolder(), client())
+            val account = AccountScope("server", "user")
+            val first = ReaderBookDto("first")
+            val queuedBook = ReaderBookDto("queued")
+            server.enqueue(MockResponse().setBody("first audio").setBodyDelay(1, TimeUnit.SECONDS))
+            val running = async(Dispatchers.Default) { source.prepare(server.url("/first.wma").toString(), account, first) }
+            assertNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+            val queued = async(start = CoroutineStart.UNDISPATCHED) {
+                runCatching { source.prepare(server.url("/queued.wma").toString(), account, queuedBook) }
+            }
+            assertTrue(source.clearBook(account, queuedBook.id))
+            withTimeout(3_000) { running.await() }
+            assertTrue(withTimeout(2_000) { queued.await() }.isFailure)
+            assertEquals(1, server.requestCount)
+            assertEquals(listOf(first.id), source.listBookStorage(account).map { it.bookId })
+        }
+    }
+
+    @Test fun `book window keeps only current plus minus five and counts chapters not tracks`() = runBlocking {
+        MockWebServer().use { server ->
+            val root = temporary.newFolder()
+            val source = ReaderAudioLocalSource(root, client())
+            val account = AccountScope("server", "user")
+            val book = ReaderBookDto("book")
+            val files = (5..15).associateWith { index ->
+                server.enqueue(MockResponse().setBody("audio $index"))
+                File(URI(source.prepare(server.url("/$index.wma").toString(), account, book, index)))
+            }
+            (5..15).forEach { index ->
+                server.enqueue(MockResponse().setBody("audio $index again"))
+                source.prepare(server.url("/$index.wma").toString(), account, book, 10, index)
+            }
+            // 同一章多个分轨不能冒充多章。
+            assertEquals(6, source.listBookStorage(account).single().automaticChapters)
+            assertFalse(files.getValue(5).exists())
+            assertFalse(files.getValue(9).exists())
+            // 本轮为同章不同分轨，原始 t0 仍保留。
+            assertTrue(files.getValue(10).exists())
+            assertTrue(files.getValue(15).exists())
+            // 模拟此前在窗口两侧播放过的缓存，验证完整十一章窗口的边界。
+            val bookDir = files.getValue(10).parentFile!!.parentFile!!.parentFile!!
+            (4..9).forEach { index ->
+                val dir = File(bookDir, "c$index").apply { mkdirs() }
+                files.getValue(15).copyTo(File(dir, files.getValue(15).name))
+            }
+            source.prepare(server.url("/10.wma").toString(), account, book, 10)
+            assertEquals(11, source.listBookStorage(account).single().automaticChapters)
+            assertFalse(File(bookDir, "c4").exists())
+            assertTrue(File(bookDir, "c5").exists())
+            server.enqueue(MockResponse().setBody("jump"))
+            source.prepare(server.url("/jump.wma").toString(), account, book, 40)
+            assertEquals(1, source.listBookStorage(account).single().automaticChapters)
+            assertTrue(files.values.none { it.exists() })
+        }
+    }
+
+    @Test fun `startup removes nested partials and global cap prunes across books and flat files`() = runBlocking {
+        MockWebServer().use { server ->
+            val root = temporary.newFolder()
+            val oldest = File(root, "${"a".repeat(64)}.mp3")
+            val nested = File(root, "account/book/c3").apply { mkdirs() }
+            val newer = File(nested, "${"b".repeat(64)}.ape")
+            val newest = File(nested, "${"c".repeat(64)}.wma")
+            listOf(oldest, newer, newest).forEachIndexed { index, file ->
+                RandomAccessFile(file, "rw").use { it.setLength(MAX_BYTES) }
+                assertTrue(file.setLastModified((index + 1) * 1_000L))
+            }
+            File(nested, "interrupted.part").writeText("unfinished")
+            File(root, "interrupted.part").writeText("unfinished")
+            val source = ReaderAudioLocalSource(root, client())
+            assertFalse(oldest.exists())
+            assertTrue(newer.exists())
+            assertTrue(newest.exists())
+            assertTrue(root.walkTopDown().none { it.extension == "part" })
+            server.enqueue(MockResponse().setBody("small audio"))
+            source.prepare(server.url("/small.wma").toString(), AccountScope("server", "user"), ReaderBookDto("book"))
+            assertFalse(newer.exists())
+            assertTrue(newest.exists())
+            val completedBytes = root.walkTopDown().filter { it.isFile && it.extension != "json" }.sumOf { it.length() }
+            assertTrue(completedBytes <= 2 * MAX_BYTES)
+            source.clear()
+            assertTrue(root.walkTopDown().none { it.isFile })
         }
     }
 

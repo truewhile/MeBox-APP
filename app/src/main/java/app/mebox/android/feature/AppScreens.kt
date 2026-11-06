@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -67,6 +68,7 @@ import app.mebox.android.core.ui.MeBoxDivider
 import app.mebox.android.core.ui.MeBoxEmptyState
 import app.mebox.android.core.ui.MeBoxOutlinedButton
 import app.mebox.android.core.ui.MeBoxTextField
+import app.mebox.android.feature.cache.ReaderStorageDialog
 import app.mebox.android.feature.diagnostics.LogShareDialog
 import app.mebox.android.feature.diagnostics.rememberLogExport
 import app.mebox.android.feature.media.AccountHost
@@ -414,6 +416,7 @@ internal fun ProfileContent(
     val homeReadingBar by viewModel.homeReadingBar.collectAsStateWithLifecycle()
     val exportLogs = rememberLogExport()
     var showLogShare by remember { mutableStateOf(false) }
+    var showReaderStorage by remember(state.scope) { mutableStateOf(false) }
     val logShareUrl by viewModel.logShare.url.collectAsStateWithLifecycle()
     LaunchedEffect(showLogShare) {
         if (showLogShare) viewModel.logShare.start() else viewModel.logShare.stop()
@@ -654,6 +657,16 @@ internal fun ProfileContent(
             }
         }
 
+        Spacer(Modifier.height(12.dp))
+        MeBoxCard {
+            ProfileMenuRow(
+                icon = Icons.Default.Storage,
+                title = "缓存与下载",
+                subtitle = "管理阅读自动缓存与手动下载",
+                onClick = { showReaderStorage = true },
+            )
+        }
+
         Spacer(Modifier.height(16.dp))
         Text(
             "诊断与日志",
@@ -724,6 +737,13 @@ internal fun ProfileContent(
             }
         }
         Spacer(Modifier.height(28.dp))
+    }
+
+    if (showReaderStorage) {
+        ReaderStorageDialog(
+            mainViewModel = viewModel,
+            onDismiss = { showReaderStorage = false },
+        )
     }
 
     if (showLogShare) {

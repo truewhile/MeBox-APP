@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -1354,6 +1355,7 @@ fun TvProfileScreen(
     onOpenFavorites: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenPhoneInput: () -> Unit,
+    onOpenReaderStorage: () -> Unit,
     onOpenLogShare: () -> Unit,
     onLogout: () -> Unit,
 ) {
@@ -1447,6 +1449,14 @@ fun TvProfileScreen(
                 title = "观看历史",
                 subtitle = "继续上次的进度",
                 onClick = onOpenHistory,
+            )
+        }
+        item(key = "profile-reader-storage") {
+            TvProfileRow(
+                icon = Icons.Default.Storage,
+                title = "缓存与下载",
+                subtitle = "管理阅读自动缓存与手动下载",
+                onClick = onOpenReaderStorage,
             )
         }
         item(key = "profile-phone") {

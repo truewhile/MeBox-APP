@@ -18,8 +18,6 @@ import app.mebox.android.MeBoxApplication
 import app.mebox.android.core.network.APP_USER_AGENT
 import app.mebox.android.core.reader.ReaderAudioEngine
 import app.mebox.android.core.reader.ReaderAudioNativePlayer
-import app.mebox.android.core.reader.ReaderAudioLocalSource
-import java.io.File
 import app.mebox.android.core.reader.createReaderAudioHttpClient
 import app.mebox.android.core.storage.AppPreferences
 
@@ -64,8 +62,9 @@ class ReaderAudioService : MediaSessionService() {
         }
         val nativePlayer = ReaderAudioNativePlayer(
             this, exoPlayer,
-            ReaderAudioLocalSource(File(cacheDir, "reader-local-audio"), createReaderAudioHttpClient(sharedHttpClient)),
+            (application as MeBoxApplication).container.readerAudioLocalSource,
             mixWithOtherApps,
+            storageContext = { readerAudio()?.storageContext() },
         )
         player = nativePlayer
         // 播放器里始终只装着当前章的音轨，媒体会话因此认为「没有下一项」，

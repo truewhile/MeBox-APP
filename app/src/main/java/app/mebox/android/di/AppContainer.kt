@@ -135,7 +135,17 @@ class AppContainer(context: Context) {
     /** 应用级作用域：听书引擎在界面销毁后仍要能自动下一章与上报进度。 */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    val readerCache = ReaderCacheStore(context.applicationContext, httpClient, json)
+    // 自动缓存总预算512MiB：普通章节384MiB + 本地软解音源128MiB。
+    val readerCache = ReaderCacheStore(
+        File(appContext.filesDir, "reader-cache"), httpClient, json,
+        automaticMaxBytes = 384L * 1024 * 1024,
+    )
+
+    /** 同一份本地软解缓存供播放服务和“我的”统计/清理，避免游离的重复缓存实例。 */
+    val readerAudioLocalSource = app.mebox.android.core.reader.ReaderAudioLocalSource(
+        File(appContext.cacheDir, "reader-local-audio"),
+        app.mebox.android.core.reader.createReaderAudioHttpClient(httpClient),
+    )
 
     val readerProgress = app.mebox.android.core.reader.ReaderProgressStore(
         File(appContext.filesDir, "reader-progress"), json,

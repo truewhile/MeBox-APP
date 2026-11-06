@@ -2484,10 +2484,22 @@ class ReaderViewModel(
             var processed = 0
             val failed = indexes.toMutableSet()
             try {
+                withContext(Dispatchers.IO) { cache.registerBook(scope, book) }
                 indexes.chunked(20).forEach { chunk ->
                     if (cache.generation(scope, book.id) != expected) throw CancellationException("缓存代次已变化")
+                    // 先将已完整的自动缓存提升为下载，不因网络失败把“下载成功”的章节仍留在淘汰区。
+                    val missing = mutableListOf<Int>()
+                    for (index in chunk) {
+                        val local = withContext(Dispatchers.IO) {
+                            if (cache.hasChapter(scope, book.id, index)) cache.read(scope, book.id, index) else null
+                        }
+                        if (local != null) {
+                            cache.save(scope, book.id, index, local, origin, expected,
+                                kind = app.mebox.android.core.reader.ReaderCacheKind.DOWNLOAD)
+                        } else missing += index
+                    }
                     // 与单章一致：申请直连，是否生效由服务端按书源开关决定。
-                    val result = repo.contentBatch(book.id, chunk, mediaDirect = true)
+                    val result = if (missing.isEmpty()) null else repo.contentBatch(book.id, missing, mediaDirect = true)
                     val items = (result as? ApiResult.Success)?.value?.items.orEmpty().associateBy { it.chapterIndex }
                     chunk.forEach { index ->
                         val item = items[index]
@@ -2502,7 +2514,8 @@ class ReaderViewModel(
                             )
                             if (!(item.type == "audio" && item.hls)) {
                                 try {
-                                    cache.save(scope, book.id, index, item.toChapterContent(), origin, expected)
+                                    cache.save(scope, book.id, index, item.toChapterContent(), origin, expected,
+                                        kind = app.mebox.android.core.reader.ReaderCacheKind.DOWNLOAD)
                                 } catch (cancelled: CancellationException) { throw cancelled }
                                 catch (failure: Exception) {
                                     DiagnosticsLog.w("Reader", "章节缓存写入失败 book=${book.id} index=$index", failure)
