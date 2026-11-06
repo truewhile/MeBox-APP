@@ -1,6 +1,7 @@
 package app.mebox.android.core.reader
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -26,15 +27,39 @@ class ReaderAudioTuningTest {
     }
 
     @Test
-    fun `credits snap to five second steps and clamp`() {
-        assertEquals(0, ReaderAudioTuning.snapCreditsSeconds(2))
-        assertEquals(5, ReaderAudioTuning.snapCreditsSeconds(3))
-        assertEquals(30, ReaderAudioTuning.snapCreditsSeconds(31))
+    fun `credits keep every second and clamp`() {
+        assertEquals(1, ReaderAudioTuning.CREDITS_STEP_SECONDS)
+        for (seconds in 0..ReaderAudioTuning.CREDITS_MAX_SECONDS) {
+            assertEquals(seconds, ReaderAudioTuning.snapCreditsSeconds(seconds))
+        }
+        assertEquals(0, ReaderAudioTuning.snapCreditsSeconds(-1))
+        assertEquals(600, ReaderAudioTuning.snapCreditsSeconds(601))
         assertEquals(
             ReaderAudioTuning.CREDITS_MAX_SECONDS,
             ReaderAudioTuning.clampCreditsSeconds(10_000),
         )
         assertEquals(0, ReaderAudioTuning.clampCreditsSeconds(-8))
+    }
+
+    @Test
+    fun `credits input accepts exact seconds including zero and upper bound`() {
+        for (seconds in 0..ReaderAudioTuning.CREDITS_MAX_SECONDS) {
+            assertEquals(seconds, ReaderAudioTuning.creditsSecondsFromInput(seconds.toString()))
+        }
+        assertEquals(31, ReaderAudioTuning.creditsSecondsFromInput("0031"))
+    }
+
+    @Test
+    fun `credits input rejects empty malformed overflowing and out of range values`() {
+        listOf("", " ", "-1", "+1", "1.5", "1e2", "abc", "31秒", " 31", "601", "999999999999999")
+            .forEach { input -> assertNull(input, ReaderAudioTuning.creditsSecondsFromInput(input)) }
+    }
+
+    @Test
+    fun `non five second credits apply exactly to playback boundaries`() {
+        assertEquals(31_000L, ReaderAudioTuning.startPositionMs(31, 0L, 600_000L))
+        assertFalse(ReaderAudioTuning.isEndCreditsReached(31, 17, 582_999L, 600_000L))
+        assertTrue(ReaderAudioTuning.isEndCreditsReached(31, 17, 583_000L, 600_000L))
     }
 
     @Test

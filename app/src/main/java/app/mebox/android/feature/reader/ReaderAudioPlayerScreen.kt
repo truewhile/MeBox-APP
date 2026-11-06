@@ -28,6 +28,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -51,6 +53,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -63,6 +67,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,10 +82,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -1178,7 +1186,7 @@ private fun AudioTimerSheet(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AudioCreditsSheet(
+internal fun AudioCreditsSheet(
     openSeconds: Int,
     closeSeconds: Int,
     saving: Boolean,
@@ -1187,12 +1195,14 @@ private fun AudioCreditsSheet(
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var openDraft by remember {
-        mutableIntStateOf(ReaderAudioTuning.clampCreditsSeconds(openSeconds))
+    var openInput by rememberSaveable {
+        mutableStateOf(ReaderAudioTuning.clampCreditsSeconds(openSeconds).toString())
     }
-    var closeDraft by remember {
-        mutableIntStateOf(ReaderAudioTuning.clampCreditsSeconds(closeSeconds))
+    var closeInput by rememberSaveable {
+        mutableStateOf(ReaderAudioTuning.clampCreditsSeconds(closeSeconds).toString())
     }
+    val openDraft = ReaderAudioTuning.creditsSecondsFromInput(openInput)
+    val closeDraft = ReaderAudioTuning.creditsSecondsFromInput(closeInput)
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1214,15 +1224,17 @@ private fun AudioCreditsSheet(
                 modifier = Modifier.padding(top = 4.dp),
             )
             Spacer(Modifier.height(12.dp))
-            CreditSlider(
+            CreditSecondsControl(
                 label = "片头",
-                seconds = openDraft,
-                onValueChange = { openDraft = ReaderAudioTuning.snapCreditsSeconds(it) },
+                input = openInput,
+                onInputChange = { openInput = it },
+                enabled = !saving,
             )
-            CreditSlider(
+            CreditSecondsControl(
                 label = "片尾",
-                seconds = closeDraft,
-                onValueChange = { closeDraft = ReaderAudioTuning.snapCreditsSeconds(it) },
+                input = closeInput,
+                onInputChange = { closeInput = it },
+                enabled = !saving,
             )
             Text(
                 "片头 + 片尾超过单章时长时不会执行跳过。",
@@ -1250,8 +1262,10 @@ private fun AudioCreditsSheet(
                     Text("清除")
                 }
                 Button(
-                    onClick = { onSave(openDraft, closeDraft) },
-                    enabled = !saving,
+                    onClick = {
+                        if (openDraft != null && closeDraft != null) onSave(openDraft, closeDraft)
+                    },
+                    enabled = !saving && openDraft != null && closeDraft != null,
                     modifier = Modifier.weight(1f),
                 ) {
                     if (saving) {
@@ -1270,30 +1284,67 @@ private fun AudioCreditsSheet(
 }
 
 @Composable
-private fun CreditSlider(
+private fun CreditSecondsControl(
     label: String,
-    seconds: Int,
-    onValueChange: (Int) -> Unit,
+    input: String,
+    onInputChange: (String) -> Unit,
+    enabled: Boolean,
 ) {
+    val seconds = ReaderAudioTuning.creditsSecondsFromInput(input)
+    val focusManager = LocalFocusManager.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 8.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = PlayerText, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.weight(1f))
-            Text(
-                creditsValueLabel(seconds),
-                color = PlayerAccent,
-                style = MaterialTheme.typography.labelMedium,
-            )
-        }
+        OutlinedTextField(
+            value = input,
+            onValueChange = onInputChange,
+            enabled = enabled,
+            label = { Text("${label}跳过秒数") },
+            suffix = { Text("秒") },
+            supportingText = {
+                Text(
+                    if (seconds == null) {
+                        "请输入 0–${ReaderAudioTuning.CREDITS_MAX_SECONDS} 的整数秒"
+                    } else {
+                        "${creditsValueLabel(seconds)} · 0–${ReaderAudioTuning.CREDITS_MAX_SECONDS} 秒，滑动每档 1 秒"
+                    },
+                )
+            },
+            isError = seconds == null,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Number,
+                imeAction = ImeAction.Done,
+            ),
+            keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = PlayerText,
+                unfocusedTextColor = PlayerText,
+                focusedBorderColor = PlayerAccent,
+                unfocusedBorderColor = PlayerSecondary,
+                focusedLabelColor = PlayerAccent,
+                unfocusedLabelColor = PlayerSecondary,
+                focusedSupportingTextColor = PlayerSecondary,
+                unfocusedSupportingTextColor = PlayerSecondary,
+                focusedSuffixColor = PlayerSecondary,
+                unfocusedSuffixColor = PlayerSecondary,
+                errorTextColor = PlayerText,
+                cursorColor = PlayerAccent,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
         Slider(
-            value = seconds.toFloat(),
-            onValueChange = { onValueChange(it.roundToInt()) },
+            value = (seconds ?: 0).toFloat(),
+            onValueChange = {
+                onInputChange(ReaderAudioTuning.snapCreditsSeconds(it.roundToInt()).toString())
+            },
+            enabled = enabled,
             valueRange = 0f..ReaderAudioTuning.CREDITS_MAX_SECONDS.toFloat(),
+            // 不绘制 599 个密集刻度，仍将拖动值按整数秒吸附。
             colors = playerSliderColors(),
+            modifier = Modifier.semantics { contentDescription = "${label}跳过秒数滑杆" },
         )
     }
 }
