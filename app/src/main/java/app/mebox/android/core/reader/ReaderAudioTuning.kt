@@ -21,7 +21,7 @@ object ReaderAudioTuning {
 
     /** 片头/片尾最多可跳过的时间，以及拖动步长。 */
     const val CREDITS_MAX_SECONDS = 600
-    const val CREDITS_STEP_SECONDS = 5
+    const val CREDITS_STEP_SECONDS = 1
 
     /** 把任意倍速吸附到 [SPEED_STEP] 的整数档，并限制在上下界内。 */
     fun snapSpeed(speed: Float): Float {
@@ -39,6 +39,12 @@ object ReaderAudioTuning {
 
     /** 把片头/片尾秒数收敛到 0..[CREDITS_MAX_SECONDS]。 */
     fun clampCreditsSeconds(seconds: Int): Int = seconds.coerceIn(0, CREDITS_MAX_SECONDS)
+
+    /** 手动输入只接受范围内的整数秒；空白、非数字和越界内容交由界面提示。 */
+    fun creditsSecondsFromInput(input: String): Int? = input
+        .takeIf { it.isNotEmpty() && it.all { char -> char in '0'..'9' } }
+        ?.toIntOrNull()
+        ?.takeIf { it in 0..CREDITS_MAX_SECONDS }
 
     /** 拖动滑杆时把片头/片尾吸附到 [CREDITS_STEP_SECONDS] 的整数档。 */
     fun snapCreditsSeconds(seconds: Int): Int {
